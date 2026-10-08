@@ -1,0 +1,1529 @@
+-- join.lua (G4 Players & launch) - dormant guests in the front end, pad edge polling, the joined set,
+-- device (dis)connect events, guest bookkeeping across travel. ARCHITECTURE.md §1.3, §4.2 `join`.
+--
+-- Game/engine calls (signatures verified with scripts/reflect-func-all.py on the shipping exe):
+--   GameplayStatics:SetForceDisableSplitscreen(Object WorldContextObject, Bool bDisable)
+--   GameplayStatics:GetPlayerControllerFromID(Object WorldContextObject, Int ControllerID) -> Object
+--   GameplayStatics:CreatePlayer(Object WorldContextObject, Int ControllerId, Bool bSpawnPlayerController) -> Object
+--   GameplayStatics:RemovePlayer(Object Player, Bool bDestroyPawn)
+--   PlayerController:IsInputKeyDown(Struct Key) -> Bool                 (FKey = {KeyName = FName})
+--   Widget:SetUserFocus(Object PlayerController)                        (UWidget overload, 1 param)
+--   WidgetBlueprintLibrary:SetFocusToGameViewport()                     (static, 0 params)
+--   WidgetBlueprintLibrary:SetInputMode_GameAndUIEx(Object PlayerController, Object InWidgetToFocus,
+--     Enum InMouseLockMode, Bool bHideCursorDuringCapture, Bool bFlushInput)   5 Lua args (cfg.JoinFocusTrick "gameandui")
+--   WidgetBlueprintLibrary:SetInputMode_UIOnlyEx(Object PlayerController, Object InWidgetToFocus,
+--     Enum InMouseLockMode, Bool bFlushInput)                                  4 Lua args
+--     (reflect-func-all lists an extra "Byte UnderlyingType" before each Enum: the enum's inner property, not a param;
+--      EMouseLockMode DoNotLock = 0)
+--   Widget:HasUserFocus(Object PlayerController) -> Bool                (keeps P1's focused row on a re-apply)
+--   VehiclePawn:Start/StopInputSourceOverride_OnServer(Enum reason)     (1 param; "Byte UnderlyingType" is the enum's inner prop)
+--   hooked: GfnGameInstance:OnUserInputDeviceChanged(Enum NewConnectionState, Struct PlatformUserId, Struct InputDeviceId)
+--           flags 0x80401 (native); FPlatformUserId = {Int InternalId}; EInputDeviceConnectionState Disconnected=2 Connected=3
+--   InputDeviceLibrary (CDO /Script/Engine.Default__InputDeviceLibrary, cfg.DeviceDetectMode poll):
+--     GetAllConnectedInputDevices(out Array<FInputDeviceId> OutInputDevices) -> Int      0x4422403
+--     GetUserForInputDevice(Struct FInputDeviceId DeviceId) -> Struct FPlatformUserId     0x4022403
+--
+-- GUEST LIFECYCLE (2026-10-06 crash, crash_2026_10_06_22_02_41*.dmp + UE4SS-run2-crash.log, static analysis with
+-- scripts/sig/dis.py, rb-xref.py and the pdata/FNameNativePtrPair tables):
+--   run2: tab left 22:02:25 -> RemovePlayer x3 (ok); tab re-entered 22:02:41.6116-.6138 -> CreatePlayer x3 (all
+--   returned); AV read 0x20 at exe+0x3800ac ~1 ms later, i.e. in the NEXT engine tick, not inside the Lua call:
+--     UGameEngine::Tick (ret 0x1429dd020, called through the UE4SS EngineTick detour) -> Enhanced Input pending
+--     rebuild (0x142c0a828: flag +0x14b, vcall +0x110) -> ControlMappingsRebuiltDelegate -> ProcessEvent 0x1438bfdd4
+--     -> UInputModeManager::execOnControlMappingsRebuilt 0x140ded7bc (P_FINISH, apply 0x140ded924, then tail-jmp
+--     to Broadcast 0x14389d78c of a NATIVE multicast at InputModeManager+0x68) -> raw-method entry (devirtualised
+--     branch 0x14389d8eb: no IsSafeToExecute check) -> 0x14038007e: rax = this->[0x70] = 0, read [rax+0x20].
+--   0x14038007e is bound once, in ctor 0x14473b6da of a per-LocalPlayer native object (vtable 0x149951f20, built
+--   from the LocalPlayer's UFuseUIActionRouter: the CommonUI analog cursor): Router->Outer(LocalPlayer)->
+--   GameInstance->GetSubsystem<UUIManager>()+0xe0 (mInputModeManager)+0x68 .AddRaw(this, 0x14038007e); the handle
+--   is discarded and neither dtor (0x14453ade0, base 0x14453b690) unbinds. 0x14038007e reads this->[0x70] = the
+--   router (its Outer + 0x138 = LocalPlayer subsystems -> GetSubsystem<UEnhancedInputLocalPlayerSubsystem>).
+--   => RemovePlayer deinitialises the guest's LocalPlayer subsystems, the analog cursor is freed, and its RAW entry
+--   stays in the UIManager (GameInstance lifetime). The next InputModeManager broadcast (any control-mapping
+--   rebuild: here the re-created guests' mappings) calls into freed memory. The hazard is not "same ControllerId
+--   too soon": EVERY guest RemovePlayer leaves a dangling listener for the rest of the game process.
+--   No point in time makes a removal safe: travel/GC only frees the router too (run2: the block was reused 16 s later).
+-- Rules implemented here: a guest LocalPlayer is created once and kept until the game exits (tab switches only stop
+-- the join poll, races carry it), so creating one is an explicit opt-in (cfg.GuestOptIn): the lobby's ADD PLAYERS row
+-- (pressed twice) or F6 (pressed twice); opening the tab alone creates nothing. Then cfg.GuestCreate "connected"
+-- creates guests only for pads that are plugged in (an unknown pad state is "not plugged in" until the first device
+-- poll). RemovePlayer is never called (cfg.GuestRemoval "launch"/"always" only with cfg.GuestRemovalUnsafe: crash
+-- reproducers). A guest that is not joined blocks CONNECT and asks for a second START (its car is then the AI's and
+-- it keeps its view); guests that follow a non-couch flow get one view and AI cars (the race_enter guard). Guests
+-- also follow the game's own online Multiplayer (split-join to that server): the lobby says to restart first.
+-- A ControllerId removed in a world is never re-created in that world (CreatePlayer triggered the fatal broadcast)
+-- and after any removal every CreatePlayer is logged as a hazard.
+-- VERIFY(V-JOIN-11): 10 SPLIT SCREEN <-> other tab switches, no crash, one view, P2 still joins.
+-- VERIFY(V-JOIN-12): only with GuestRemoval "launch": a launch that removed a dormant guest survives the race load.
+
+local C        = require("consts")
+local cfg      = require("config")
+local settings = require("settings")
+local St       = require("state")
+local U        = require("util")
+
+local M = {}
+local TAG = "join"
+
+-- FKey tables, built once on first use (FName construction happens on the game thread).
+local KEYS = nil
+local function keys()
+    if KEYS == nil then
+        KEYS = {
+            A     = { KeyName = U.fname(C.KEY.A) },
+            B     = { KeyName = U.fname(C.KEY.B) },
+            Start = { KeyName = U.fname(C.KEY.Start) },
+        }
+    end
+    return KEYS
+end
+
+-- Highest guest ControllerId we manage (P1 is ControllerId 0; guests are 1 .. MaxLocalPlayers-1).
+local function maxGuestId()
+    local n = (tonumber(cfg.MaxLocalPlayers) or 4) - 1
+    if n < 0 then n = 0 elseif n > 3 then n = 3 end
+    return n
+end
+
+local function newSlot(id)
+    return { ctrlId = id, joined = false, prevA = false, prevB = false, prevStart = false,
+             createdMs = St.nowMs(), disconnected = false, leaving = false,
+             aiOverride = false }   -- aiOverride: we put the Disconnect override on this guest's car
+end
+
+-- Per-car flags (AI override / handed to the AI) belong to one race: cleared when a guest (re)joins or is kept.
+local function resetCarFlags(s)
+    s.aiOverride, s.abandoned, s.abandonPending, s.carGen = false, false, false, nil
+end
+
+local function status(text)
+    U.log(TAG, "%s", text)
+    St.emit("status", text)
+end
+
+local function phaseMod() return U.mod("phase") end
+local abandonCar           -- forward: function(slot, pc) -> bool (defined with the device helpers)
+
+---------------------------------------------------------------------------------------------------
+-- Lifecycle bookkeeping (see GUEST LIFECYCLE in the header)
+---------------------------------------------------------------------------------------------------
+
+-- cfg.GuestRemoval: "never" (default) | "launch" | "always" (pre-2026-10-07 behaviour: every tab switch removes the
+-- guests; crash reproducer only). cfg.GuestCreate: "connected" (default) | "all".
+local function removalMode()
+    local m = cfg.GuestRemoval
+    if (m == "launch" or m == "always") and cfg.GuestRemovalUnsafe == true then return m end
+    return "never"
+end
+
+-- kind "launch": a guest that must not follow us into a race / campaign flow (commit, non-couch launch guard).
+-- kind "frontend": tab switches, resync after a race, KeyboardIsP1 rebuild, "left mid-race" clean-up.
+local function removalAllowed(kind)
+    local m = removalMode()
+    if m == "always" then return true end
+    if m == "never" then return false end
+    return kind == "launch"
+end
+
+local life = {
+    enabledAtMs = nil,  -- St.nowMs() of the ADD PLAYERS opt-in (pad-state wait, see wanted)
+    f6AtMs = nil,       -- first F6 of a "create a keyboard guest" pair
+    removedIn = {},     -- ctrlId -> St.worldGen of its last RemovePlayer (never re-created in that world)
+    removedCount = 0,   -- guest RemovePlayer calls in this game process (hot-reload persisted): dangling listeners
+    nextEnsureMs = 0,   -- FAST poll: next "new pad plugged in?" check while the join session is open
+}
+
+-- Pad presence per platform user (InternalId): from the device hook (proven to fire at boot, run2-4) and the SLOW
+-- InputDeviceLibrary poll. nil = never heard of; true/false = last report.
+local padHook = {}
+local padPoll = nil        -- last successful poll: uid -> deviceId (nil until a poll succeeded)
+
+local function uidFor(id)
+    return id - ((settings.get("KeyboardIsP1") == true) and 1 or 0)
+end
+
+-- true / false, or nil when nothing at all is known about pads (no hook event, no successful poll)
+local function padConnected(id)
+    local uid = uidFor(id)
+    if padHook[uid] == false then return false end
+    if padHook[uid] == true then return true end
+    if padPoll and padPoll[uid] ~= nil then return true end
+    if next(padHook) == nil and padPoll == nil then return nil end
+    return false
+end
+
+-- Guests may be created (cfg.GuestOptIn): after ADD PLAYERS / F6, or when guests already exist (kept from a race,
+-- hot reload). Guests live until the game exits, so nothing creates one before the user asked for it.
+local function localGuestCount()
+    local n = 0
+    for _, e in ipairs(U.localPlayers()) do if e.index ~= 1 then n = n + 1 end end   -- Lua table
+    return n
+end
+
+function M.padsEnabled()
+    if cfg.GuestOptIn == false then return true end
+    if St.join.enabled == true then return true end
+    if localGuestCount() > 0 then
+        St.join.enabled = true                          -- guests exist already: the opt-in was given earlier
+        return true
+    end
+    return false
+end
+
+-- ControllerIds for which join.open keeps (or creates) a guest. An unknown pad state (no device hook event and no
+-- successful InputDeviceLibrary poll yet, e.g. right after a hot reload) is "not plugged in": every guest is
+-- permanent, so none is created on a guess. Fallback when pad presence stays unknown 5 s after the opt-in (device
+-- hook silent AND poll failing): the user asked for players, every id is wanted (logged once).
+local function wanted(id)
+    if cfg.GuestCreate == "all" then return true end
+    local c = padConnected(id)
+    if c == nil then
+        if life.enabledAtMs and St.nowMs() - life.enabledAtMs >= 5000 then
+            U.logOnce("join.padunknown", TAG, "WARN pad presence still unknown 5 s after ADD PLAYERS (no device event, "
+                .. "device poll failing): guests created for every ControllerId")
+            return true
+        end
+        return false
+    end
+    return c
+end
+
+---------------------------------------------------------------------------------------------------
+-- cfg.JoinFocusTrick "gameandui": fallback for a viewport that ignores input (V-JOIN-03)
+---------------------------------------------------------------------------------------------------
+-- DefaultGame.ini UIManager.bUseUIOnlyInputMode=True [UI§ :258/:689]. In stock UE5 FInputModeUIOnly::ApplyInputMode
+-- calls GameViewportClient.SetIgnoreInput(true), and UGameViewportClient::InputKey returns early while IgnoreInput():
+-- then NO PlayerController (guest or P1) sees a key, and Slate focus tricks ("userfocus"/"viewport") cannot help.
+-- FInputModeGameAndUI clears that flag (viewport-wide) while the widget keeps P1's Slate focus. The game applies its
+-- mode natively (UUIManager.mInputModeManager, nothing reflected), so whether it puts UI-only back cannot be read:
+-- the mode is re-applied whenever the lobby page is (re)shown and, with cfg.JoinInputModeReapplyMs > 0, periodically.
+local gameAndUI = { applied = false, lastMs = 0, lastVisible = nil, count = 0 }
+
+local function lobbyFocusTarget(p1)
+    -- RACE SETUP open (setup.lua): the lobby rows are collapsed; P1's focus is on (or returns to) a setup widget
+    local okS, sw = pcall(function() return require("setup").focusTarget() end)
+    if okS and U.ok(sw) then return sw end
+    -- the row P1 currently focuses (a re-apply must not move P1's focus), else the race row
+    for _, w in pairs(St.ui.rows or {}) do              -- Lua table (id -> widget)
+        if U.ok(w) then
+            local ok, has = pcall(function() return w:HasUserFocus(p1) end)
+            if ok and has == true then return w end
+        end
+    end
+    local race = St.ui.rows and St.ui.rows.race
+    if U.ok(race) then return race end
+    return nil                                          -- null widget: Slate focus is left unchanged
+end
+
+local function applyGameAndUI(why)
+    if cfg.JoinFocusTrick ~= "gameandui" then return end
+    local p1 = U.p1()
+    if not U.ok(p1) then return end
+    local target = lobbyFocusTarget(p1)
+    -- VERIFY(V-JOIN-03): SetInputMode_GameAndUIEx clears the viewport's ignore-input flag set by the UI-only mode, so
+    -- guest pads reach their PlayerInput while P1 keeps navigating the lobby (5 args: pc, widget, lock, hide, flush).
+    U.WBL():SetInputMode_GameAndUIEx(p1, target, 0, false, false)
+    gameAndUI.applied = true
+    gameAndUI.lastMs = St.nowMs()
+    gameAndUI.count = gameAndUI.count + 1
+    if gameAndUI.count == 1 then
+        U.log(TAG, "input mode GameAndUI applied (%s); focus %s", tostring(why), target and "kept on a lobby row" or "unchanged")
+    else
+        -- the game's InputModeManager may have put UI-only back in between (not readable statically): every
+        -- re-apply is logged so the runtime test can correlate it with guests' presses starting to work again
+        U.log(TAG, "input mode GameAndUI re-applied (%s, #%d)", tostring(why), gameAndUI.count)
+    end
+end
+
+-- Undo of applyGameAndUI: the game's own UI-only mode. Front end only (a race sets its own input mode). widget nil =
+-- Slate focus left where it is (FInputModeUIOnly focuses only a valid widget), so the game's pane keeps its focus.
+local function restoreUIOnly(why)
+    if not gameAndUI.applied then return end
+    gameAndUI.applied = false
+    gameAndUI.lastVisible = nil
+    if not phaseMod().isFrontEnd() then return end
+    U.try(TAG, function()
+        local p1 = U.p1()
+        if not U.ok(p1) then return end
+        local target = nil
+        if St.menu.visible == "lobby" then target = lobbyFocusTarget(p1) end
+        -- VERIFY(V-JOIN-03): SetInputMode_UIOnlyEx (4 args: pc, widget, lock, flush) restores the game's menu mode.
+        U.WBL():SetInputMode_UIOnlyEx(p1, target, 0, false)
+        U.log(TAG, "input mode UI-only restored (%s)", tostring(why))
+    end)
+end
+
+-- From poll(): re-apply on a lobby (re)show and on the optional period.
+local function maintainGameAndUI(now)
+    if cfg.JoinFocusTrick ~= "gameandui" then return end
+    local vis = St.menu.visible
+    local period = tonumber(cfg.JoinInputModeReapplyMs) or 0
+    if vis == "lobby" and gameAndUI.lastVisible ~= "lobby" then
+        U.try(TAG, applyGameAndUI, "lobby shown")
+    elseif vis == "lobby" and period > 0 and now - gameAndUI.lastMs >= period then
+        U.try(TAG, applyGameAndUI, "period")
+    end
+    gameAndUI.lastVisible = vis
+end
+
+-- Valid guest PC for a ControllerId, or nil.
+local function pcFor(id, world)
+    world = world or U.world()
+    if not U.ok(world) then return nil end
+    local pc = U.GS():GetPlayerControllerFromID(world, id)
+    if U.ok(pc) then return pc end
+    return nil
+end
+
+-- Pad label for a guest ControllerId. KeyboardIsP1=false: pad k drives ControllerId k (pad k+1 1-based);
+-- KeyboardIsP1=true: bOffsetPlayerGamepadIds, pad k drives ControllerId k+1. VERIFY(V-JOIN-04): XInput slot order.
+local function padLabel(id)
+    if settings.get("KeyboardIsP1") == true then return "pad " .. tostring(id) end
+    return "pad " .. tostring(id + 1)
+end
+
+-- KeyboardIsP1: the pad driving ControllerId 1 (pad 1) is still Slate user 0 = P1's menu user. bOffsetPlayerGamepadIds
+-- remaps game input only, not Slate/CommonUI focus routing [UI§4.1-4.2], so that pad's A is consumed by P1's focused
+-- row (and B is CommonUI back). That guest joins with Start only, and leaves by HOLDING Start (cfg.LeaveHoldMs): B on
+-- that pad would also send CommonUI Back to P1's focused page (the lobby / main menu).
+-- VERIFY(V-JOIN-09): with KeyboardIsP1, pad 1's Start reaches ControllerId 1's PlayerInput in the lobby; pad 1 also
+-- navigates P1's menus (documented behaviour of this mode).
+local function startOnlyFor(id)
+    return id == 1 and settings.get("KeyboardIsP1") == true
+end
+
+-- Local guests (every local player except P1), from GameInstance.LocalPlayers (engine-pruned owner).
+local function localGuests()
+    local out = {}
+    local lps = U.localPlayers()
+    for i = 1, #lps do                                  -- Lua table returned by U.localPlayers
+        local e = lps[i]
+        if e.index ~= 1 then out[#out + 1] = e end
+    end
+    table.sort(out, function(a, b) return (a.ctrlId or 0) > (b.ctrlId or 0) end)   -- highest id first
+    return out
+end
+
+-- True when a LocalPlayer with this ControllerId exists (local object; on a client it exists before the
+-- server-spawned PlayerController has replicated).
+local function hasLocalPlayer(id)
+    local lps = U.localPlayers()
+    for i = 1, #lps do
+        if lps[i].index ~= 1 and lps[i].ctrlId == id then return true end
+    end
+    return false
+end
+
+local function removeGuestPC(pc, why, keepPawn)
+    if not U.ok(pc) then return false end
+    local ok = U.try(TAG, function() U.GS():RemovePlayer(pc, keepPawn ~= true) end)
+    U.log(TAG, "RemovePlayer(%s) %s: %s", U.str(pc:GetFName()), why or "", ok and "ok" or "FAILED")
+    return ok
+end
+
+-- The only path to RemovePlayer for a guest. When cfg.GuestRemoval does not allow `kind`, the guest stays as an
+-- un-joined (dormant) LocalPlayer instead. Returns true when the guest was removed (its slot is cleared and its
+-- ControllerId is not re-created in this world).
+local function dropGuest(id, pc, why, kind, keepPawn)
+    if not removalAllowed(kind) then
+        local s = (type(id) == "number") and St.join.slots[id] or nil
+        if s then
+            s.joined, s.leaving, s.startDownMs = false, false, nil
+            resetCarFlags(s)
+        elseif type(id) == "number" then
+            St.join.slots[id] = newSlot(id)
+        end
+        U.log(TAG, "ctrlId %s kept as a dormant guest (%s, GuestRemoval=%s)", tostring(id), tostring(why), removalMode())
+        return false
+    end
+    if not removeGuestPC(pc, why, keepPawn) then return false end
+    if type(id) == "number" then
+        St.join.slots[id] = nil
+        life.removedIn[id] = St.worldGen
+    end
+    life.removedCount = life.removedCount + 1
+    U.warn(TAG, "guest ctrlId %s removed (%s): %d guest RemovePlayer(s) this session; each leaves a dangling "
+        .. "input-mode listener (V-JOIN-12)", tostring(id), tostring(why), life.removedCount)
+    return true
+end
+
+-- Create the guest for ControllerId `id` unless it exists, its pad is not wanted (force: F6 without a pad), or it
+-- was removed in this world.
+-- Returns the slot (existing or new) or nil. Never called for a connected client (frozen set).
+local function ensureGuest(id, world, why, force)
+    local s = St.join.slots[id]
+    local pc = U.GS():GetPlayerControllerFromID(world, id)
+    if U.ok(pc) then
+        if not s then
+            s = newSlot(id)                         -- a guest we did not know (kept from a race, hot reload): dormant
+            St.join.slots[id] = s
+            U.log(TAG, "guest ctrlId %d adopted (%s)", id, padLabel(id))
+        end
+        return s
+    end
+    if s and s.joined then
+        U.logEvery("join.lostpc" .. id, 10000, TAG, "WARN joined guest ctrlId %d has no PC in the front end", id)
+    end
+    if not force and not wanted(id) then
+        if s and not s.joined then St.join.slots[id] = nil end
+        return nil
+    end
+    if hasLocalPlayer(id) then
+        U.logEvery("join.lpnopc" .. id, 10000, TAG, "ctrlId %d has a LocalPlayer but no PC: not re-created", id)
+        return s
+    end
+    if life.removedIn[id] == St.worldGen then
+        U.logEvery("join.removed" .. id, 10000, TAG, "ctrlId %d was removed in this world: not re-created before the "
+            .. "next world (2026-10-06 crash)", id)
+        return nil
+    end
+    if life.removedCount > 0 then
+        U.warn(TAG, "CreatePlayer(%d) after %d guest removal(s) this session: a dangling input-mode listener may be "
+            .. "hit by the next mapping rebuild (V-JOIN-12)", id, life.removedCount)
+    end
+    -- VERIFY(V-JOIN-01): CreatePlayer in the front end gives a BP_GfnPlayerController_C, menu unaffected.
+    pc = U.GS():CreatePlayer(world, id, true)
+    s = newSlot(id)
+    St.join.slots[id] = s
+    if U.ok(pc) then
+        U.log(TAG, "dormant guest created: ctrlId %d (%s, %s)", id, padLabel(id), tostring(why))
+    else
+        U.warn(TAG, "CreatePlayer(%d) returned no PlayerController", id)
+    end
+    return s
+end
+
+-- All guests the join session should have: existing ones adopted, wanted ones created (only once the pads were
+-- enabled, M.padsEnabled). Returns the ids created.
+local function ensureGuests(world, why)
+    local created = {}
+    local create = M.padsEnabled()
+    for id = 1, maxGuestId() do
+        U.tryEvery("join.ensure", nil, TAG, function()
+            local had = U.ok(U.GS():GetPlayerControllerFromID(world, id))
+            if not had and not create then return end   -- adopt only
+            local s = ensureGuest(id, world, why)
+            if s and not had and U.ok(U.GS():GetPlayerControllerFromID(world, id)) then created[#created + 1] = id end
+        end)
+    end
+    return created
+end
+
+---------------------------------------------------------------------------------------------------
+-- Queries
+---------------------------------------------------------------------------------------------------
+
+-- Guest ControllerIds in view order. The viewport lays the split views out in GameInstance.LocalPlayers order
+-- (UGameViewportClient::LayoutPlayers walks GetGamePlayers() by index; UGameInstance::AddLocalPlayer appends).
+-- That is NOT ascending ControllerId once guests kept across a race are followed by re-created lower ids
+-- (e.g. LocalPlayers [0, 2, 1]), so player numbers follow the array index. Fallback (no GameInstance /
+-- empty array): ascending ControllerId.
+local function guestIdsInViewOrder()
+    local ids, seen = {}, {}
+    local lps = U.localPlayers()                        -- Lua table, LocalPlayers order (index 1 = P1)
+    for i = 1, #lps do
+        local e = lps[i]
+        local id = e.ctrlId
+        if e.index ~= 1 and type(id) == "number" and id >= 1 and id <= maxGuestId() and not seen[id] then
+            seen[id] = true
+            ids[#ids + 1] = id
+        end
+    end
+    for id = 1, maxGuestId() do                         -- slots whose LocalPlayer was not listed: after
+        if not seen[id] then ids[#ids + 1] = id end
+    end
+    return ids
+end
+
+-- {{ctrlId, pnum, pc}, ...} in view order (GameInstance.LocalPlayers index); pnum = 1 + rank among the joined
+-- guests that have a valid PC [§1.3 player numbers]. Deviation from the §4.2 text "ascending ctrlId": see above.
+function M.joinedList()
+    local out = {}
+    local world = U.world()
+    if not U.ok(world) then return out end
+    local pnum = 1
+    local ids = guestIdsInViewOrder()
+    for k = 1, #ids do
+        local id = ids[k]
+        local s = St.join.slots[id]
+        if s and s.joined then
+            local ok, pc = U.try(TAG, pcFor, id, world)
+            if ok and pc then
+                pnum = pnum + 1
+                out[#out + 1] = { ctrlId = id, pnum = pnum, pc = pc }
+            end
+        end
+    end
+    return out
+end
+
+-- P1 -> 1; a joined guest -> its pnum; anything else -> nil.
+function M.pnumForPC(pc)
+    if not U.ok(pc) then return nil end
+    if U.same(pc, U.p1()) then return 1 end
+    local list = M.joinedList()
+    for i = 1, #list do
+        if list[i].pc == pc then return list[i].pnum end
+    end
+    return nil
+end
+
+-- Display number of ANY local player, unique per local player: P1 -> 1, a joined guest -> its pnum, a local guest
+-- that is not joined (a dormant guest accepted with a second START travels with its own view) -> after the joined
+-- ones, in view order (1 + #joined + rank). Used for names and HUD tags so that a dormant guest never shares a
+-- number with a joined one (feedback 5: dormant ctrlId 1 + joined ctrlId 2 were both "Player 2"). nil = not local.
+function M.displayNumForPC(pc)
+    if not U.ok(pc) then return nil end
+    local n = M.pnumForPC(pc)
+    if n then return n end
+    local joined = M.joinedList()
+    local isJoined = {}
+    for i = 1, #joined do isJoined[U.key(joined[i].pc)] = true end
+    local rank = 0
+    for _, e in ipairs(U.localPlayers()) do
+        if e.index ~= 1 and U.ok(e.pc) and not isJoined[U.key(e.pc)] then
+            rank = rank + 1
+            if U.same(e.pc, pc) then return 1 + #joined + rank end
+        end
+    end
+    return nil
+end
+
+-- P1 + joined guests with a valid PC.
+function M.localHumanCount()
+    return 1 + #M.joinedList()
+end
+
+function M.isFrozen()
+    return St.join.frozen == true
+end
+
+-- Guests that exist (LocalPlayer with a PC) but are not joined: {{ctrlId, label}, ...}, ascending ctrlId. They
+-- cannot be removed (RemovePlayer crash), so a launch or connect would carry them (extra view / ghost racer on a host).
+function M.dormantList()
+    local out = {}
+    for _, e in ipairs(localGuests()) do                -- Lua table
+        local s = St.join.slots[e.ctrlId]
+        if U.ok(e.pc) and not (s and s.joined) then
+            out[#out + 1] = { ctrlId = e.ctrlId, label = string.upper(padLabel(e.ctrlId or 0)) }
+        end
+    end
+    table.sort(out, function(a, b) return (a.ctrlId or 0) < (b.ctrlId or 0) end)
+    return out
+end
+
+-- "PAD 3 IS NOT JOINED" / "PADS 3, 4 ARE NOT JOINED", or nil when every guest is joined.
+function M.dormantText()
+    local list = M.dormantList()
+    if #list == 0 then return nil end
+    if #list == 1 then return list[1].label .. " IS NOT JOINED" end
+    local nums = {}
+    for _, d in ipairs(list) do nums[#nums + 1] = (d.label:gsub("^PAD ", "")) end
+    return "PADS " .. table.concat(nums, ", ") .. " ARE NOT JOINED"
+end
+
+-- Lobby ADD PLAYERS row (confirmed) / F6 pair: the explicit opt-in for permanent guest LocalPlayers.
+function M.enablePads(why)
+    if St.join.frozen == true then
+        status("DISCONNECT TO CHANGE PLAYERS")
+        return false
+    end
+    if not phaseMod().isFrontEnd() or St.launch.pending then
+        status("ADD PLAYERS ONLY IN THE MENU")
+        return false
+    end
+    local first = St.join.enabled ~= true
+    St.join.enabled = true
+    life.enabledAtMs = life.enabledAtMs or St.nowMs()
+    life.nextEnsureMs = 0                               -- join.poll creates the guests of plugged-in pads now
+    if first then
+        U.log(TAG, "pads enabled (%s): guest LocalPlayers are created for plugged-in pads and kept until the game "
+            .. "exits", tostring(why))
+    end
+    if St.join.active then
+        local world = U.world()
+        if U.ok(world) then
+            local now = St.nowMs()
+            local created = ensureGuests(world, "add players")
+            for _, id in ipairs(created) do             -- Lua table
+                local sl = St.join.slots[id]
+                if sl then sl.createdMs = now; sl.prevA, sl.prevB, sl.prevStart = true, true, true end
+            end
+        end
+    end
+    status("PADS ON UNTIL GAME RESTART: PRESS A ON A PAD TO JOIN")
+    St.emit("players")
+    return true
+end
+
+-- Four card texts for the Lobby (§1.2): P1, then joined guests by pnum (view order), then open slots.
+function M.slotViews()
+    local views = {}
+    if settings.get("KeyboardIsP1") == true then
+        views[1] = "P1  READY  (keyboard)"
+    else
+        views[1] = "P1  READY  (pad 1)"
+    end
+    local i = 2
+    local joined = M.joinedList()
+    for k = 1, #joined do
+        local e = joined[k]
+        local s = St.join.slots[e.ctrlId]
+        if s.disconnected then
+            views[i] = string.format("P%d  CONTROLLER DISCONNECTED", e.pnum)
+        elseif s.leaving then
+            views[i] = string.format("P%d  LEAVES AFTER THIS RACE", e.pnum)
+        else
+            local leaveKey = startOnlyFor(e.ctrlId) and "HOLD START = leave" or "B = leave"
+            views[i] = string.format("P%d  READY  %s  (%s)", e.pnum, leaveKey, padLabel(e.ctrlId))
+        end
+        i = i + 1
+    end
+    local world = U.world()
+    for id = 1, maxGuestId() do
+        if i > 4 then break end
+        local s = St.join.slots[id]
+        if not (s and s.joined and pcFor(id, world)) then
+            if St.join.frozen then
+                views[i] = "--  DISCONNECT TO CHANGE PLAYERS"
+            elseif St.join.active and s and pcFor(id, world) then
+                if s.disconnected then
+                    views[i] = string.format("--  CONTROLLER DISCONNECTED (%s)", padLabel(id))
+                elseif startOnlyFor(id) or cfg.JoinButtons == "start" then
+                    views[i] = string.format("--  press START to join (%s)", padLabel(id))
+                else
+                    views[i] = string.format("--  press A to join (%s)", padLabel(id))
+                end
+            elseif St.join.active and not M.padsEnabled() then
+                views[i] = (i == 2) and "--  ADD PLAYERS (BELOW) TO JOIN WITH PADS" or "--"
+            elseif St.join.active and life.removedIn[id] == St.worldGen and not pcFor(id, world) then
+                views[i] = string.format("--  %s: AVAILABLE AFTER THE NEXT RACE", string.upper(padLabel(id)))
+            elseif St.join.active and cfg.GuestCreate ~= "all" and padConnected(id) == false then
+                views[i] = string.format("--  connect %s to join", padLabel(id))
+            else
+                views[i] = "--  EMPTY"
+            end
+            i = i + 1
+        end
+    end
+    while i <= 4 do views[i] = "--"; i = i + 1 end
+    return views
+end
+
+---------------------------------------------------------------------------------------------------
+-- Lifecycle: open / close / commit / rebuild / resync
+---------------------------------------------------------------------------------------------------
+
+-- Start the join session on the lobby [§1.3 Open]: adopt the guests that exist, create the wanted missing ones (one
+-- view kept by force-disabling split screen) and arm the edge poll. Re-entrant: re-opening the tab never re-creates
+-- a guest, and a ControllerId removed in this world is never re-created in it (2026-10-06 crash, header).
+function M.open()
+    if U.netMode() == "client" then
+        St.join.frozen = true
+        status("DISCONNECT TO CHANGE PLAYERS")
+        St.emit("players")
+        return false
+    end
+    if not phaseMod().isFrontEnd() then
+        U.warn(TAG, "open refused: not in the front end (phase %s)", tostring(St.phase))
+        return false
+    end
+    if St.launch.pending or St.phase == "LAUNCHING" then
+        -- launch.start already committed the guest set: new dormant guests would travel into the race.
+        status("LAUNCHING...")
+        return false
+    end
+    local world = U.world()
+    if not U.ok(world) then return false end
+    local wasActive = (St.join.active == true)
+    St.join.active = true
+    St.join.frozen = false
+    St.join.keep = false          -- a commit that was not followed by travel (refused launch) is undone here
+    -- VERIFY(V-JOIN-02): only P1's view renders while guests exist in the front end.
+    U.GS():SetForceDisableSplitscreen(world, true)
+    local now = St.nowMs()
+    -- cfg.GuestOptIn: guests are only adopted here until the user enabled the pads (ADD PLAYERS / F6)
+    local created = ensureGuests(world, wasActive and "re-open" or "open")
+    life.nextEnsureMs = now + 1000
+    local n = 0
+    for id, s in pairs(St.join.slots) do                -- Lua table (not a TArray)
+        U.try(TAG, function()
+            -- re-arm the edge detector: a button held while the lobby opens never counts as a press
+            s.createdMs = now
+            s.prevA, s.prevB, s.prevStart = true, true, true
+            s.startDownMs = nil
+            local pc = pcFor(id, world)
+            if pc then n = n + 1 end
+            if pc and cfg.JoinFocusTrick == "userfocus" and U.ok(St.menu.lobby) then
+                -- VERIFY(V-JOIN-03): gives the guest's Slate user a focused widget so its pad reaches its PC.
+                St.menu.lobby:SetUserFocus(pc)
+            end
+        end)
+    end
+    U.log(TAG, "join session open: %d guest(s) (%d created now, pads %s, %d removal(s) this session, GuestCreate=%s)",
+        n, #created, M.padsEnabled() and "enabled" or "not enabled (ADD PLAYERS)", life.removedCount,
+        tostring(cfg.GuestCreate or "connected"))
+    if cfg.JoinFocusTrick == "viewport" then
+        U.try(TAG, function()
+            -- VERIFY(V-JOIN-03): focuses every Slate user on the viewport; P1 is refocused on the race row.
+            U.WBL():SetFocusToGameViewport()
+            U.mod("ui").focus(St.ui.rows.race)
+        end)
+    elseif cfg.JoinFocusTrick == "gameandui" then
+        -- VERIFY(V-JOIN-03): fallback for a viewport that ignores input in the UI-only front end (see applyGameAndUI)
+        U.try(TAG, applyGameAndUI, "open")
+        gameAndUI.lastVisible = St.menu.visible
+    end
+    St.emit("players")
+    return true
+end
+
+local function ensureSingleView(why)
+    U.try(TAG, function() U.mod("split").frontEndSingleView(why) end)
+end
+
+-- Stop the join session (tab left, lobby hidden, return chain given up) [§1.3 Close, revised 2026-10-07]. The guests
+-- are KEPT, joined or not: the poll stops (their input is ignored) and the front end keeps one view. Re-opening the
+-- tab re-arms them; nothing is re-created. cfg.GuestRemoval "always" restores the old removal (crash reproducer).
+function M.close(why)
+    why = why or "close"
+    if removalAllowed("frontend") then
+        M.removeAll(why, "frontend")
+        return
+    end
+    local was = (St.join.active == true)
+    St.join.active = false
+    St.join.keep = false
+    restoreUIOnly(why)
+    if phaseMod().isFrontEnd() then ensureSingleView(why) end
+    if was then U.log(TAG, "join session closed (%s): %d guest(s) kept, input ignored", why, #localGuests()) end
+    St.emit("players")
+end
+
+-- Remove every guest, joined or not, highest ControllerId first, where cfg.GuestRemoval allows `kind` (kind defaults
+-- to "launch": guests that must not follow a non-couch flow); otherwise the guests stay as un-joined LocalPlayers.
+-- Returns removed, kept.
+function M.removeAll(why, kind)
+    why, kind = why or "removeAll", kind or "launch"
+    St.join.active = false
+    St.join.keep = false
+    restoreUIOnly(why)
+    local guests = localGuests()
+    local removed, kept = 0, 0
+    for i = 1, #guests do
+        local e = guests[i]
+        if U.ok(e.pc) then
+            if dropGuest(e.ctrlId, e.pc, why, kind) then removed = removed + 1 else kept = kept + 1 end
+        else
+            U.warn(TAG, "local player ctrlId %s has no PlayerController; cannot remove it", tostring(e.ctrlId))
+            kept = kept + 1
+        end
+    end
+    for id, s in pairs(St.join.slots) do                -- Lua table; drop slots without a LocalPlayer
+        if not hasLocalPlayer(id) then St.join.slots[id] = nil else resetCarFlags(s) end
+    end
+    if phaseMod().isFrontEnd() then
+        ensureSingleView(why)
+    elseif kept == 0 then
+        U.try(TAG, function()
+            local world = U.world()
+            if U.ok(world) then U.GS():SetForceDisableSplitscreen(world, false) end
+        end)
+    end
+    if removed + kept > 0 then
+        U.log(TAG, "%s: %d guest(s) removed, %d kept (GuestRemoval=%s)", why, removed, kept, removalMode())
+    end
+    St.emit("players")
+    return removed, kept
+end
+
+-- takeover.leaveMidRace (§3.6, a taken-over local guest leaves): RemovePlayer only where cfg.GuestRemoval allows
+-- it (kind "launch"); returns true when removed. Otherwise the guest's LocalPlayer stays and its slot is untouched
+-- (join.keyboardLeave marks it leaving; join.resync un-joins it in the next front end).
+function M.removeGuest(pc, why)
+    if not U.ok(pc) then return false end
+    if not removalAllowed("launch") then
+        U.log(TAG, "%s: guest kept (GuestRemoval=%s)", tostring(why), removalMode())
+        return false
+    end
+    local id = nil
+    for _, e in ipairs(U.localPlayers()) do             -- Lua table
+        if e.index ~= 1 and U.same(e.pc, pc) then id = e.ctrlId end
+    end
+    return dropGuest(id, pc, why or "removeGuest", "launch", true)   -- RemovePlayer(pc, false): the car is the AI's
+end
+
+-- menu_tab.closeStrayGuests (game tab selected, switcher shows a game pane, return chain failed, phase OTHER from
+-- the menu). Only leaving the front end into a non-couch flow removes guests; everything else just closes the join
+-- session (the guests stay for the whole front-end visit). menu_tab already skips a pending launch.
+function M.closeStray(why)
+    if St.launch.pending or M.isFrozen() then return end
+    local leaving = type(why) == "string" and why:find("phase OTHER", 1, true) ~= nil
+    if leaving or removalAllowed("frontend") then
+        if #localGuests() > 0 then M.removeAll(why, leaving and "launch" or "frontend") end
+        return
+    end
+    if St.join.active then M.close(why) end
+end
+
+-- Right before launch/connect: joined guests travel with us [§1.3 Commit]. Force-disable stays on until the race
+-- map (split.enterRace). A dormant (un-joined) guest cannot be removed (RemovePlayer crash): net.connect refuses while
+-- one exists (M.dormantText), launch.start only goes ahead with one after a second START (the user accepted an
+-- AI-driven car in that guest's view), and builder (devscreen) refuses. Such a guest is parked here: abandonPending,
+-- so raceTick hands its car to the AI.
+function M.commit()
+    local guests = localGuests()
+    local parked = 0
+    for i = 1, #guests do
+        local e = guests[i]
+        local s = St.join.slots[e.ctrlId]
+        if not (s and s.joined) then
+            if not dropGuest(e.ctrlId, e.pc, "commit (dormant)", "launch") then
+                -- GuestRemoval "never": the dormant guest travels; its car goes to the AI (raceTick), its view stays
+                local sl = St.join.slots[e.ctrlId]
+                if sl then sl.abandonPending = true end
+                parked = parked + 1
+            end
+        end
+    end
+    St.join.active = false
+    St.join.keep = true          -- the joined set must survive the coming travel (read by resync)
+    restoreUIOnly("commit")
+    U.log(TAG, "commit: %d joined guest(s) kept", #M.joinedList())
+    if parked > 0 then
+        U.warn(TAG, "commit: %d dormant guest(s) travel with us (GuestRemoval=never): AI drives their cars", parked)
+        status(parked == 1 and "1 PAD NOT JOINED: ITS CAR IS AI-DRIVEN" or
+            string.format("%d PADS NOT JOINED: THEIR CARS ARE AI-DRIVEN", parked))
+    end
+    St.emit("players")
+end
+
+-- KeyboardIsP1 changed: pad k now drives another ControllerId. Nothing is removed or re-created (2026-10-06 crash):
+-- open() re-arms the existing guests and creates the newly wanted ids. Only allowed with no joined guest.
+function M.rebuild()
+    if St.join.frozen == true then
+        status("DISCONNECT TO CHANGE PLAYERS")
+        return false
+    end
+    -- joined slots, not only joinedList(): a joined slot whose PC is not (yet) there must block a rebuild too
+    for _, s in pairs(St.join.slots) do                 -- Lua table (not a TArray)
+        if s.joined then
+            status("REMOVE GUESTS FIRST")
+            return false
+        end
+    end
+    if removalAllowed("frontend") then M.removeAll("rebuild", "frontend") end
+    return M.open()
+end
+
+-- Listener: phase -> FRONTEND. Picks up the guests that survived travel (their LocalPlayers persist,
+-- their PCs are new), removes guests that left mid-race, and decides whether the guest set is kept.
+-- (A refused launch never leaves FRONTEND, so it does not come through here: launch.start re-opens the join
+-- screen itself in that case.)
+function M.resync()
+    -- A client's guest set changes only through DISCONNECT (§2.3). Coming back to a standalone front end after an
+    -- unplanned drop (network failure, host fell back to a local OpenLevel, HostTravelFallback relisten) keeps the
+    -- set: the auto-rejoin must reconnect with the same guests. Read before frozen is recomputed.
+    local wasFrozen = (St.join.frozen == true)
+    local wantConn = (St.net.wantConnected == true)
+    local isClient = (U.netMode() == "client")
+    -- Frozen also while a rejoin is wanted (standalone front end after a drop, auto-rejoin armed): lobby.onShown,
+    -- lobby.onHidden and closeStrayGuests must neither add dormant guests nor close the joined ones that the rejoin
+    -- carries (§2.4). net un-freezes (slowTick / onFrontEnd) once wantConnected turns false.
+    St.join.frozen = isClient or wantConn
+    local world = U.world()
+    for id, s in pairs(St.join.slots) do                -- Lua table (not a TArray)
+        U.try(TAG, function()
+            local pc = pcFor(id, world)
+            if s.leaving and isClient then
+                -- connected client: a removal would leave a ghost on the host (see keyboardLeave); the guest stays
+                -- until DISCONNECT (hot-reload leftovers only: a client's F7 is refused in a race)
+                U.warn(TAG, "client guest ctrlId %d marked leaving: kept until DISCONNECT", id)
+                s.leaving, s.abandonPending = false, false
+                if not s.joined then St.join.slots[id] = nil end
+            elseif s.leaving then
+                -- GuestRemoval "never"/"launch": the guest stays as a dormant LocalPlayer (no dangling listener)
+                -- and can join again; with "launch" the next couch launch drops it if it does not.
+                if pc then dropGuest(id, pc, "left mid-race", "frontend") else St.join.slots[id] = nil end
+            elseif s.joined and not pc then
+                if isClient and hasLocalPlayer(id) then
+                    -- Client: the guest's PC is spawned by the server after the engine split-join round trip and
+                    -- may replicate after FRONTEND is detected. Keep the slot joined; joinedList()/pcFor() skip
+                    -- it until the PC exists.
+                    -- VERIFY(V-JOIN-08): a client's split-join guests get their PC within a few seconds of FRONTEND.
+                    U.log(TAG, "client guest ctrlId %d: PC not replicated yet; slot stays joined", id)
+                else
+                    -- VERIFY(V-JOIN-07): joined guests keep their LocalPlayer and get a new PC after travel.
+                    U.warn(TAG, "joined guest ctrlId %d has no PC after travel; slot un-joined", id)
+                    s.joined = false
+                end
+            end
+            -- per-car flags belong to the race just left (a guest kept here races again only after a new commit)
+            resetCarFlags(s)
+        end)
+    end
+    -- A frozen (client) guest set is never closed here: it only changes through DISCONNECT (net un-freezes).
+    local keep = (St.join.frozen == true) or wasFrozen or wantConn or ((cfg.ReturnToSplitTab == true)
+        and (St.ui.returnToTab == true or St.join.keep == true or St.join.active == true
+             or St.menu.visible == "lobby"))
+    St.join.keep = false
+    if not keep then
+        M.close("resync: not returning to the SPLIT SCREEN tab")   -- guests kept, join session closed
+    elseif St.menu.visible == "lobby" and not St.join.frozen and not St.join.active then
+        M.open()                                      -- the lobby page survived the round trip (rare)
+    else
+        St.emit("players")
+    end
+    U.log(TAG, "resync: frozen=%s (was %s, wantConnected %s) keep=%s joined=%d", tostring(St.join.frozen),
+        tostring(wasFrozen), tostring(wantConn), tostring(keep), #M.joinedList())
+end
+
+---------------------------------------------------------------------------------------------------
+-- FAST poll: rising edges of A/Start (join) and B (leave) on guest PCs [§1.3 Edge poll]
+---------------------------------------------------------------------------------------------------
+
+function M.poll()
+    if not St.join.active then return end
+    if not phaseMod().isFrontEnd() then return end
+    local world = U.world()
+    if not U.ok(world) then return end
+    local k = keys()
+    local now = St.nowMs()
+    maintainGameAndUI(now)
+    local arm = tonumber(cfg.JoinArmMs) or 300
+    -- cfg.JoinButtons: "a_or_start" (default; Start only with cfg.JoinWithStart) | "start" (A never joins)
+    local startOnly = (cfg.JoinButtons == "start")
+    local changed = false
+    -- A pad plugged in while the lobby is open gets its guest (cfg.GuestCreate "connected"), at most once a second,
+    -- once the pads were enabled (cfg.GuestOptIn). Only from here (FAST loop, game thread), never from the device
+    -- hook callback itself.
+    if now >= (life.nextEnsureMs or 0) and M.padsEnabled() then
+        life.nextEnsureMs = now + 1000
+        local created = ensureGuests(world, "pad plugged in")
+        for c = 1, #created do
+            local sl = St.join.slots[created[c]]
+            if sl then sl.createdMs = now; sl.prevA, sl.prevB, sl.prevStart = true, true, true end
+            changed = true
+        end
+    end
+    for id = 1, maxGuestId() do
+        local s = St.join.slots[id]
+        if s then
+            U.tryEvery("join.poll", nil, TAG, function()
+                local pc = U.GS():GetPlayerControllerFromID(world, id)
+                if not U.ok(pc) then
+                    s.prevA, s.prevB, s.prevStart = false, false, false
+                    return
+                end
+                -- VERIFY(V-JOIN-03): guest pad input reaches PlayerInput in the UI-only front end (fallbacks:
+                -- cfg.JoinFocusTrick "userfocus" | "viewport" for Slate focus, "gameandui" for a viewport that ignores input).
+                -- VERIFY(V-JOIN-06): P1's pad never shows up on a guest PC.
+                local slotStartOnly = startOnly or startOnlyFor(id)       -- VERIFY(V-JOIN-09)
+                local a = pc:IsInputKeyDown(k.A) == true
+                local st = false
+                if cfg.JoinWithStart or slotStartOnly then st = pc:IsInputKeyDown(k.Start) == true end
+                -- VERIFY(V-JOIN-06): fallback cfg.JoinButtons = "start" when P1's A also reaches a guest PC.
+                local join = (not slotStartOnly and a) or st
+                -- the pad-0 guest of KeyboardIsP1 (startOnlyFor) leaves by holding Start: its B is P1's CommonUI Back.
+                -- The hold is timed from a Start press made while already joined (the join press never counts).
+                local holdLeave = startOnlyFor(id)
+                local b = false
+                if holdLeave then
+                    if not (s.joined and st) then
+                        s.startDownMs = nil
+                    elseif not s.prevStart then
+                        s.startDownMs = now
+                    end
+                    b = s.startDownMs ~= nil and now - s.startDownMs >= (tonumber(cfg.LeaveHoldMs) or 1000)
+                else
+                    b = pc:IsInputKeyDown(k.B) == true
+                    -- RACE SETUP's VEHICLES step: a quick B is the guest's "un-ready / row back" (setup.pollGuests);
+                    -- leaving needs B held for cfg.LeaveHoldMs
+                    local holdB = false
+                    pcall(function() holdB = U.mod("setup").guestBHoldsToLeave() == true end)
+                    if holdB and s.joined then
+                        if not b then s.bDownMs = nil elseif not s.bDownMs then s.bDownMs = now end
+                        b = s.bDownMs ~= nil and now - s.bDownMs >= (tonumber(cfg.LeaveHoldMs) or 1000)
+                    else
+                        s.bDownMs = nil
+                    end
+                end
+                if now - (s.createdMs or 0) >= arm then
+                    if not s.joined and join and not s.prevA then
+                        s.joined = true
+                        s.disconnected = false
+                        resetCarFlags(s)
+                        changed = true
+                        status(string.format("P%d JOINED", M.pnumForPC(pc) or (id + 1)))
+                    elseif s.joined and b and not s.prevB then
+                        local pnum = M.pnumForPC(pc) or (id + 1)
+                        s.joined = false
+                        s.startDownMs = nil
+                        changed = true
+                        status(string.format("P%d LEFT", pnum))
+                    end
+                end
+                s.prevA, s.prevB, s.prevStart = join, b, st
+            end)
+        end
+    end
+    if changed then St.emit("players") end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Keyboard test path (F6 / F7, §1.8). keys.lua wraps the calls in sched.run (game thread).
+---------------------------------------------------------------------------------------------------
+
+function M.keyboardJoin()
+    local ph = phaseMod()
+    if ph.isFrontEnd() then
+        if St.launch.pending or St.phase == "LAUNCHING" then
+            status("LAUNCHING...")
+            return
+        end
+        if not St.join.active then
+            U.mod("menu_tab").selectOurTab()          -- opening the tab opens the join screen
+            return
+        end
+        local world = U.world()
+        for id = 1, maxGuestId() do
+            local s = St.join.slots[id]
+            if s and not s.joined and pcFor(id, world) then
+                s.joined = true
+                s.disconnected = false
+                resetCarFlags(s)
+                status(string.format("P%d JOINED (keyboard)", M.pnumForPC(pcFor(id, world)) or (id + 1)))
+                St.emit("players")
+                return
+            end
+        end
+        -- no dormant guest (no pad plugged in for it, cfg.GuestCreate "connected"): F6 creates the lowest free one.
+        -- That guest is a LocalPlayer kept until the game exits (it can never be removed): a second F6 within 2 s
+        -- confirms it.
+        for id = 1, maxGuestId() do
+            if not pcFor(id, world) and not hasLocalPlayer(id) and life.removedIn[id] ~= St.worldGen then
+                local now = St.nowMs()
+                if not (life.f6AtMs and now - life.f6AtMs <= 2000) then
+                    life.f6AtMs = now
+                    status("F6 AGAIN: ADD A KEYBOARD GUEST (KEPT UNTIL GAME RESTART)")
+                    return
+                end
+                life.f6AtMs = nil
+                St.join.enabled = true                  -- an explicit opt-in, like ADD PLAYERS
+                life.enabledAtMs = life.enabledAtMs or now
+                U.warn(TAG, "F6: creating a keyboard guest (ctrlId %d); it stays until the game exits", id)
+                local _, s = U.try(TAG, ensureGuest, id, world, "F6", true)
+                if type(s) == "table" and pcFor(id, world) then
+                    s.joined = true
+                    s.createdMs = St.nowMs()
+                    s.prevA, s.prevB, s.prevStart = true, true, true
+                    status(string.format("P%d JOINED (keyboard)", M.pnumForPC(pcFor(id, world)) or (id + 1)))
+                    St.emit("players")
+                end
+                return
+            end
+        end
+        status("NO FREE PLAYER SLOT")
+        return
+    end
+    if not ph.isRace() then return end
+    if not (cfg.AllowMidRaceJoin and U.isServer()) then
+        U.log(TAG, "F6 in a race: mid-race join is disabled (cfg.AllowMidRaceJoin)")
+        return
+    end
+    -- Debugging path only: a PC created after the grid exists has no native slot -> takeover [PS§8 #6].
+    local world = U.world()
+    for id = 1, maxGuestId() do
+        if not pcFor(id, world) and not hasLocalPlayer(id) and life.removedIn[id] ~= St.worldGen then
+            local pc = U.GS():CreatePlayer(world, id, true)
+            if not U.ok(pc) then
+                U.warn(TAG, "mid-race CreatePlayer(%d) failed", id)
+                return
+            end
+            local s = newSlot(id)
+            s.joined = true
+            St.join.slots[id] = s
+            local tko = U.mod("takeover")
+            local car = tko.pickCar(U.gs())
+            if car then
+                tko.takeOver(pc, car)
+            else
+                U.warn(TAG, "mid-race join: no free AI car for ctrlId %d", id)
+            end
+            St.emit("players")
+            return
+        end
+    end
+    status("NO FREE PLAYER SLOT")
+end
+
+function M.keyboardLeave()
+    local list = M.joinedList()
+    local ph = phaseMod()
+    -- In a race a removed guest stays joined (slot.leaving) until the next front end: each F7 acts on the highest
+    -- joined guest that is not already leaving (never a second leaveMidRace / Disconnect override on one car).
+    local last = nil
+    for i = #list, 1, -1 do
+        local sl = St.join.slots[list[i].ctrlId]
+        if not (ph.isRace() and sl and sl.leaving) then
+            last = list[i]
+            break
+        end
+    end
+    if not last then
+        status("NO GUEST TO REMOVE")
+        return
+    end
+    local s = St.join.slots[last.ctrlId]
+    if ph.isFrontEnd() then
+        if St.join.frozen then
+            -- connected client: the split-join guest stays on the host until DISCONNECT (§2.3)
+            status("DISCONNECT TO CHANGE PLAYERS")
+            return
+        end
+        s.joined = false
+        status(string.format("P%d LEFT (keyboard)", last.pnum))
+        St.emit("players")
+        return
+    end
+    if ph.isRace() then
+        if U.netMode() == "client" or St.join.frozen then
+            -- Connected client: removing the LocalPlayer here (or in the next, still connected, front end) is not
+            -- seen by the host (UGameInstance::RemoveLocalPlayer only destroys an authoritative PC, no split-leave
+            -- message): the host would keep a ghost remote player with a grid car. Same rule as the front end.
+            status("DISCONNECT TO CHANGE PLAYERS")
+            return
+        end
+        if U.isServer() then
+            U.mod("takeover").leaveMidRace(last.pc)     -- release or Disconnect override [§3.6]
+        end
+        s.leaving = true                                -- the LocalPlayer goes away in the next front end
+        status(string.format("P%d LEAVES AFTER THIS RACE", last.pnum))
+        St.emit("players")
+    end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Device (dis)connect: post-hook on GfnGameInstance:OnUserInputDeviceChanged [§1.3 Device events]
+---------------------------------------------------------------------------------------------------
+
+local function applyCarOverride(s, ctrlId, connected)
+    if not (cfg.AIOnPadDisconnect and U.isServer() and phaseMod().isRace()) then return end
+    -- A guest that left mid-race (F7: takeover.leaveMidRace started its own Disconnect override, s.aiOverride untouched)
+    -- or whose car was handed to the AI for good (abandonCar / race_enter guard) keeps the AI: a pad unplug must not
+    -- stack a second override, and a replug must not give the car back to a player who has no view.
+    if s.leaving or s.abandonPending or s.abandoned then return end
+    local pc = pcFor(ctrlId)
+    if not pc then return end
+    local car = pc.Pawn
+    if not U.isVehicle(car) then return end
+    if not connected and not s.aiOverride then
+        car:StartInputSourceOverride_OnServer(C.E.Override.Disconnect)    -- the game's own human->AI path
+        s.aiOverride = true
+        U.log(TAG, "ctrlId %d pad lost: Disconnect override started on its car", ctrlId)
+    elseif connected and s.aiOverride then
+        car:StopInputSourceOverride_OnServer(C.E.Override.Disconnect)
+        s.aiOverride = false
+        U.log(TAG, "ctrlId %d pad back: Disconnect override stopped", ctrlId)
+    end
+end
+
+-- Hand a guest's car to the AI for good (race not launched by the mod, see onRaceEnter). Server only. The
+-- Disconnect override is the game's own human->AI path; s.aiOverride records that it is on (never stopped: the
+-- guest leaves in the next front end).
+abandonCar = function(s, pc)
+    local car = pc.Pawn
+    if not U.isVehicle(car) then return false end
+    car:StartInputSourceOverride_OnServer(C.E.Override.Disconnect)   -- (Enum reason), 1 param
+    s.aiOverride = true
+    s.abandoned = true                                  -- applyCarOverride never touches this car again
+    s.abandonPending = false
+    U.log(TAG, "ctrlId %s: car handed to the AI (race not launched by SWGRCouch)", tostring(s.ctrlId))
+    return true
+end
+
+-- 0.8.1 (2026-10-07, "just make it dynamic put me as p1"): a pad that CONNECTS while the game runs and belongs to no
+-- local player becomes P1's controller (a Moonlight/Sunshine pad vanishes and comes back with every client connection,
+-- often behind other pads). cfg.HotplugPadToP1: "front" (default: in the front end; during a race it is applied at
+-- the next front end) | "always" | "off". Never with couch pads enabled (ADD PLAYERS: the pad joins as a guest), never
+-- for a pad a local player already uses, never during the boot enumeration.
+-- VERIFY(V-JOIN-20): connect a pad mid-session -> "[join] hot-plugged pad ctrlId N takes P1 (was ctrlId M): ok".
+local pendingP1 = nil
+local frontSinceMs = nil
+function M.hotplugToP1(ctrlId, why)
+    local mode = cfg.HotplugPadToP1
+    if mode == nil then mode = "front" end
+    if mode == "off" or mode == false then return false, "off" end
+    if M.padsEnabled() then return false, "couch pads enabled" end
+    if St.phase ~= "FRONTEND" and mode ~= "always" then
+        pendingP1 = ctrlId
+        U.log(TAG, "hot-plugged pad ctrlId %d: takes P1 at the next front end (%s)", ctrlId, tostring(why))
+        return false, "deferred"
+    end
+    local gs, p1 = U.GS(), U.p1()
+    if not (U.ok(gs) and U.ok(p1)) then return false, "no P1" end
+    for _, e in ipairs(U.localPlayers()) do
+        local okI, id = pcall(function() return gs:GetPlayerControllerID(e.pc) end)
+        if okI and id == ctrlId then return false, "already P" .. tostring(e.index) .. "'s pad" end
+    end
+    local was = -1
+    pcall(function() was = gs:GetPlayerControllerID(p1) end)
+    local ok, err = pcall(function() gs:SetPlayerControllerID(p1, ctrlId) end)
+    U.log(TAG, "hot-plugged pad ctrlId %d takes P1 (was ctrlId %s; %s): %s (V-JOIN-20)", ctrlId, tostring(was),
+        tostring(why), ok and "ok" or tostring(err))
+    if ok then status("NEW CONTROLLER IS PLAYER 1") end
+    return ok
+end
+
+function M.hotplugTick()
+    if St.phase ~= "FRONTEND" then frontSinceMs = nil; return end
+    frontSinceMs = frontSinceMs or St.nowMs()
+    if pendingP1 and St.nowMs() - frontSinceMs > 1500 then
+        local id = pendingP1
+        pendingP1 = nil
+        U.try(TAG, M.hotplugToP1, id, "deferred from the race")
+    end
+end
+
+-- One (dis)connect of a platform user's pad, from the hook or the device poll. Idempotent: a state the slot already
+-- has is ignored (cfg.DeviceDetectMode "both" reports every change twice).
+function M.onDeviceState(st, uid, dev, source)
+    -- VERIFY(V-JOIN-05): PlatformUserId.InternalId equals the pad's ControllerId (minus 1 with KeyboardIsP1).
+    local ctrlId = (tonumber(uid) or -1) + ((settings.get("KeyboardIsP1") == true) and 1 or 0)
+    U.log(TAG, "device %s: state=%s user=%s device=%s -> ctrlId %d", tostring(source or "event"),
+        tostring(st), tostring(uid), tostring(dev), ctrlId)
+    if st ~= C.E.DeviceConn.Disconnected and st ~= C.E.DeviceConn.Connected then return end
+    local connected = (st == C.E.DeviceConn.Connected)
+    -- 0.8.1: hot-plug -> P1 (not during the boot enumeration: the front end must have been up for 5 s)
+    if connected and frontSinceMs and St.nowMs() - frontSinceMs > 5000 then
+        U.try(TAG, M.hotplugToP1, ctrlId, tostring(source or "event"))
+    end
+    -- pad presence for cfg.GuestCreate "connected" (join.poll creates the guest; never from this callback)
+    if type(tonumber(uid)) == "number" then padHook[tonumber(uid)] = connected end
+    if ctrlId < 1 or ctrlId > maxGuestId() then
+        if ctrlId == 0 and not connected then status("P1 CONTROLLER DISCONNECTED") end
+        return
+    end
+    local s = St.join.slots[ctrlId]
+    if not s then
+        if St.join.active then St.emit("players") end   -- lobby card "connect pad k"; join.poll creates the guest
+        return
+    end
+    if s.disconnected == (not connected) then return end
+    s.disconnected = not connected
+    if s.joined then
+        local pnum = M.pnumForPC(pcFor(ctrlId)) or (ctrlId + 1)
+        status(string.format(connected and "P%d CONTROLLER RECONNECTED" or "P%d CONTROLLER DISCONNECTED", pnum))
+        U.try(TAG, applyCarOverride, s, ctrlId, connected)
+    end
+    St.emit("players")
+end
+
+local lastDeviceHookMs = nil     -- St.nowMs() of the last device hook call (pollDevices' "hook" watchdog)
+
+function M.onDevice(ctx, NewConnectionState, PlatformUserId, InputDeviceId)
+    lastDeviceHookMs = St.nowMs()
+    if cfg.DeviceDetectMode == "poll" then return end
+    local st = NewConnectionState:get()
+    local uid = PlatformUserId:get().InternalId
+    local dev = -1
+    U.try(TAG, function() dev = InputDeviceId:get().InternalId end)
+    M.onDeviceState(st, uid, dev, "hook")
+end
+
+-- SLOW loop, cfg.DeviceDetectMode "both" | "poll": backup for a device hook that never fires (V-JOIN-10). The set of
+-- platform users with a connected device is diffed against the previous poll; each edge goes through onDeviceState.
+local devPoll = { users = nil }      -- InternalId -> true (nil = no baseline yet)
+
+-- Platform user -> one of its connected GAMEPAD devices. The default input device (keyboard + mouse, owned by the
+-- primary user 0) is left out: with KeyboardIsP1, pad 0 drives ControllerId 1 but also belongs to user 0, and the
+-- keyboard would keep user 0 "present" after that pad is gone (P2's pad loss never reported). A user counts as
+-- connected while it has at least one non-default device.
+local function connectedUsers()
+    local lib = U.cdo("InputDeviceLibrary")
+    if not U.ok(lib) then return nil end
+    -- UInputDeviceLibrary:GetDefaultInputDevice() -> Struct FInputDeviceId (static, 0 params) [reflect-func-all]
+    -- VERIFY(V-JOIN-10): the default device is the keyboard/mouse device, distinct from every gamepad's id.
+    local defaultDev = nil
+    U.try(TAG, function()
+        local d = lib:GetDefaultInputDevice()
+        local id = type(d) == "table" and d.InternalId or U.unwrap(d).InternalId
+        if type(id) == "number" then defaultDev = id end
+    end)
+    local out = {}
+    -- VERIFY(V-JOIN-10): the array out-param table is filled in place with FInputDeviceId elements (params or
+    -- struct userdata: unwrapped by U.arrayToTable) [API§9 out params].
+    lib:GetAllConnectedInputDevices(out)
+    local users = {}
+    for _, d in ipairs(U.arrayToTable(out)) do
+        U.try(TAG, function()
+            local devId = d.InternalId
+            if devId == nil or devId == defaultDev then return end
+            local user = lib:GetUserForInputDevice({ InternalId = devId })   -- struct by value -> Lua table
+            local uid = type(user) == "table" and user.InternalId or U.unwrap(user).InternalId
+            if type(uid) == "number" and uid >= 0 and users[uid] == nil then users[uid] = devId end
+        end)
+    end
+    return users
+end
+
+-- cfg.DeviceDetectMode "hook": the device hook is a native (flags 0x80401) that may be bound with AddUObject and never
+-- pass through ProcessEvent [API§4]; nothing else would notice a pad lost mid-race. The poll then runs as an
+-- edge-only watchdog: no baseline report (a mapping problem of the poll, V-JOIN-10, would otherwise hand every
+-- guest's car to the AI at once), and an edge is applied only when no hook event came in the last 3 s (the hook
+-- fires on the change itself, before the 1 s poll sees it, and stays authoritative while it works).
+local HOOK_RECENT_MS = 3000
+
+function M.pollDevices()
+    local mode = cfg.DeviceDetectMode
+    local watchdog = (mode ~= "both" and mode ~= "poll")
+    local ok, users = U.try(TAG, connectedUsers)
+    if not ok or type(users) ~= "table" then return end
+    padPoll = users                                     -- cfg.GuestCreate "connected" (padConnected)
+    local prev = devPoll.users
+    devPoll.users = users
+    if watchdog then
+        if prev == nil then return end
+        if lastDeviceHookMs and St.nowMs() - lastDeviceHookMs < HOOK_RECENT_MS then return end
+        for uid, dev in pairs(users) do
+            if prev[uid] == nil then
+                U.warn(TAG, "device poll: user %s connected without a device hook call (V-JOIN-10 watchdog)", tostring(uid))
+                M.onDeviceState(C.E.DeviceConn.Connected, uid, dev, "poll-watchdog")
+            end
+        end
+        for uid, dev in pairs(prev) do
+            if users[uid] == nil then
+                U.warn(TAG, "device poll: user %s disconnected without a device hook call (V-JOIN-10 watchdog)",
+                    tostring(uid))
+                M.onDeviceState(C.E.DeviceConn.Disconnected, uid, dev, "poll-watchdog")
+            end
+        end
+        return
+    end
+    if prev == nil then
+        -- baseline: a joined guest whose pad is absent already is reported once
+        for id, s in pairs(St.join.slots) do
+            local uid = id - ((settings.get("KeyboardIsP1") == true) and 1 or 0)
+            if s.joined and users[uid] == nil then
+                M.onDeviceState(C.E.DeviceConn.Disconnected, uid, -1, "poll")
+            end
+        end
+        return
+    end
+    for uid, dev in pairs(users) do
+        if prev[uid] == nil then M.onDeviceState(C.E.DeviceConn.Connected, uid, dev, "poll") end
+    end
+    for uid, dev in pairs(prev) do
+        if users[uid] == nil then M.onDeviceState(C.E.DeviceConn.Disconnected, uid, dev, "poll") end
+    end
+end
+
+-- MAIN loop, race phases, server: the pad-loss override for a guest whose car did not exist yet when the pad went
+-- away (launched disconnected, or lost during LOADING / the grid spawn) is applied as soon as the car exists.
+function M.raceTick()
+    -- Per-car flags belong to the race world whose car they were applied to (s.carGen). A new race world reached
+    -- without a front end in between (relisten `open <map>?listen`, servertravel restart, a game-native restart) has
+    -- new cars: the old flags are reset here (join.resync only runs on FRONTEND). A guest that left (F7: leaving) or
+    -- whose car was handed to the AI (abandoned) gets its NEW car handed to the AI too (abandonPending, below), and a
+    -- guest whose pad is still disconnected gets the Disconnect override again (AIOnPadDisconnect loop, below).
+    -- Otherwise both cars would stand still and could hold the results (WaitForAllPlayersToFinish waits on every
+    -- Racers entry). carGen is adopted on the first raceTick of the world in which a flag was set (also restored
+    -- flags after a hot reload).
+    local gen = St.worldGen
+    for id, s in pairs(St.join.slots) do
+        local flagged = s.aiOverride or s.abandoned or s.abandonPending or s.leaving
+        if flagged and s.carGen == nil then
+            s.carGen = gen
+        elseif s.carGen ~= nil and s.carGen ~= gen then
+            U.log(TAG, "ctrlId %s: new race world (gen %s -> %s): per-car flags reset%s", tostring(id),
+                tostring(s.carGen), tostring(gen), (s.leaving or s.abandoned) and ", new car goes to the AI" or "")
+            s.carGen = gen
+            s.aiOverride = false
+            if s.leaving or s.abandoned then
+                s.abandoned = false
+                s.abandonPending = true
+            end
+        end
+    end
+    -- guests of a race the mod did not launch (onRaceEnter): their car is handed to the AI once it exists
+    for id, s in pairs(St.join.slots) do
+        if s.abandonPending and not s.aiOverride then
+            U.try(TAG, function()
+                local pc = pcFor(id)
+                if pc then abandonCar(s, pc) end
+            end)
+        end
+    end
+    if not cfg.AIOnPadDisconnect then return end
+    for id, s in pairs(St.join.slots) do
+        if s.joined and s.disconnected and not s.aiOverride and not s.leaving then
+            U.try(TAG, applyCarOverride, s, id, false)
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------------------
+-- init: hooks and listeners only (no UFunction calls) [§4.2 main boot step 3]
+---------------------------------------------------------------------------------------------------
+
+-- "race_enter"(new, from) (phase.lua, before the "phase" event of the first race phase): a race entered from the
+-- front end that the mod did not launch (Campaign/Arcade/Scenarios started while guests were still alive, e.g. a
+-- return to our tab that did not land) must not get split views, guest HUDs or takeovers: guests are removed first.
+-- A connected client's races are always ours (the host launched them).
+-- In LOADING no car exists yet: the guests are removed (join.close). The MAIN poll may first see the race in PRERACE
+-- or later (LOADING skipped): a guest that already owns a car or a racer entry must not lose its PC now (destroying
+-- it destroys its PlayerState = the racer entry [PS§7]); its car goes to the AI (the game's own Disconnect override)
+-- and the guest leaves in the next front end (slot.leaving -> join.resync). Guests without either are removed. The
+-- race then shows one view (St.race.singleView, read by split.enterRace and hud.tick).
+local RACE_PHASES = { LOADING = true, PRERACE = true, RACING = true, POSTRACE = true }
+
+local function onRaceEnter(new, from)
+    -- From the menu (FRONTEND/LAUNCHING) and from OTHER (campaign paddock, PvP flow: entered from the menu without
+    -- a tab event, kept rematch guests may still be alive). Not after BOOT (hot reload mid-race) nor LEAVING (the
+    -- next race of a relisten / servertravel).
+    if from == "BOOT" or from == "LEAVING" or from == "TRANSIT" or RACE_PHASES[from] then return end
+    if St.race.launchedByUs == true or U.netMode() == "client" or St.net.wantConnected == true then return end
+    local guests = localGuests()
+    if #guests == 0 then return end
+    if new == "LOADING" or not U.isServer() then
+        U.warn(TAG, "race not launched by SWGRCouch (from %s): removing %d local guest(s)", tostring(from), #guests)
+        local _, kept = M.removeAll("race not launched by SWGRCouch", "launch")
+        if (kept or 0) > 0 then
+            -- GuestRemoval "never": the guests stay; one view, and (server) their cars go to the AI once they exist
+            St.race.singleView = true
+            if U.isServer() then
+                for _, sl in pairs(St.join.slots) do sl.abandonPending = true end   -- Lua table
+            end
+        end
+        return
+    end
+    local gs = U.gs()
+    local handed, removed, kept = 0, 0, 0
+    for i = 1, #guests do
+        local e = guests[i]
+        U.try(TAG, function()
+            local pc = e.pc
+            if not U.ok(pc) then return end
+            local racer = U.isVehicle(pc.Pawn)
+            if not racer and U.ok(gs) then
+                -- ARacingGameState:FindRacerIndexByPlayer(Object player) -> Int (-1 = not a racer)
+                local okI, idx = pcall(function() return gs:FindRacerIndexByPlayer(pc.PlayerState) end)
+                racer = okI and type(idx) == "number" and idx >= 0
+            end
+            local id = e.ctrlId
+            if racer and type(id) == "number" then
+                local s = St.join.slots[id]
+                if not s then s = newSlot(id); St.join.slots[id] = s end
+                s.leaving = true
+                s.abandonPending = true
+                abandonCar(s, pc)                       -- no car yet: raceTick retries
+                handed = handed + 1
+            elseif dropGuest(id, pc, "race not launched by SWGRCouch", "launch") then
+                removed = removed + 1
+            else
+                -- GuestRemoval "never": kept un-joined; a car it may still get goes to the AI (raceTick)
+                local s = (type(id) == "number") and St.join.slots[id] or nil
+                if s then s.abandonPending = true end
+                kept = kept + 1
+            end
+        end)
+    end
+    St.join.active = false
+    St.join.keep = false
+    if handed > 0 or kept > 0 then St.race.singleView = true end
+    U.warn(TAG, "race not launched by SWGRCouch (from %s, first seen in %s): %d guest car(s) handed to the AI, %d "
+        .. "guest(s) removed, %d kept", tostring(from), tostring(new), handed, removed, kept)
+    St.emit("players")
+end
+
+-- Hot reload (Ctrl+F11): the joined ControllerIds survive in a UE4SS shared variable (strings only). Each token is
+-- the id followed by flag letters: L = leaving, D = pad disconnected, A = our Disconnect override is on its car
+-- (without A/D a reconnect after the reload would be "no change" and the AI would keep the car), N = not joined
+-- (a guest of a race the mod did not launch, kept only until the next front end), X = abandoned (its car is the
+-- AI's for good), P = abandonPending (car not handed yet). St.race.singleView (set by the race_enter guard) is kept
+-- too: the reloaded state re-enters the race from BOOT, where the guard does not run.
+function M.persistShared(put)
+    local ids = {}
+    for id, s in pairs(St.join.slots) do
+        if s.joined or s.leaving or s.abandonPending then
+            ids[#ids + 1] = tostring(id) .. (s.leaving and "L" or "") .. (s.disconnected and "D" or "")
+                .. (s.aiOverride and "A" or "") .. (s.joined and "" or "N") .. (s.abandoned and "X" or "")
+                .. (s.abandonPending and "P" or "")
+        end
+    end
+    put("join.joined", table.concat(ids, ","))
+    put("join.keep", St.join.keep == true)
+    put("join.enabled", St.join.enabled == true)
+    put("join.frozen", St.join.frozen == true)
+    put("join.singleView", St.race.singleView == true)
+    -- the dangling-listener count is per game PROCESS (header), not per Lua state; pad presence: the boot-time device
+    -- hook events do not come again after a reload
+    put("join.removedCount", tostring(life.removedCount))
+    local pads = {}
+    for uid, on in pairs(padHook) do pads[#pads + 1] = tostring(uid) .. (on and "+" or "-") end   -- Lua table
+    put("join.pads", table.concat(pads, ","))
+end
+
+function M.restoreShared(get)
+    local v = get("join.joined")
+    if type(v) == "string" and v ~= "" then
+        for tok in v:gmatch("[^,]+") do
+            local idStr, flags = tok:match("^(%d+)(%a*)$")
+            local id = tonumber(idStr)
+            if id and id >= 1 and id <= maxGuestId() then
+                local s = newSlot(id)
+                s.joined = flags:find("N", 1, true) == nil
+                s.leaving = flags:find("L", 1, true) ~= nil
+                s.disconnected = flags:find("D", 1, true) ~= nil
+                s.aiOverride = flags:find("A", 1, true) ~= nil
+                s.abandoned = flags:find("X", 1, true) ~= nil
+                s.abandonPending = flags:find("P", 1, true) ~= nil
+                St.join.slots[id] = s
+            end
+        end
+        U.log(TAG, "hot reload: joined guests restored: %s", v)
+    end
+    if get("join.keep") == true then St.join.keep = true end
+    if get("join.enabled") == true then St.join.enabled = true end
+    if get("join.frozen") == true then St.join.frozen = true end
+    local rc = tonumber(get("join.removedCount"))
+    if rc and rc > 0 then
+        life.removedCount = rc
+        U.warn(TAG, "hot reload: %d guest RemovePlayer(s) earlier in this game session (V-JOIN-12)", rc)
+    end
+    local pads = get("join.pads")
+    if type(pads) == "string" then
+        for uidStr, sign in pads:gmatch("(%d+)([%+%-])") do padHook[tonumber(uidStr)] = (sign == "+") end
+    end
+    if get("join.singleView") == true then
+        -- St.race is rebuilt by the first onNewWorld of the new state (St.resetRace): set it again on that first
+        -- "world" event, before phase.tick emits "race_enter"/"phase" (split.enterRace, gfx, hud read it)
+        local pendingSV = true
+        St.on("world", TAG .. ".sv", function()
+            if not pendingSV then return end
+            pendingSV = false
+            St.race.singleView = true
+            U.log(TAG, "hot reload: single view restored (guests handed to the AI)")
+        end)
+    end
+end
+
+function M.init()
+    St.join.slots = St.join.slots or {}
+    if cfg.GuestRemoval ~= nil and cfg.GuestRemoval ~= "never" then
+        if cfg.GuestRemovalUnsafe == true then
+            U.err(TAG, "GuestRemoval=%s with GuestRemovalUnsafe: guests WILL be removed, and every RemovePlayer crashes "
+                .. "the game at the next control-mapping rebuild (crash reproducer)", tostring(cfg.GuestRemoval))
+        else
+            U.err(TAG, "GuestRemoval=%s ignored: every RemovePlayer crashes the game at the next control-mapping "
+                .. "rebuild (2026-10-06 crash); treated as \"never\" (set GuestRemovalUnsafe = true to reproduce)",
+                tostring(cfg.GuestRemoval))
+        end
+    end
+    U.hook(C.FN.DeviceChanged, { post = M.onDevice }, TAG)
+    St.on("phase", TAG, function(new, old)
+        if new == "FRONTEND" then M.resync() end
+    end)
+    St.on("race_enter", TAG, onRaceEnter)
+end
+
+return M

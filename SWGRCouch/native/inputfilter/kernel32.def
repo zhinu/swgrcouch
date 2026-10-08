@@ -1,0 +1,15 @@
+LIBRARY kernel32.dll
+EXPORTS
+VirtualProtect
+VirtualQuery
+GetModuleHandleExW
+GetModuleFileNameW
+CreateFileW
+ReadFile
+WriteFile
+CloseHandle
+GetFileAttributesExW
+GetTickCount64
+DisableThreadLibraryCalls
+CreateThread
+Sleep
