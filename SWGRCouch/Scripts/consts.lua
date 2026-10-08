@@ -9,7 +9,7 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION   = "0.9.0"
+C.VERSION   = "0.9.1"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
 C.TAB_LABEL = "SPLIT SCREEN"
 

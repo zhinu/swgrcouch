@@ -4,7 +4,7 @@ A fan-made [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod that adds **loc
 to STAR WARS Galactic Racer, with a **SPLIT SCREEN** tab in the main menu, its own race setup and per-player HUDs,
 menus and cameras.
 
-> **Status: work in progress (0.9.0), tested with 2 and 3 players.** The game itself is not included. You need a
+> **Status: work in progress (0.9.1), tested with 2 and 3 players.** The game itself is not included. You need a
 > legitimately bought copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It
 > contains no game code and no game assets; the screenshots are captures of the game running with the mod.
 
@@ -79,12 +79,12 @@ Other things it does:
 ## Install
 
 Download the latest release from the **Releases** page:
-- `SWGRCouch-0.9.0-with-UE4SS.zip`: mod + UE4SS 3.0.1-1160 (easiest);
-- `SWGRCouch-0.9.0.zip`: mod only, if you already have that UE4SS build.
+- `SWGRCouch-0.9.1-with-UE4SS.zip`: mod + UE4SS 3.0.1-1160 (easiest);
+- `SWGRCouch-0.9.1.zip`: mod only, if you already have that UE4SS build.
 
 ### Linux (Steam + Proton)
 ```sh
-unzip SWGRCouch-0.9.0-with-UE4SS.zip && cd SWGRCouch-0.9.0
+unzip SWGRCouch-0.9.1-with-UE4SS.zip && cd SWGRCouch-0.9.1
 ./install.sh "$HOME/.local/share/Steam/steamapps/common/STAR WARS Galactic Racer"
 ```
 Then set the launch options in Steam (Properties > Launch options):
@@ -102,7 +102,7 @@ WINEDLLOVERRIDES="dwmapi=n,b" %command%
 
 ### Check it works
 Start the game. `Griffin\Binaries\Win64\ue4ss\UE4SS.log` should contain
-`SWGRCouch 0.9.0 loading` and `modules=34/34`, and the main menu has a **SPLIT SCREEN** tab.
+`SWGRCouch 0.9.1 loading` and `modules=34/34`, and the main menu has a **SPLIT SCREEN** tab.
 
 ## Play
 1. Main menu > **SPLIT SCREEN** (LB / RB).
@@ -144,7 +144,7 @@ return {
 ```
 Every key is listed and explained in [docs/REFERENCE.md](docs/REFERENCE.md) §7.2 and in `Scripts/config.lua`.
 
-## Known issues (0.9.0)
+## Known issues (0.9.1)
 - **Results screen with 3+ players**: P1's pad cannot press CONTINUE (the game gives the screen to the last player).
   Use the menu owner's pad, or keyboard / mouse.
 - **P1 crashes out while others race**: P1's view can stay on a frozen crash camera instead of following another

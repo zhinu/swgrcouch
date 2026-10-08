@@ -486,6 +486,7 @@ function M.previewPlanet(i, d)
     setFText(P.name, def, "PlayerFacingName", d.planet.name)
     setFText(P.desc, def, "GameDescriptionText", "")      -- <H1>...</> tags: the rich text style draws them
     setPlain(P.count, d.count)
+    if not P.vid then ctx().stopVideo("planet view without video") end
     if P.vid then
         local playing = d.url and ctx().playVideoOn(P.vid, d.url) or false
         if not playing then ctx().setImage(P.vid, d.planet.select) end
@@ -572,8 +573,11 @@ local function newNode(i, tex)
     if not U.ok(cls) then error("WBP_RunMap_Activity_Presentation_Btn_C not found") end
     local b = U.WBL():Create(c.W.pc, cls, c.W.pc)
     if not U.ok(b) then error("Create(activity button) failed") end
-    -- MapNode stays nil: RefreshFromMapNode returns at IsValid; PreConstruct applies IconActivity and NodeState
-    b.IconActivity = tex
+    -- MapNode stays nil: RefreshFromMapNode returns at IsValid; PreConstruct applies IconActivity and NodeState.
+    -- IconActivity is an ObjectProperty: a resolved Texture2D, never the path (review 0.9.0).
+    local t = V.texture(tex) or V.texture(TEX.race)
+    if not t then error("node icon texture missing: " .. tostring(tex)) end
+    b.IconActivity = t
     b.NodeState = 1                                        -- Choosable: cream disc, accept sound on click
     pcall(function() b.IsTooltipEnabled = false end)
     local slot = place(T.canvas, b, { ax = 0.5, ay = 0.5, x = -500, y = -500, z = 3 })
@@ -768,8 +772,8 @@ function M.showTracks(d)
     for r, row in ipairs(rows) do
         local y = rowY(r)
         local rw = T.rows[r]
-        ctx().setText(rw.name, nil)                       -- (labels are native text blocks, not cached rows)
         setPlain(rw.name, row.name)
+        pcall(function() rw.name:SetColorAndOpacity(slate(INK_LIGHT)) end)   -- a previous map's focus highlight off
         rw.slot:SetPosition({ X = NAME_X, Y = y })
         showHT(rw.box)
         local lastX = NODE_X0

@@ -495,6 +495,7 @@ function M.build(root, pc, page)
     W = { pageKey = U.key(page), page = page, pc = pc, tree = page.WidgetTree, cyclers = {}, opts = {}, cols = {},
           focusables = {} }
     textCache, imgCache = {}, {}
+    M._resetVideoFlags()                                   -- address-keyed like the caches above (new page)
     local ok, err = pcall(buildWidgets, root)
     if not ok then
         W.broken = true
@@ -515,6 +516,7 @@ function M.forget()
     if S.active then M.stopVideo("menu replaced") end
     releasePreviews("menu replaced", false)                  -- the old page's images die with it
     if CM then pcall(CM.forget) end
+    M._resetVideoFlags()
     S.active = false
     W = nil
 end
@@ -524,6 +526,7 @@ end
 -- when the setup closes. VERIFY(V-SET-02): OpenUrl("./Movies/MEDIA_PlanetEstablish_*.bk2") + Play() shows the movie
 -- through M_UI_MediaPlayer_Video_Mat on our image; fallback cfg.SetupVideo = false (planet still image).
 local video = { player = nil, mat = nil, saved = false, prevUrl = "", prevLoop = false, url = nil, matOn = {} }
+function M._resetVideoFlags() video.matOn = {} end     -- M.build / M.forget are defined above `video`
 
 local function videoObjects()
     if not U.ok(video.player) then video.player = U.obj("/Game/Movies/UI_BinkMediaPlayer.UI_BinkMediaPlayer") end
@@ -794,6 +797,7 @@ cmapCtx = function()
             return setImage(img, path)
         end,
         playVideoOn = function(img, url) return playVideo(url, img) end,
+        stopVideo = function(why) M.stopVideo(why) end,
         onItem = function(i) M.onItem(i) end,
         realMs = function() return M.realMs() end,
     }
@@ -1274,6 +1278,11 @@ function M.showStep(step)
         S.startConfirmUntil = 0
     else
         local sel = STEPS[step]() or 1
+        if S.view == "cmap" and #S.items == 0 then           -- nothing to show: the list (with its message), map kept
+            S.view = "list"
+            pcall(CM.setView, nil)
+            show(W.body, true)
+        end
         if S.view == "cmap" then
             local okC, t = pcall(function()
                 if step == "planet" then return CM.showPlanets(S.planets, sel) end
