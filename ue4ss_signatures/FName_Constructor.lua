@@ -1,19 +1,7 @@
--- STAR WARS: Galactic Racer (UE 5.7.4, SWGR-Win64-Shipping.exe, 488,290,328 bytes, build Auto-381121)
--- public: __cdecl FName::FName(wchar_t const *, enum EFindName)
---   rcx = this (FName*), rdx = const TCHAR* Name, r8d = EFindName; returns this in rax.
--- Resolves to 0x143C7DB26 (image base 0x140000000), in section .data1.
--- Body (UE 5.7 UnrealNames.cpp, FName(const WIDECHAR*, EFindName) -> MakeDetectNumber(MakeUnconvertedView)):
---   wcslen + pure-ANSI check (OR of chars, cmp 0x7F), ParseNumber @0x140101D7F ('_' + digits),
---   narrow copy into a 0x400 stack buffer, then FName store/find @0x143893284 with edx = FindType (from r8d),
---   writes (Number << 32 | ComparisonIndex) to *this.
--- NOT the FNAME_Add-only clone @0x143946AA8 (hard-codes edx = 1) and NOT FName(int32 Len, const WIDECHAR*, EFindName) @0x143C835A8.
--- Pattern matches exactly once in the mapped image (verified offline, scripts/sig/fname/verify_fname_ctor.py).
-
 function Register()
-    return "41 56 56 57 53 48 81 EC 48 04 00 00 44 89 C3 48 89 CE 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 84 24 40 04 00 00 48 89 54 24 20 31 FF 48 85 D2 0F 84 ?? ?? ?? ?? 44 0F B7 02 31 C0 48 89 D1 66 45 85 C0 74"
+    return "56 57 53 48 81 EC 50 04 00 00 48 89 CE 48 8B 05 ? ? ? ? 48 31 E0 48 89 84 24 48 04 00 00 48 89 54 24 20 31 FF 48 85 D2 0F 84 ? ? ? ? 44 0F B7 02 31 C0 48 89 D1 66 45 85 C0 74 1C 45 0F B7 C0 44 09 C0 44 0F B7 41 02 48 83 C1 02 66 45 85 C0 75 EA 83 F8 7F 0F 97 C0 88 44 24 2C 48 29 D1 48 D1 E9 89 4C 24 28 85 C9 0F 84 ? ? ? ? 48 8D 5C 24 28 48 89 D1 48 89 DA E8 ? ? ? ? 89 C7 8B 03 85 C0 0F 84 ? ? ? ? 48 8B 54 24 20 F6 44 24 2C 01 0F 85 ? ? ? ? 85 C0 7E 1E B9 00 04 00 00 39 C8 0F 42 C8 45 31 C0 46 8A 0C 42 46 88 4C 04 40 49 FF C0 4C 39 C1 75 EF 48 8D 54 24 40 48 8D 4C 24 30 48 89 11 89 41 08 C6 41 0C 00 BA 01 00 00 00 E8 ? ? ? ? 48 C1 E7 20 89 C0 48 09 F8 48 89 06 48 8B 8C 24 48 04 00 00"
 end
 
 function OnMatchFound(MatchAddress)
-    -- The pattern starts at the first byte of the function (push r14).
     return MatchAddress
 end

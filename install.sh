@@ -57,7 +57,8 @@ DO_NET=1
 if [ -n "$FB_INI" ] && [ "$NET_EXPLICIT" = 0 ]; then DO_NET=0; fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# UE4SS 3.0.1-1160-g3f4037d2 (the build the mod is tested with): $UE4SS_DIR, else ./ue4ss-build next to this script
+# UE4SS Galactic Racer Edition, open beta 2026-10-08 (the build the mod is tested with; required since the game
+# hotfix CL382493, UE4SS 3.0.1-1160 crashes on it): $UE4SS_DIR, else ./ue4ss-build next to this script
 # (the release zip "with-UE4SS" ships it), else an UE4SS already installed in the game is used as it is.
 UE4SS_SRC="${UE4SS_DIR:-$HERE/ue4ss-build}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -87,9 +88,15 @@ install_mod() {
   local BIN="$GAME/Griffin/Binaries/Win64"
   [ -f "$BIN/SWGR-Win64-Shipping.exe" ] || { echo "no SWGR-Win64-Shipping.exe in $BIN" >&2; exit 1; }
   if [ -f "$UE4SS_SRC/dwmapi.dll" ]; then
-    # 1. UE4SS (existing files, e.g. an edited UE4SS-settings.ini or mods.txt, are kept)
-    cp -n "$UE4SS_SRC/dwmapi.dll" "$BIN/"
+    # 1. UE4SS (existing files, e.g. an edited UE4SS-settings.ini or mods.txt, are kept). The core files are
+    #    always replaced (dated copy first): an older UE4SS left in place does not boot on the hotfixed game.
     mkdir -p "$BIN/ue4ss"
+    local core
+    for core in dwmapi.dll ue4ss/UE4SS.dll ue4ss/MemberVariableLayout.ini ue4ss/UE4SS_SDK_Backends/UE4SS.json; do
+      [ -f "$UE4SS_SRC/$core" ] || continue
+      if [ -f "$BIN/$core" ] && ! cmp -s "$UE4SS_SRC/$core" "$BIN/$core"; then backup "$BIN/$core"; fi
+      mkdir -p "$(dirname "$BIN/$core")"; cp "$UE4SS_SRC/$core" "$BIN/$core"
+    done
     cp -rn "$UE4SS_SRC/ue4ss/." "$BIN/ue4ss/"
   elif [ -f "$BIN/dwmapi.dll" ] && [ -d "$BIN/ue4ss" ]; then
     echo "UE4SS: already installed in $BIN (kept as it is)"
@@ -167,6 +174,8 @@ install_mod() {
   else
     set_ini "$SI" ConsoleEnabled 1; set_ini "$SI" GuiConsoleEnabled 1; set_ini "$SI" GuiConsoleVisible 1
   fi
+  # the Galactic Racer Edition needs these two on the hotfixed game (an older settings file is kept, so set them here)
+  set_ini "$SI" bForceGUObjectArrayForIteration true; set_ini "$SI" UseCache 0
   if [ "$UE57" = 1 ]; then set_ini "$SI" MajorVersion 5; set_ini "$SI" MinorVersion 7; fi
   [ "$GTPE" = 1 ] && set_ini "$SI" DefaultExecuteInGameThreadMethod ProcessEvent
   echo "UE4SS: $BIN/ue4ss (mods.txt and UE4SS-settings.ini updated; copies *.swgrcouch-$STAMP)"

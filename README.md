@@ -4,7 +4,7 @@ A fan-made [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod that adds **loc
 to STAR WARS Galactic Racer, with a **SPLIT SCREEN** tab in the main menu, its own race setup and per-player HUDs,
 menus and cameras.
 
-> **Status: work in progress (0.9.1), tested with 2 and 3 players.** The game itself is not included. You need a
+> **Status: work in progress (0.9.3), tested with 2 and 3 players.** The game itself is not included. You need a
 > legitimately bought copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It
 > contains no game code and no game assets; the screenshots are captures of the game running with the mod.
 
@@ -71,20 +71,20 @@ Other things it does:
 | 4 players, network races | not tested yet | — |
 
 ## Requirements
-- **STAR WARS Galactic Racer** (Steam, build CL 381121, UE 5.7.4). Other builds may need new UE4SS signatures.
-- **UE4SS 3.0.1-1160** (`v3.0.1-1160-g3f4037d2`). The "with-UE4SS" release zip contains it.
+- **STAR WARS Galactic Racer** (Steam, hotfix build CL 382493 of 2026-10-08, UE 5.7.4; the launch build CL 381121 needs SWGRCouch 0.9.1). Other builds may need new UE4SS signatures.
+- **UE4SS Galactic Racer Edition (open beta, 2026-10-08)**, needed since the game hotfix of 2026-10-08 (build CL382493; the old UE4SS 3.0.1-1160 no longer works on it). The "with-UE4SS" release zip contains it.
 - One pad per player (XInput / Xbox layout tested; DualShock through Steam Input or Moonlight works).
 - Windows, or Linux with Proton (tested: GE-Proton 11-7 + Steam Linux Runtime 4).
 
 ## Install
 
 Download the latest release from the **Releases** page:
-- `SWGRCouch-0.9.1-with-UE4SS.zip`: mod + UE4SS 3.0.1-1160 (easiest);
-- `SWGRCouch-0.9.1.zip`: mod only, if you already have that UE4SS build.
+- `SWGRCouch-0.9.3-with-UE4SS.zip`: mod + UE4SS Galactic Racer Edition (open beta, 2026-10-08) (easiest);
+- `SWGRCouch-0.9.3.zip`: mod only, if you already have that UE4SS build.
 
 ### Linux (Steam + Proton)
 ```sh
-unzip SWGRCouch-0.9.1-with-UE4SS.zip && cd SWGRCouch-0.9.1
+unzip SWGRCouch-0.9.3-with-UE4SS.zip && cd SWGRCouch-0.9.3
 ./install.sh "$HOME/.local/share/Steam/steamapps/common/STAR WARS Galactic Racer"
 ```
 Then set the launch options in Steam (Properties > Launch options):
@@ -102,7 +102,7 @@ WINEDLLOVERRIDES="dwmapi=n,b" %command%
 
 ### Check it works
 Start the game. `Griffin\Binaries\Win64\ue4ss\UE4SS.log` should contain
-`SWGRCouch 0.9.1 loading` and `modules=34/34`, and the main menu has a **SPLIT SCREEN** tab.
+`SWGRCouch 0.9.3 loading` and `modules=34/34`, and the main menu has a **SPLIT SCREEN** tab.
 
 ## Play
 1. Main menu > **SPLIT SCREEN** (LB / RB).
@@ -144,7 +144,7 @@ return {
 ```
 Every key is listed and explained in [docs/REFERENCE.md](docs/REFERENCE.md) §7.2 and in `Scripts/config.lua`.
 
-## Known issues (0.9.1)
+## Known issues (0.9.3)
 - **Results screen with 3+ players**: P1's pad cannot press CONTINUE (the game gives the screen to the last player).
   Use the menu owner's pad, or keyboard / mouse.
 - **P1 crashes out while others race**: P1's view can stay on a frozen crash camera instead of following another
