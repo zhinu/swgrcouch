@@ -223,7 +223,8 @@ function M.plan(choice)
     local arch = tonumber(s.arch)
     if arch == nil then pcall(function() arch = tonumber(choice.archetype.Archetype) end) end
     return { arch = arch, cls = V().classByArch(arch), single = s.single == true, grid = s.grid or "native",
-             maxRacers = tonumber(s.maxRacers), flow = s.flow, players = s.players or {} }
+             maxRacers = tonumber(s.maxRacers), flow = s.flow, players = s.players or {},
+             aiTierPath = type(s.aiTierPath) == "string" and s.aiTierPath or nil }   -- 0.12.0 RACE SETUP "Opponents"
 end
 
 -- Full grid (user feedback item 9). Humans are inside NumEntrants (2026-10-07 race: GMV_Race "PlayerChoice x5" =
@@ -922,6 +923,8 @@ function M.start(opts)
     end
     local debugBuild = U.ok(choice.debugBuild) and choice.debugBuild or nil
     local cond = M.conditionArg(choice)
+    -- 0.12.0: no native hook on the game's messaging while it launches (backprompt.lua HOOK RULES)
+    pcall(function() U.mod("backprompt").disarm("launch") end)
     U.log(TAG, "LaunchCustomRace(%s, %s, %s, {TagName=%s}, %s, %s)", U.pathOf(choice.archetype),
         U.pathOf(choice.gameMode), U.pathOf(choice.track), U.str(cond.TagName),
         build and U.pathOf(build) or "nil", debugBuild and U.pathOf(debugBuild) or "nil")
@@ -952,6 +955,7 @@ function M.start(opts)
 
     -- 9. per-player vehicles / AI class / builds in the recipe, evidence for V-LCH-03, then the events
     St.launch.accepted = true                          -- phase: long LAUNCHING timeout (cfg.LaunchAcceptedTimeoutMs)
+    St.launch.acceptCb = St.cb                         -- 0.12.0: the launch hold starts with the next callback
     U.try(TAG, applyRecipe, choice, plan)
     St.launch.vehPlan = { arch = plan.arch, players = plan.players, flow = plan.flow }
     U.try(TAG, function() U.mod("diag").recipe() end)

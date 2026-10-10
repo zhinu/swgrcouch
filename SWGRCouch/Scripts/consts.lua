@@ -9,9 +9,9 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION   = "0.10.1"
+C.VERSION = "0.12.0"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
-C.TAB_LABEL = "FREE MODE"     -- 0.10.1: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
+C.TAB_LABEL = "FREE MODE"     -- 0.11.0: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 
 -- Game tab id (FName string) -> WS_ScreenContent index of the game's own pane [MT§2]
 C.GAME_TABS = {
@@ -52,6 +52,8 @@ C.CDO = {
     InputDeviceLibrary        = "/Script/Engine.Default__InputDeviceLibrary",   -- work/script-objects.tsv
     -- 0.7.0 uxsplit.lua: MPC reads/writes (Get/SetVectorParameterValue, SetScalarParameterValue; UE4SS object dump)
     KismetMaterialLibrary     = "/Script/Engine.Default__KismetMaterialLibrary",
+    -- 0.11.0 hud.lua: GetViewportSize(Object) -> Vector2D px, GetViewportScale(Object) -> Float DPI (UE4SS object dump)
+    WidgetLayoutLibrary       = "/Script/UMG.Default__WidgetLayoutLibrary",
 }
 
 -- Blueprint classes (generated class paths, "_C"). LoadAsset needs the path WITHOUT "_C" (util does that).
@@ -71,6 +73,20 @@ C.BP = {
     PostRaceInfo     = "/Game/Griffin/UI/Screens/PostRace/WBP_PostRace_Info.WBP_PostRace_Info_C",
     -- shown by CSM_RF_SpectatingInProgress (P1 wrecked) over the whole viewport (asset-list.txt; wreck-design §4.3)
     PvpSpectate      = "/Game/Griffin/UI/Screens/Multiplayer/WBP_PVP_Spectate.WBP_PVP_Spectate_C",
+    -- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §3.4; every name checked in asset-list.txt; recipes in
+    -- notes/research/ui-parts-catalogue.md §1). Variables are written before the add (PreConstruct reads them).
+    -- page title "/RACE SETUP" (HeaderText, LightVersion; SetScreenTitleText later)                      C2, V-FIN-03
+    ScreenTitle      = "/Game/Griffin/UI/Widgets/Decorative/WBP_Screen_Title.WBP_Screen_Title_C",
+    -- command-row pill without button logic (ColorBase / ColorSelect / ColorUnselect; Img_Tile_Select_Thick = focus) C4
+    ButtonBackerPill = "/Game/Griffin/UI/Widgets/Buttons/WBP_CommonButtonBacker_Pill.WBP_CommonButtonBacker_Pill_C",
+    -- CLASS info-panel trait (write Txt_Title / RT_Desc; never InitFromTrait: soft loads)                C13, V-FIN-08
+    VehicleTrait     = "/Game/Griffin/UI/Widgets/Vehicle/WBP_VehicleTrait.WBP_VehicleTrait_C",
+    -- Aurebesh micro line + Moki label + rule (Label, Color; SetLabel)                                        C13
+    SectionSubLabel  = "/Game/Griffin/UI/Widgets/Global/WBP_SectionSubLabel.WBP_SectionSubLabel_C",
+    -- the teal info panel (MainPanelColor, ShowTightPanel, ShowShadow, ShowGradientPanel; NS_Content)        C13
+    DarkPanel        = "/Game/Griffin/UI/Widgets/Decorative/WBP_DarkPanel.WBP_DarkPanel_C",
+    -- the run map's dark detail card (ShowHeader, Label, SetTooltipLabel; NS_TooltipContent:SetContent)      C16
+    TooltipHolder    = "/Game/Griffin/UI/Widgets/Decorative/WBP_Tooltip_Holder.WBP_Tooltip_Holder_C",
 }
 
 -- Data assets (object paths "Pkg.Obj")
@@ -265,6 +281,7 @@ C.E = {
     ThreeP       = { FavorTop = 0 },                                                    -- EThreePlayerSplitScreenType
     FourP        = { Grid = 0 },                                                        -- EFourPlayerSplitScreenType
     HAlign       = { Fill = 0, Left = 1, Center = 2, Right = 3 },                       -- EHorizontalAlignment [UI§1.3]
+    Stretch      = { ScaleToFit = 2, ScaleToFitX = 3 },                                 -- EStretch (usmap; hud.lua)
     DeviceConn   = { Invalid = 0, Unknown = 1, Disconnected = 2, Connected = 3 },       -- EInputDeviceConnectionState
     FailReason   = { None = 0, Wrecked = 1, ModeRules = 2, HighRisk = 4, ExtraConditions = 8, MissedRequiredWin = 16,
                      UnknownPreSave = 32 },                                             -- ERaceFailReason (flags)
@@ -277,14 +294,28 @@ C.E = {
     },
 }
 
--- Player colours (FLinearColor tables)
+-- Player colours (FLinearColor tables, linear RGB). 0.12.0 UI v2 (ui-redesign-final.md §2.2, rule 4): the game's own
+-- planet tones (PlanetsToColors of the Arcade event card, ui-parts-catalogue §5) instead of the 0.11 blue / red / green /
+-- yellow; used on small marks only (P-tags, the 6-su art rule, the stripe on scenario art, taken / lobby tags, in-race
+-- tags). nametags.lua, roster.lua and the RACERS taken tags read this table and follow without edits.
 C.COLOURS = {
-    [1] = { R = 0.20, G = 0.55, B = 1.00, A = 1 },   -- P1 blue
-    [2] = { R = 1.00, G = 0.25, B = 0.25, A = 1 },   -- P2 red
-    [3] = { R = 0.30, G = 0.90, B = 0.40, A = 1 },   -- P3 green
-    [4] = { R = 1.00, G = 0.85, B = 0.20, A = 1 },   -- P4 yellow
-    Remote = { R = 1, G = 1, B = 1, A = 1 },         -- remote humans: neutral white
+    [1] = { R = 0.7913, G = 0.3968, B = 0.1046, A = 1 },   -- P1 APRICOT #E6A95B (Jakku / Tatooine)
+    [2] = { R = 0.2874, G = 0.5271, B = 0.4678, A = 1 },   -- P2 TEAL #92C0B6 (Ando Prime)
+    [3] = { R = 0.4564, G = 0.5647, B = 0.1878, A = 1 },   -- P3 LIME #B4C678 (Lantaana)
+    [4] = { R = 0.5906, G = 0.0931, B = 0.0931, A = 1 },   -- P4 CRAIT RED #CA5656 (Crait)
+    Remote = { R = 1, G = 1, B = 1, A = 1 },               -- remote humans: neutral white (unchanged)
 }
+-- Tag ink on each hue (§2.2): INK #222221 on apricot / teal / lime, WHITE on Crait red (Moki 46-52 su only).
+C.COLOUR_INK = {
+    [1] = { R = 0.0160, G = 0.0160, B = 0.0152, A = 1 },
+    [2] = { R = 0.0160, G = 0.0160, B = 0.0152, A = 1 },
+    [3] = { R = 0.0160, G = 0.0160, B = 0.0152, A = 1 },
+    [4] = { R = 1, G = 1, B = 1, A = 1 },
+    Remote = { R = 0.0160, G = 0.0160, B = 0.0152, A = 1 },
+}
+-- VERIFY(V-FIN-13): P4's Crait red readable over bright tracks and not mistaken for the UI's RUST accent. Fallback:
+-- C.COLOURS[4] = C.COLOUR_P4_SAND and C.COLOUR_INK[4] = INK (SAND #D1C371, the Sentinel I tone).
+C.COLOUR_P4_SAND = { R = 0.6376, G = 0.5457, B = 0.1651, A = 1 }
 
 --- Name of an enum value. Works for name->value tables (C.E.Override) and value->name arrays (C.E.NetworkFailure).
 ---@return string

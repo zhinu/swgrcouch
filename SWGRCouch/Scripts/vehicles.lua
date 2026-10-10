@@ -25,9 +25,14 @@
 --   IconPaletteTag/IconMaskTag path is the livery decal, not a UI icon (dead end, vehicle-preview.md §2).
 --   0.10.0 RACERS step (notes/design/vehicle-step-v2.md §3.4, §4.2): the VEHICLE stage picks a base MODEL, then a
 --   LIVERY of it: M.models groups the presets by base model, M.podName gives a pod its own name (Pvp_IA_Plane_*).
+--   0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §9.4, §12 WI-09): M.modelName = the game's model name
+--   (TH_<Model>.ItemName, read once per class by hard path, the decoded English table as the fallback, V-FIN-10);
+--   M.models(arch)[i].name carries it (presets keep their codename labels and LIVERY words); M.classInfo adds the
+--   first paragraph of VA.Description and the traits with their rich markup kept (the <action/> glyph tag).
 
 local C   = require("consts")
 local cfg = require("config")
+local St  = require("state")
 local U   = require("util")
 
 local M = {}
@@ -137,8 +142,9 @@ local P = {
     },
 }
 
+-- Codename of a preset (the presets' name / label / LIVERY word; the game's model name is M.modelName):
 -- "PRE_Car_Hammerhead_QuietStrength" -> "HAMMERHEAD"; "PRE_Plane_MythP2" -> "MYTH P2"; "PRE_Bike_Hognose_A" -> "HOGNOSE A"
-local function modelName(id)
+local function codeName(id)
     local s = id:gsub("^PRE_%a+_", "")
     s = s:gsub("_(Protagonist)$", ""):gsub("_(QuietStrength)$", ""):gsub("_(Protege)$", ""):gsub("_(InnerHonour)$", "")
     s = s:gsub("_(Mercenary)$", ""):gsub("_(Thrall)$", ""):gsub("_(ElegantProfessional)$", ""):gsub("_(Rager)$", "")
@@ -211,7 +217,7 @@ function M.presets(arch)
         local id, owner, sub = e[1], e[2], e[3]
         local dir = "/GriffinSharedVehicles/Griffin/Vehicles/" .. (cls and cls.folder or "?") .. "/Presets/"
             .. (sub and (sub .. "/") or "")
-        local name = modelName(id)
+        local name = codeName(id)
         out[#out + 1] = {
             index = i, id = id, owner = owner, name = name, base = baseModel(id),
             label = owner and (name .. " (" .. owner .. ")") or name,
@@ -255,13 +261,211 @@ function M.podName(base)
     return type(base) == "string" and POD_NAME[base] or nil
 end
 
--- {{base = "Orca", name = "ORCA", presets = {<M.presets entries>}, badge = path | nil, code = "CRE" | nil,
--- maker = "ROBOTIC" | nil, podName = "VULPTEREEN 327" | nil}, ...}: M.presets(arch) grouped by base model in
--- first-appearance order (Car 13 = 12 + ANTAGONIST, Bike 12, Skimmer 12, Plane 8). Inside a model the owner-less
--- presets come first (MYTH P1/P2/P3), then the owner liveries (pods: AGED). code = 3-letter model code, set only when
--- the model has no badge (pods but MYTH, PRE_Car_Antagonist); maker = the badge's maker (Robotic_B -> "ROBOTIC") for
--- the info line. Cached and shared like M.presets: callers must not modify the tables.
-local modelCache = {}   -- arch -> list
+---------------------------------------------------------------------------------------------------- model names
+-- UI v2 §9.4 (WI-09): the names the game's garage shows, TH_<Model>.ItemName (CstThemeData, a hard asset at
+-- /Game/Griffin/Vehicles/<Cars|Bikes|Skimmers>/Customisation/<Model>/TH_<Model>; only its Thumbnail is soft) =
+-- VehicleText "VehicleType_<Model>". TH_NAME = the decoded English values (cue4cli, CL382493, ui-v2/proposal-select.md
+-- §11.1; the garage shows them upper case) and the fallback when the runtime read gives nothing (V-FIN-10). Pods have
+-- no theme name (TH_Myth has no ItemName in the decode): POD_NAME, else the codename (MYTH, NORTHROPI);
+-- PRE_Car_Antagonist has no theme: ANTAGONIST.
+local TH_NAME = {
+    Beluga = "ARZ 41", Bluefin = "VORNSKR", Bowhead = "ZAK'NEE", Goblin = "NAPACO D", Hammerhead = "JAKOBEAST",
+    Mako = "DRE'SHI", Marlin = "WI-9", Minke = "MAGUS", Orca = "NL-4", Snook = "KJC 99", Tarpon = "STARWEB",
+    Wahoo = "DARC X",                                                                                -- cars
+    Boa = "ZILLO", Boomslang = "REVASI G", Bushmaster = "NOVYOK", Cobra = "KILLION", Cottonmouth = "DRD 61",
+    Hognose = "RI'CON", Kingsnake = "KO-5", Lancehead = "AM-1", Mamba = "CIZA T", Rattlesnake = "KREED",
+    Sidewinder = "PEL'AKE", Taipan = "RAR 27",                                                       -- bikes
+    Albatross = "REEK", Condor = "RATHTAR", Crow = "WIST L", Jackdaw = "HC-8", Merlin = "MSM 04",
+    Needletail = "CESCA", Pelican = "SU-3", Peregrine = "SAH 66", Raven = "RAK S", Rook = "SLING",
+    Saker = "TA'HAN", Stork = "MOK'SI",                                                              -- skimmers
+}
+
+-- base model -> EVehicleArchetype, and its lower-case spelling -> the base ("orca" -> "Orca"), from the preset table.
+local BASE_ARCH, BASE_CANON = {}, {}
+for arch, list in pairs(P) do
+    for _, e in ipairs(list) do
+        local b = baseModel(e[1])
+        BASE_ARCH[b], BASE_CANON[string.lower(b)] = arch, b
+    end
+end
+
+-- "PRE_Skimmer_Rook_Mentor" -> 3 (the class key in the asset name); nil for anything else.
+local function archOfId(id)
+    local key = type(id) == "string" and id:match("^PRE_(%a+)_") or nil
+    local cls = key and M.classByKey(key) or nil
+    return cls and cls.arch or nil
+end
+
+-- Upper case for a display name: ASCII plus the Latin-1 letters of UTF-8 ("é" -> "É"; a localised ItemName).
+local function upperName(s)
+    s = string.upper(s)
+    return (s:gsub("\195([\160-\190])", function(c)
+        local b = c:byte()
+        if b == 0xB7 then return nil end                -- U+00F7 (division sign) has no upper case
+        return "\195" .. string.char(b - 32)
+    end))
+end
+
+-- A model name read from the game, or nil when it is unusable: empty, absurdly long, markup, a missing string table
+-- entry ("VehicleType_<Model>" key) or the text of a wrapper instead of an FText.
+local function cleanName(s)
+    if type(s) ~= "string" then return nil end
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" or #s > 40 or s:find("[<>%c]") or s:find("^VehicleType_") then return nil end
+    local low = string.lower(s)
+    if low:find("missing", 1, true) or low:find("userdata", 1, true) or low:find("uobject", 1, true)
+        or low:find("^function") or low:find("^table:") then
+        return nil
+    end
+    return upperName(s)
+end
+
+local function themePath(cls, base)
+    return "/Game/Griffin/Vehicles/" .. cls.folder .. "/Customisation/" .. base .. "/TH_" .. base .. ".TH_" .. base
+end
+
+-- CstThemeData.ItemName (FText) of a theme object, cleaned; nil when unreadable.
+local function themeName(o)
+    local s = nil
+    pcall(function() s = U.str(o.ItemName) end)
+    return cleanName(s)
+end
+
+-- One read pass per speeder class (the first call of M.modelName / M.models for it, game thread): resident themes
+-- (StaticFindObject) are read at once; the others are loaded by path (U.obj: LoadAsset) one per THEME_LOAD_GAP_MS
+-- across all classes, because a theme's hard presetRecipe pulls its PRE_ class package in and the class's first
+-- visit must not load 12 vehicle packages in one tick. A theme that stays unresolved keeps its decoded name.
+-- cfg.VehicleNameSource: "load" (default) | "find" (resident themes only, never LoadAsset) | "table" (no read).
+local THEME_LOAD_GAP_MS = 250
+local themeRead = {}           -- arch -> {names = {base -> name}, todo = {bases}, total, resident, loaded, done}
+local themeLoadAtMs = -1e9     -- St.nowMs() of the last theme LoadAsset
+local modelCache = {}          -- arch -> list (M.models)
+
+-- The pass finished: the cached model entries (shared tables) take the names read; one V-FIN-10 line per class.
+local function themeDone(arch, cls, st, src)
+    st.done = true
+    local n, diffs, sample = 0, {}, nil
+    for base, name in pairs(st.names) do
+        n = n + 1
+        if name ~= TH_NAME[base] and #diffs < 4 then diffs[#diffs + 1] = string.format("%s '%s'", base, name) end
+        if base == "Beluga" or base == "Boa" or base == "Albatross" then sample = base .. " = " .. name end
+    end
+    for _, m in ipairs(modelCache[arch] or {}) do
+        local nm = st.names[m.base]
+        if nm then m.name = nm end
+    end
+    -- VERIFY(V-FIN-10): "model names <Class>: 12/12 from TH_<Model>.ItemName" (a localised game: the differing names
+    -- are listed); fallback = the decoded English table (also cfg.VehicleNameSource = "table").
+    local other = (#diffs > 0) and ("; not the English table: " .. table.concat(diffs, ", ")) or ""
+    U.log(TAG, "model names %s: %d/%d from TH_<Model>.ItemName (%d resident, %d loaded; source %s), %d from the "
+        .. "decoded English table%s%s (V-FIN-10)", cls.key, n, st.total, st.resident, st.loaded, tostring(src),
+        st.total - n, sample and ("; " .. sample) or "", other)
+end
+
+local function themeStep(arch)
+    local st = themeRead[arch]
+    if st and st.done then return st end
+    local cls = M.classByArch(arch)
+    if not cls or arch == 1 then return nil end         -- pods: no theme names
+    -- game thread only (StaticFindObject / LoadAsset); IsInGameThread missing (offline harness) = go on
+    local okT, inGT = pcall(function() return IsInGameThread() end)
+    if okT and inGT ~= true then return st end
+    local src = opt("VehicleNameSource", "load")
+    if not st then
+        st = { names = {}, todo = {}, total = 0, resident = 0, loaded = 0, done = false }
+        themeRead[arch] = st
+        local seen = {}
+        for _, e in ipairs(P[arch] or {}) do
+            local base = baseModel(e[1])
+            if TH_NAME[base] and not seen[base] then
+                seen[base] = true
+                st.total = st.total + 1
+                if src ~= "table" then
+                    local okF, o = pcall(StaticFindObject, themePath(cls, base))
+                    if okF and U.ok(o) then
+                        local nm = themeName(o)
+                        if nm then st.names[base], st.resident = nm, st.resident + 1 end
+                    elseif src ~= "find" then
+                        st.todo[#st.todo + 1] = base
+                    end
+                end
+            end
+        end
+    end
+    if #st.todo > 0 then
+        local now = St.nowMs()
+        if now - themeLoadAtMs < THEME_LOAD_GAP_MS then return st end
+        themeLoadAtMs = now
+        local base = table.remove(st.todo, 1)
+        local o = U.obj(themePath(cls, base))           -- StaticFindObject, else LoadAsset (game thread, util throttle)
+        if U.ok(o) then
+            local nm = themeName(o)
+            if nm then st.names[base], st.loaded = nm, st.loaded + 1 end
+        end
+        if #st.todo > 0 then return st end
+    end
+    themeDone(arch, cls, st, src)
+    return st
+end
+
+-- The game's name of a model: presetOrModel = a M.presets / M.models entry, a preset id ("PRE_Car_Beluga_Protagonist")
+-- or a base model ("Beluga") -> "ARZ 41"; pods "VULPTEREEN 327" (M.podName) or the codename ("MYTH"); the Antagonist
+-- car "ANTAGONIST"; "?" for nothing usable. Game thread for the runtime read (off it: the decoded table).
+-- read = false (models() building its cache): the names known now (a finished read, else the decoded table) without
+-- starting the class's theme read: only the callers that show the names (the v2 cards: racers -> M.modelName) start
+-- it, so a "classic" page never loads a TH_ asset (integration 0.12.0); themeDone updates the cached models in place.
+local function nameOf(presetOrModel, read)
+    local x, base, id = presetOrModel, nil, nil
+    if type(x) == "table" then
+        base = x.base
+        id = x.id or (type(x.presets) == "table" and type(x.presets[1]) == "table" and x.presets[1].id) or nil
+        if base == nil and type(id) == "string" then base = baseModel(id) end
+    elseif type(x) == "string" and x ~= "" then
+        if x:match("^PRE_") then id, base = x, baseModel(x) else base = x end
+    end
+    if type(base) ~= "string" or base == "" then return "?" end
+    base = BASE_CANON[string.lower(base)] or base
+    local arch = archOfId(id) or BASE_ARCH[base]
+    if arch == 1 then return POD_NAME[base] or upperName(base) end
+    local name = TH_NAME[base]
+    if not name then return upperName(base) end         -- ANTAGONIST (no theme), unknown models
+    local st = read and themeStep(arch) or themeRead[arch]
+    return (st and st.names[base]) or name
+end
+
+function M.modelName(presetOrModel) return nameOf(presetOrModel, true) end
+
+-- "model names Car game 12/12 (12 resident, 0 loaded) · Bike table · Skimmer pending 3" (test.cmd / diag, V-FIN-10).
+function M.nameStatus()
+    local parts = {}
+    for _, c in ipairs(M.CLASSES) do
+        if c.arch ~= 1 then
+            local st = themeRead[c.arch]
+            local n = 0
+            for _ in pairs(st and st.names or {}) do n = n + 1 end
+            if not st then
+                parts[#parts + 1] = c.key .. " not read"
+            elseif not st.done then
+                parts[#parts + 1] = string.format("%s pending %d", c.key, #st.todo)
+            elseif n == 0 then
+                parts[#parts + 1] = c.key .. " table"
+            else
+                parts[#parts + 1] = string.format("%s game %d/%d (%d resident, %d loaded)", c.key, n, st.total,
+                    st.resident, st.loaded)
+            end
+        end
+    end
+    return "model names " .. table.concat(parts, " · ")
+end
+
+-- {{base = "Orca", name = "NL-4", codename = "ORCA", presets = {<M.presets entries>}, badge = path | nil,
+-- code = "CRE" | nil, maker = "ROBOTIC" | nil, podName = "VULPTEREEN 327" | nil}, ...}: M.presets(arch) grouped by
+-- base model in first-appearance order (Car 13 = 12 + ANTAGONIST, Bike 12, Skimmer 12, Plane 8). name = the game's name
+-- (the decoded English table until the class's theme read, started by M.modelName, finishes; then updated in place);
+-- codename = the upper-cased base (the classic cards' word). Inside a
+-- model the owner-less presets come first (MYTH P1/P2/P3), then the owner liveries (pods: AGED). code = 3-letter model
+-- code, set only when the model has no badge (pods but MYTH, PRE_Car_Antagonist); maker = the badge's maker
+-- (Robotic_B -> "ROBOTIC") for the info line. Cached and shared like M.presets: callers must not modify the tables.
 function M.models(arch)
     arch = tonumber(arch)
     if arch == nil then return {} end
@@ -271,7 +475,7 @@ function M.models(arch)
         local m = byBase[p.base]
         if not m then
             local badge, badgeCode = M.badge(p), BADGE[p.base]
-            m = { base = p.base, name = string.upper(p.base), presets = {}, badge = badge,
+            m = { base = p.base, name = nameOf(p, false), codename = string.upper(p.base), presets = {}, badge = badge,
                   code = (not badge) and string.upper(p.base:sub(1, 3)) or nil,
                   maker = badgeCode and string.upper((badgeCode:gsub("_%a+$", ""))) or nil,
                   podName = M.podName(p.base) }
@@ -371,6 +575,8 @@ end
 -- (the game's VEHICLE SELECT draws the X button there), <H1>..</> styles. Plain text blocks showed the markup raw
 -- ("USE <ACTION ID=..."), so: known actions become their pad button, every other tag is dropped.
 local ACTION_LABEL = { improvedsteering = "X" }
+-- UI v2: the pad glyph of an action tag, as the T_UI_Cntrl_XB_<glyph>_Icn key (theme.glyph): X = the left face button.
+local ACTION_GLYPH = { improvedsteering = "FaceButton_Left" }
 local function plainText(s)
     if type(s) ~= "string" or s == "" then return "" end
     s = s:gsub('<action%s+id="([^"]*)"%s*/>', function(id) return ACTION_LABEL[id:lower()] or "the button" end)
@@ -379,22 +585,84 @@ local function plainText(s)
 end
 M.plainText = plainText
 
+-- The paragraphs of a VA text, trimmed, markup kept (the descriptions separate them with a blank line, "\r\n\r\n").
+local function paragraphs(s)
+    local out = {}
+    if type(s) ~= "string" or s == "" then return out end
+    s = s:gsub("\r\n?", "\n"):gsub("\n[ \t]*\n%s*", "\1")
+    for para in (s .. "\1"):gmatch("([^\1]*)\1") do
+        para = para:gsub("^%s+", ""):gsub("%s+$", "")
+        if para ~= "" then out[#out + 1] = para end
+    end
+    return out
+end
+
+-- Rich text -> runs for an own inline-glyph line (V-FIN-08 fallback): 'Use <action id="ImprovedSteering"/> to drift'
+-- -> {{text = "Use "}, {action = "ImprovedSteering", key = "X", glyph = "FaceButton_Left"}, {text = " to drift"}};
+-- other tags are dropped from the text runs; key / glyph nil for an action the table does not know.
+local function richRuns(s)
+    local runs = {}
+    if type(s) ~= "string" or s == "" then return runs end
+    local function text(t)
+        t = t:gsub("<[^>]*>", "")
+        if t ~= "" then runs[#runs + 1] = { text = t } end
+    end
+    local pos = 1
+    while pos <= #s do
+        local a, b, id = s:find('<action%s+id="([^"]*)"%s*/>', pos)
+        if not a then text(s:sub(pos)); break end
+        text(s:sub(pos, a - 1))
+        runs[#runs + 1] = { action = id, key = ACTION_LABEL[id:lower()], glyph = ACTION_GLYPH[id:lower()] }
+        pos = b + 1
+    end
+    return runs
+end
+M.richRuns = richRuns
+
+-- Class texts from the VA asset (FText fields), "" when unreadable:
+--   name; desc (every paragraph, plain) and traits = {"NAME: description", ...} (0.11.0, the classic CLASS list);
+--   UI v2 (§7.1 info panel, WI-09): intro = the first paragraph of Description (plain), introRich = the same with the
+--   game's markup kept (FuseRichTextBlock DT_RichText_Body), lore = the other paragraphs (plain); traitList =
+--   {{name = "DRIFT", rich = 'Use <action id="ImprovedSteering"/> to drift ...' (WBP_VehicleTrait.RT_Desc), plain =
+--   "Use X to drift ...", runs = richRuns(rich), action = "ImprovedSteering" | nil}, ...} (VA_Plane: none).
+-- Cached per class for CLASS_INFO_MS (the v2 CLASS page reads it for 4 posters + the panel): shared, do not modify.
+local CLASS_INFO_MS = 5000
+local classInfoCache = {}      -- cls.key -> {at, info}
+
 function M.classInfo(cls)
-    local out = { name = cls and cls.label or "?", desc = "", traits = {} }
+    local ck = cls and cls.key
+    local c = ck and classInfoCache[ck]
+    if c and St.nowMs() - c.at < CLASS_INFO_MS then return c.info end
+    local out = { name = cls and cls.label or "?", desc = "", traits = {}, intro = "", introRich = "", lore = "",
+                  traitList = {} }
     local va = M.archetypeObj(cls)
     if not va then return out end
     local n = ftextStr(va, "PlayerFacingName")
     if n ~= "" then out.name = string.upper(n) end
-    out.desc = plainText(ftextStr(va, "Description"))
+    local raw = ftextStr(va, "Description")
+    out.desc = plainText(raw)
+    pcall(function()
+        local paras = paragraphs(raw)
+        out.introRich = paras[1] or ""
+        out.intro = plainText(out.introRich)
+        if #paras > 1 then out.lore = plainText(table.concat(paras, " ", 2)) end
+    end)
     pcall(function()
         local arr = va.Traits
         local cnt = arr:GetArrayNum()
         for i = 1, math.min(cnt, 3) do
             local t = arr[i]
-            local tn, td = U.str(t.PlayerFacingName), plainText(U.str(t.Description))
+            local tnRaw, tdRaw = U.str(t.PlayerFacingName), U.str(t.Description)
+            local tn, td = tnRaw, plainText(tdRaw)
             out.traits[#out.traits + 1] = string.upper(tn) .. (td ~= "" and (": " .. td) or "")
+            pcall(function()
+                local rich = tdRaw:gsub("^%s+", ""):gsub("%s+$", "")
+                out.traitList[#out.traitList + 1] = { name = string.upper((tn:gsub("^%s+", ""):gsub("%s+$", ""))),
+                    rich = rich, plain = td, runs = richRuns(rich), action = rich:match('<action%s+id="([^"]*)"%s*/>') }
+            end)
         end
     end)
+    if ck then classInfoCache[ck] = { at = St.nowMs(), info = out } end
     return out
 end
 

@@ -57,7 +57,18 @@ end
 
 ---------------------------------------------------------------------------------------------------- errors
 --- xpcall with traceback. Returns true, results... or false (error logged with traceback).
+-- 0.12.0 debug breadcrumbs: a native crash's minidump holds no Lua stack, so while _G.SWGRCouch_traceLeft > 0 (set
+-- from test.cmd only) U.try / U.tryEvery log their tag before running and count it down. Off: one rawget per call.
+local function trace(kind, what)
+    local left = rawget(_G, "SWGRCouch_traceLeft")
+    if type(left) == "number" and left > 0 then
+        _G.SWGRCouch_traceLeft = left - 1
+        U.log("trace", "%s %s", kind, tostr(what))
+    end
+end
+
 function U.try(tag, fn, ...)
+    trace("try", tag)
     if type(fn) ~= "function" then
         U.err(tag, "U.try: not a function (%s)", type(fn))
         return false
@@ -76,6 +87,7 @@ end
 --- the game thread). Same results as U.try.
 local tryEveryState = {}
 function U.tryEvery(key, ms, tag, fn, ...)
+    trace("every", key)
     if type(fn) ~= "function" then
         U.logEvery("tryEvery!" .. tostr(key), 60000, tag, "ERROR U.tryEvery(%s): not a function (%s)", tostr(key), type(fn))
         return false
@@ -723,6 +735,7 @@ local function registryHolds(co)
 end
 
 function U.anchorThread()
+    St.cb = (St.cb or 0) + 1                    -- 0.12.0: a new callback (St.launchHold)
     local co, isMain = coroutine.running()
     if co == nil or isMain or anchoredThreads[co] then return end
     anchoredThreads[co] = true

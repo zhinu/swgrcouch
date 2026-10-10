@@ -22,6 +22,12 @@
 -- false keeps them, flagged inert (dimmed) with a NO RAMJET / NO CRITICAL MALFUNCTIONS tag.
 -- Uniqueness: an ability family in one d-pad slot (cfg.PerkUniqueFamily), a part family in one part slot, a trait in
 -- one trait slot. A picker equip of something another slot holds swaps the two slots (toast "SWAPPED WITH ...").
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §9.5, §9.9, §12 WI-13): M.detail returns, for the v2 cards,
+-- the short tag line of §9.5 in `tag` (LEGENDARY · TIER III, PART 2 OF 6, LEVEL 2 (+ racers' " · COST n"), CRASH
+-- ABILITY, LEVEL 6 OF 10, ENERGY 3 + 9 = 12 / FROM <KIT>, RACER STYLE, TRAIT), texts without the prose key hints
+-- ("A: ready. Left / right: another kit.", "Press A to ...") and no large art; cfg.UiStyle = "classic" (or the style
+-- argument) keeps the 0.11.0 texts that cards.lua shows. M.board adds kitLabel ("REDLINER KIT" / "CUSTOM KIT" after an
+-- edit), kitFrom (the kit an edited loadout came from) and the POWER / ENERGY numbers.
 local cfg = require("config")
 local D   = require("perkdata")
 
@@ -83,6 +89,12 @@ function M.traitSlots() return clampCount("PerkTraitSlots", 3, 1, 4) end
 local function flawsOn() return opt("PerkFlaws", true) ~= false end
 local function uniqueFamily() return opt("PerkUniqueFamily", true) ~= false end
 local function hideInert() return opt("PerkHideInert", true) ~= false end
+-- UI v2 detail texts (§9.5) unless the style is "classic": style = the caller's argument, else cfg.UiStyle (read per
+-- call: the page picks cards.lua or cards2.lua at build, by the same key).
+local function v2Texts(style)
+    if style == nil then style = opt("UiStyle", "v2") end
+    return style ~= "classic"
+end
 
 ---------------------------------------------------------------------------------------------------- textures
 -- perkdata's relative texture path -> full object path ("Icons/X/T_UI_Y" -> D.TEX .. "Icons/X/T_UI_Y.T_UI_Y"); a full
@@ -243,16 +255,33 @@ function M.kitLabel(key, pilotStyle, arch)
     return name .. " KIT"
 end
 
+-- The name of the kit an edited ("custom") loadout came from: "REDLINER", "MAX POWER · REDLINER", "TIER 3 · HUSKY";
+-- nil when lo is not custom or its origin is unknown.
+local function fromName(lo, pilotStyle, arch)
+    if type(lo) ~= "table" or lo.kit ~= "custom" or lo.from == nil or lo.from == "custom" then return nil end
+    local n = kitName(lo.from, pilotStyle, arch)
+    if n == "CUSTOM" then return nil end
+    return n
+end
+
 -- [extension] The KIT row: "LOADOUT: REDLINER KIT" | "LOADOUT: CUSTOM · FROM REDLINER" (§2.5).
 function M.kitRow(lo, pilotStyle, arch)
     if type(lo) ~= "table" then return "LOADOUT" end
     if lo.kit == "custom" then
-        if lo.from ~= nil and lo.from ~= "custom" and kitName(lo.from, pilotStyle, arch) ~= "CUSTOM" then
-            return "LOADOUT: CUSTOM · FROM " .. kitName(lo.from, pilotStyle, arch)
-        end
+        local from = fromName(lo, pilotStyle, arch)
+        if from then return "LOADOUT: CUSTOM · FROM " .. from end
         return "LOADOUT: CUSTOM"
     end
     return "LOADOUT: " .. M.kitLabel(lo.kit, pilotStyle, arch)
+end
+
+-- UI v2 KIT row (§9.5): label = the kit's label ("SURVIVOR KIT", "MAX POWER · REDLINER", "TIER 3 · HUSKY"), after an
+-- edit "CUSTOM KIT"; from = fromName ("SURVIVOR"; the KIT detail's tag line says "FROM SURVIVOR"), nil otherwise.
+function M.loadoutLabel(lo, pilotStyle, arch)
+    arch = tonumber(arch)
+    if type(lo) ~= "table" then return "CUSTOM KIT", nil end
+    if lo.kit == "custom" then return "CUSTOM KIT", fromName(lo, pilotStyle, arch) end
+    return M.kitLabel(lo.kit, pilotStyle, arch), nil
 end
 
 ---------------------------------------------------------------------------------------------------- tables
@@ -1008,48 +1037,156 @@ function M.summary(lo, arch)
 end
 
 ---------------------------------------------------------------------------------------------------- detail panel
-local function abilityDetail(kind, n, id, sys)
+-- Each builder takes v2 (v2Texts): true = the §9.5 short tag line, no prose key hint, no large art; false = the
+-- 0.11.0 texts (cards.lua). The v2 tag is ONE line in every width class (N: 764 - 80 - 20 - 2 x 24 = 616 su of
+-- Overpass Medium 27 LS 200): a fact that would make it longer (a missing system, a trait's requirement) is one
+-- sentence appended to the body instead (the body wraps; the detail card rises, §9.5).
+
+-- Advance widths (su, kerning ignored) of the tag role, measured from the game's Overpass Medium face
+-- (work/design/ui-v2/language/fonts) at 27 su; tracking LS 200 = 7.2 su per gap. "·" reads 0 in that face's advance
+-- table: 9.4 su (the period's 8.3 + 1) is assumed. Unknown characters count as "W". Checked against the font's own
+-- layout on every v2 tag and kit name (218 strings): never below the real width (kerning only tightens), at most
+-- 17 su above it.
+local TAG_ADV = {
+    [" "] = 8.6, ["+"] = 23.1, ["-"] = 14.5, ["0"] = 23.3, ["1"] = 13.8, ["2"] = 22.0, ["3"] = 21.6, ["4"] = 22.6,
+    ["5"] = 22.2, ["6"] = 21.7, ["7"] = 19.0, ["8"] = 22.2, ["9"] = 21.7, ["="] = 23.1, A = 24.9, B = 24.0, C = 23.2,
+    D = 24.9, E = 21.9, F = 20.4, G = 24.7, H = 25.5, I = 10.3, J = 19.8, K = 24.3, L = 20.2, M = 29.0, N = 25.6,
+    O = 26.2, P = 22.8, Q = 26.2, R = 24.2, S = 21.7, T = 21.2, U = 25.1, V = 23.8, W = 30.3, X = 22.6, Y = 23.6,
+    Z = 23.3, ["'"] = 8.1, ["&"] = 24.8, ["."] = 8.3, [":"] = 8.3, ["/"] = 18.0, ["("] = 12.7, [")"] = 12.7,
+    ["\194\183"] = 9.4, ["\226\128\166"] = 35.3,
+}
+local TAG_TRACK = 7.2
+-- The width budget of a v2 tag line (su): N's 616 less a 6 su margin for the "·" guess (cards2 may set its own).
+M.TAG_MAX_SU = 610
+
+-- Estimated width (su) of a tag line at the tag role (invalid UTF-8: every byte counts as "W").
+function M.tagWidth(s)
+    if type(s) ~= "string" or s == "" then return 0 end
+    local w, n = 0, 0
+    local ok = pcall(function()
+        for _, cp in utf8.codes(s) do
+            w = w + (TAG_ADV[utf8.char(cp)] or TAG_ADV.W)
+            n = n + 1
+        end
+    end)
+    if not ok then w, n = #s * TAG_ADV.W, #s end
+    return w + TAG_TRACK * math.max(0, n - 1)
+end
+
+-- "FROM <KIT>" that fits M.TAG_MAX_SU: the whole kit name, else its part before " · " ("FROM MAX POWER", "FROM
+-- BRAWLER"), else whole trailing words dropped with an ellipsis ("FROM CUSTOM ORD…", the §6.3 cut rule).
+local function fromTag(name)
+    local t = "FROM " .. name
+    if M.tagWidth(t) <= M.TAG_MAX_SU then return t end
+    local head = name:match("^(.-) \194\183 ")
+    if head and head ~= "" then
+        t = "FROM " .. head
+        if M.tagWidth(t) <= M.TAG_MAX_SU then return t end
+        name = head
+    end
+    local words = {}
+    for wd in name:gmatch("%S+") do words[#words + 1] = wd end
+    for k = #words - 1, 1, -1 do
+        t = "FROM " .. table.concat(words, " ", 1, k) .. "\226\128\166"
+        if M.tagWidth(t) <= M.TAG_MAX_SU then return t end
+    end
+    return "FROM " .. (words[1] or name)
+end
+
+-- v2 body sentence for a missing system (RC-2): "Pods have no ramjet: this works only in part." (partly) / "...: this
+-- does nothing here." (inert).
+local function systemSentence(need, arch, partly)
+    local what = (need == "ramjet") and "ramjet" or "critical malfunctions"
+    local who = (arch == 1) and ("Pods have no " .. what) or ("This car has no " .. what)
+    return who .. (partly and ": this works only in part." or ": this does nothing here.")
+end
+
+-- Appends v2 body sentences to a detail's plain and rich texts (rich: optional own markup, e.g. an <H1> keyword).
+local function addSentence(d, plain, rich)
+    if not plain then return d end
+    d.plain = ((d.plain and d.plain ~= "") and (d.plain .. " ") or "") .. plain
+    d.rich = ((d.rich and d.rich ~= "") and (d.rich .. " ") or "") .. (rich or plain)
+    return d
+end
+
+local function abilityDetail(kind, n, id, sys, v2, arch)
     local where = (kind == "crash") and "CRASH ABILITY" or SLOT_NAME["ab" .. n]
     local a = id and D.ABILITIES[id] or nil
     if not a then
         local title = (kind == "crash") and "NO CRASH ABILITY" or "EMPTY SLOT"
-        local text = (kind == "crash") and "No ability fires when the car crashes. Press A to pick an Ion Blast."
-            or "Nothing on this d-pad direction. Press A to pick an ability."
+        local text, tag
+        if v2 then
+            text = (kind == "crash") and "No ability fires when the car crashes." or "Nothing on this d-pad direction."
+            tag = where                                 -- the slot: "D-PAD UP" / "CRASH ABILITY"
+        else
+            text = (kind == "crash") and "No ability fires when the car crashes. Press A to pick an Ion Blast."
+                or "Nothing on this d-pad direction. Press A to pick an ability."
+            tag = where .. " · EMPTY"
+        end
         return { kind = kind, id = false, title = title, plain = text, rich = text, icon = M.tex(D.EMPTY_ICON),
-                 iconKind = "disc", tag = where .. " · EMPTY" }
+                 iconKind = "disc", tag = tag }
     end
-    local tag = where .. " · LEVEL " .. tostring(a.lvl)
-    if inertIn(a, sys) then tag = tag .. " · " .. NO_SYS[a.needs] end
-    if partlyOff(a, sys) then tag = tag .. " · PARTLY " .. SYS_NAME[a.partly] end
-    -- costId: racers.lua appends " · COST n" from perkapply.abilityCost(costId) (a game read, RC-4)
-    return { kind = kind, id = id, title = a.name, rich = a.rich, plain = a.desc, icon = M.tex(a.icon),
-             sub = M.tex(a.sub), iconKind = "disc", large = M.tex(a.large), tag = tag, costId = id }
+    local tag
+    if v2 then
+        tag = (kind == "crash") and "CRASH ABILITY" or ("LEVEL " .. tostring(a.lvl))
+    else
+        tag = where .. " · LEVEL " .. tostring(a.lvl)
+        if inertIn(a, sys) then tag = tag .. " · " .. NO_SYS[a.needs] end
+        if partlyOff(a, sys) then tag = tag .. " · PARTLY " .. SYS_NAME[a.partly] end
+    end
+    -- costId: racers.lua appends " · COST n" from perkapply.abilityCost(costId) (a game read, RC-4). v2: d-pad slots
+    -- only ("LEVEL 2 · COST 3"); the crash slot's line stays "CRASH ABILITY" (crash abilities cost no Energy).
+    local costId = id
+    if v2 and kind == "crash" then costId = nil end
+    local d = { kind = kind, id = id, title = a.name, rich = a.rich, plain = a.desc, icon = M.tex(a.icon),
+                sub = M.tex(a.sub), iconKind = "disc", large = (not v2) and M.tex(a.large) or nil, tag = tag,
+                costId = costId }
+    if v2 then
+        if inertIn(a, sys) then addSentence(d, systemSentence(a.needs, arch, false)) end
+        if partlyOff(a, sys) then addSentence(d, systemSentence(a.partly, arch, true)) end
+    end
+    return d
 end
 
-local function partDetail(id, sys)
+-- n / nSlots: the slot ("PART 2 OF 6" on an empty slot in v2).
+local function partDetail(id, sys, v2, n, nSlots, arch)
     local p = id and D.PARTS[id] or nil
     if not p then
-        local text = "A free part slot. Press A to fit a part."
+        local text, tag = "A free part slot. Press A to fit a part.", "PART · EMPTY"
+        if v2 then
+            text = "A free part slot."
+            tag = (n and nSlots) and string.format("PART %d OF %d", n, nSlots) or "PART"
+        end
         return { kind = "part", id = false, title = "EMPTY PART SLOT", plain = text, rich = text, iconKind = "tile",
-                 tag = "PART · EMPTY" }
+                 tag = tag }
     end
     local c = CAT[p.cat]
     local bits = { D.RARITY[p.rarity] or "PART" }
     local note = nil
     if p.fam then
         local f = D.PART_FAMILIES[p.fam]
-        bits[#bits + 1] = string.format("TIER %s OF %s", ROMAN[p.tier] or tostring(p.tier), ROMAN[#f.tiers] or #f.tiers)
+        if v2 then
+            bits[#bits + 1] = "TIER " .. (ROMAN[p.tier] or tostring(p.tier))
+        else
+            bits[#bits + 1] = string.format("TIER %s OF %s", ROMAN[p.tier] or tostring(p.tier),
+                ROMAN[#f.tiers] or #f.tiers)
+        end
         note = f.ladder
     end
     if p.cat == "pod" then bits[#bits + 1] = "POD TRAIT"
+    elseif v2 then
+        if p.faulty then bits[#bits + 1] = "STARTS FAULTY" end   -- the picker category is not repeated (§9.5)
     elseif p.cat == "flaws" then bits[#bits + 1] = "STARTS FAULTY"
     elseif c then bits[#bits + 1] = c.name end
-    if inertIn(p, sys) then bits[#bits + 1] = NO_SYS[p.needs] end
-    return { kind = "part", id = id, title = p.name, rich = p.rich, plain = p.desc, icon = M.tex(p.icon),
-             iconKind = "tile", large = M.tex(p.large), tag = table.concat(bits, " · "), note = note }
+    if inertIn(p, sys) and not v2 then bits[#bits + 1] = NO_SYS[p.needs] end
+    local d = { kind = "part", id = id, title = p.name, rich = p.rich, plain = p.desc, icon = M.tex(p.icon),
+                iconKind = "tile", large = (not v2) and M.tex(p.large) or nil, tag = table.concat(bits, " · "),
+                note = note }
+    if v2 and inertIn(p, sys) then addSentence(d, systemSentence(p.needs, arch, false)) end
+    return d
 end
 
-local function tuneDetail(s, lo, arch, sys)
+local function tuneDetail(s, lo, arch, sys, v2)
     local st = D.STATS[s]
     local lv = floor(tonumber(lo.tune[s]) or 0)
     local name, plain, rich = st.name, st.desc, st.rich
@@ -1057,7 +1194,15 @@ local function tuneDetail(s, lo, arch, sys)
         name, plain, rich = D.ADVANCED[arch], D.ADVANCED_DESC[arch], D.ADVANCED_DESC[arch]
     end
     local tag
-    if s == 3 and sys.ramjet == false then
+    if v2 then
+        tag = string.format("LEVEL %d OF %d", lv, LEVEL_MAX)
+        if s == 3 and sys.ramjet == false then
+            -- RC-2: RAMJET keeps counting for POWER on a car without a ramjet (said in the body: the tag is one line)
+            local why = (arch == 1) and " Pods have no ramjet: this level only counts for POWER."
+                or " This car has no ramjet: this level only counts for POWER."
+            plain, rich = (plain or "") .. why, (rich or "") .. why
+        end
+    elseif s == 3 and sys.ramjet == false then
         tag = "NO RAMJET: COUNTS FOR POWER ONLY"
     elseif s == 4 then
         tag = string.format("LEVEL %d OF %d · ENERGY +%d · POWER %d", lv, LEVEL_MAX, D.BATTERY[lv] or 0, M.power(lo))
@@ -1066,28 +1211,46 @@ local function tuneDetail(s, lo, arch, sys)
             D.STACKS[LEVEL_MAX] or 13, M.power(lo))
     end
     return { kind = "tune", id = s, title = name, plain = plain, rich = rich, icon = M.tex(st.icon), iconKind = "glyph",
-             large = M.tex(st.large), tag = tag, note = st.lv10, level = lv }
+             large = (not v2) and M.tex(st.large) or nil, tag = tag, note = st.lv10, level = lv }
 end
 
-local function styleDetail(key)
+local function styleDetail(key, v2)
     local st = D.STYLES[key]
-    if not st then return { kind = "style", id = false, title = "RACER STYLE", plain = "", rich = "", tag = "" } end
+    if not st then
+        return { kind = "style", id = false, title = "RACER STYLE", plain = "", rich = "",
+                 tag = v2 and "RACER STYLE" or "" }
+    end
     local names = {}
     for _, t in ipairs(st.traits) do names[#names + 1] = D.TRAITS[t] and D.TRAITS[t].name or t end
+    local tag = v2 and "RACER STYLE" or ((st.pod and "POD STYLE" or "RACER STYLE") .. " · 3 TRAITS")
     return { kind = "style", id = key, title = st.name, rich = st.rich, plain = st.desc, icon = M.tex(st.icon),
-             iconKind = st.pod and "tile" or "glyph", tag = (st.pod and "POD STYLE" or "RACER STYLE") .. " · 3 TRAITS",
-             note = table.concat(names, " · ") }
+             iconKind = st.pod and "tile" or "glyph", tag = tag, note = table.concat(names, " · ") }
 end
 
-local function traitDetail(id, sys)
+-- n / nSlots: the slot ("TRAIT 2 OF 3" on an empty slot in v2).
+local function traitDetail(id, sys, v2, n, nSlots, arch)
     local t = id and D.TRAITS[id] or nil
     if not t then
-        local text = "A free trait slot. Press A to pick a trait."
+        local text, tag = "A free trait slot. Press A to pick a trait.", "TRAIT · EMPTY"
+        if v2 then
+            text = "A free trait slot."
+            tag = (n and nSlots) and string.format("TRAIT %d OF %d", n, nSlots) or "TRAIT"
+        end
         return { kind = "trait", id = false, title = "EMPTY TRAIT SLOT", plain = text, rich = text, iconKind = "glyph",
-                 tag = "TRAIT · EMPTY" }
+                 tag = tag }
+    end
+    local req = t.requires and D.TRAITS[t.requires] or nil
+    if v2 then
+        -- "TRAIT"; the requirement and a missing system become body sentences (the tag stays one line)
+        local d = { kind = "trait", id = id, title = t.name, rich = t.rich, plain = t.desc, icon = M.tex(t.icon),
+                    iconKind = "glyph", tag = "TRAIT" }
+        if req then addSentence(d, "Needs " .. req.name .. ".", "Needs <H1>" .. req.name .. "</>.") end
+        if inertIn(t, sys) then addSentence(d, systemSentence(t.needs, arch, false)) end
+        if partlyOff(t, sys) then addSentence(d, systemSentence(t.partly, arch, true)) end
+        return d
     end
     local bits = { D.TRAIT_GROUPS[GROUP_INDEX[t.group]] and D.TRAIT_GROUPS[GROUP_INDEX[t.group]].name or "TRAIT" }
-    if t.requires and D.TRAITS[t.requires] then bits[#bits + 1] = "NEEDS " .. D.TRAITS[t.requires].name end
+    if req then bits[#bits + 1] = "NEEDS " .. req.name end
     if inertIn(t, sys) then bits[#bits + 1] = NO_SYS[t.needs] end
     if partlyOff(t, sys) then bits[#bits + 1] = "PARTLY " .. SYS_NAME[t.partly] end
     return { kind = "trait", id = id, title = t.name, rich = t.rich, plain = t.desc, icon = M.tex(t.icon),
@@ -1096,38 +1259,55 @@ end
 
 -- Detail panel data of a board slot (itemId nil = what the slot holds) or of a picker row (itemId = the row's id,
 -- false = its EMPTY row): {kind, id, title, rich (the game's markup), plain, icon, iconKind ("disc" | "tile" |
--- "glyph"), large, tag, note, costId}. pilotStyle (optional) names the KIT row's "pilot" kit.
-function M.detail(slot, lo, arch, itemId, pilotStyle)
+-- "glyph"), large, tag, note, costId}. pilotStyle (optional) names the KIT row's "pilot" kit. style (optional):
+-- "v2" | "classic", default cfg.UiStyle ("v2"): v2 = the §9.5 short tag (VERIFY(V-FIN-09): one line in every width
+-- class), no prose key hints, large = nil, KIT title "REDLINER KIT" / "CUSTOM KIT"; classic = the 0.11.0 texts.
+function M.detail(slot, lo, arch, itemId, pilotStyle, style)
     arch = tonumber(arch)
     if type(lo) ~= "table" then lo = blankLo(arch, pilotStyle) end
+    local v2 = v2Texts(style)
     local sys = M.systems(arch)
     local kind, n = M.slotKind(slot)
     local id = itemId
     if kind == "ab" then
         if id == nil then id = lo.ab[n] end
-        return abilityDetail(kind, n, id or false, sys)
+        return abilityDetail(kind, n, id or false, sys, v2, arch)
     elseif kind == "crash" then
         if id == nil then id = lo.crash end
-        return abilityDetail(kind, nil, id or false, sys)
+        return abilityDetail(kind, nil, id or false, sys, v2, arch)
     elseif kind == "part" then
         if id == nil then id = lo.parts[n] end
-        return partDetail(id or false, sys)
+        local nSlots = type(lo.parts) == "table" and #lo.parts or M.partSlots()
+        return partDetail(id or false, sys, v2, n, math.max(nSlots, n), arch)
     elseif kind == "tune" then
-        return tuneDetail(n, lo, arch, sys)
+        return tuneDetail(n, lo, arch, sys, v2)
     elseif kind == "style" then
-        return styleDetail(id or lo.style)
+        return styleDetail(id or lo.style, v2)
     elseif kind == "trait" then
         if id == nil then id = lo.traits[n] end
-        return traitDetail(id or false, sys)
+        local nSlots = type(lo.traits) == "table" and #lo.traits or M.traitSlots()
+        return traitDetail(id or false, sys, v2, n, math.max(nSlots, n), arch)
     elseif kind == "kit" then
         local ps = pilotStyle or lo.style
         local s = M.summary(lo, arch)
         local st = D.STYLES[lo.style]
-        local title = (id ~= nil and id ~= lo.kit) and M.kitLabel(id, ps, arch) or M.kitRow(lo, ps, arch)
-        local text = string.format("%d abilities, %d of %d parts, %d traits. A: ready. Left / right: another kit.",
-            s.nAb, s.nParts, s.slots, s.nTraits)
+        local browsing = id ~= nil and id ~= lo.kit
+        local title, text, tag
+        if v2 then
+            -- §9.5: "SURVIVOR KIT" / "CUSTOM KIT"; the tag "ENERGY 3 + 9 = 12", after an edit "FROM <KIT>" (fitted to
+            -- one line: "FROM MAX POWER" for "MAX POWER · REDLINER")
+            local label, from = M.loadoutLabel(lo, ps, arch)
+            title = browsing and M.kitLabel(id, ps, arch) or label
+            text = string.format("%d abilities, %d of %d parts, %d traits.", s.nAb, s.nParts, s.slots, s.nTraits)
+            tag = (not browsing and from) and fromTag(from) or s.energyText
+        else
+            title = browsing and M.kitLabel(id, ps, arch) or M.kitRow(lo, ps, arch)
+            text = string.format("%d abilities, %d of %d parts, %d traits. A: ready. Left / right: another kit.",
+                s.nAb, s.nParts, s.slots, s.nTraits)
+            tag = s.totals
+        end
         return { kind = "kit", id = id or lo.kit, title = title, plain = text, rich = text,
-                 icon = st and M.tex(st.icon) or nil, iconKind = (st and st.pod) and "tile" or "glyph", tag = s.totals }
+                 icon = st and M.tex(st.icon) or nil, iconKind = (st and st.pod) and "tile" or "glyph", tag = tag }
     end
     return { kind = "none", title = "", plain = "", rich = "", tag = "" }
 end
@@ -1137,6 +1317,9 @@ end
 -- picker): {kitRow, power, energy, partsLabel, ab = {[1..4] = cell, crash = cell}, parts = {[k] = {tile, pips, faulty,
 -- empty, inert, id}}, tune = {[0..5] = {icon, name, level, inert}}, style = {icon, name}, traits = {[k] = {icon, name,
 -- empty, inert, id}}}; cell = {glyph, sub, lvl, empty, inert, id}. The READY strip can reuse ab / parts / traits.
+-- UI v2 (§9.5, §9.9): kitLabel = "REDLINER KIT" | "MAX POWER · REDLINER" | "TIER 3 · HUSKY" | "CUSTOM KIT" (after an
+-- edit), kitLabelShort = the same without " KIT" (the N row when the label does not fit), kitFrom = the kit an edited
+-- loadout came from ("REDLINER") | nil; powerValue / powerMax / energyValue = the numbers of power / energy.
 function M.board(lo, arch, pilotStyle)
     arch = tonumber(arch)
     if type(lo) ~= "table" then lo = blankLo(arch, pilotStyle) end
@@ -1148,8 +1331,11 @@ function M.board(lo, arch, pilotStyle)
         return { glyph = M.tex(a.icon), sub = M.tex(a.sub), lvl = a.lvl, empty = false, inert = inertIn(a, sys) or nil,
                  id = id }
     end
+    local kitLabel, kitFrom = M.loadoutLabel(lo, pilotStyle, arch)
     local out = { kitRow = M.kitRow(lo, pilotStyle, arch), power = s.powerText, energy = s.energyText,
-                  partsLabel = s.partsLabel, ab = {}, parts = {}, tune = {}, traits = {} }
+                  partsLabel = s.partsLabel, ab = {}, parts = {}, tune = {}, traits = {},
+                  kitLabel = kitLabel, kitLabelShort = (kitLabel:gsub(" KIT$", "")), kitFrom = kitFrom,
+                  powerValue = s.power, powerMax = D.POWER_MAX or 60, energyValue = s.energy }
     for i = 1, 4 do out.ab[i] = cell(lo.ab[i]) end
     out.ab.crash = cell(lo.crash)
     for i = 1, #lo.parts do

@@ -25,6 +25,20 @@
 -- VERIFY ids: V-RC-02 (sink), V-RC-03 (A,A,A fast, Enter, Backspace), V-RC-04 (guests), V-RC-07 (attribution guards),
 -- V-RC-08 (P1 back), V-RC-09 (taken pilots, follow rules), V-RC-10 (prebuild), V-RC-14 (quick path), V-RC-25
 -- (persistence), V-RC-30 (sounds, stray clicks), V-RC-31 (page owner).
+--
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §6.4, §6.5, §8, §9.9, §12 WI-08). The renderer is chosen at
+-- page build by cfg.UiStyle: "classic" = cards.lua, fed exactly the 0.11.0 view model (perks.detail style "classic"),
+-- else cards2.lua (the cards.lua API unchanged; a cards2 that cannot load or init falls back to cards.lua and the
+-- classic view model for that page). The v2 view model (§9.9) adds inputMode (P1's, theme.inputMode; guests "pad"),
+-- rankTag (the Pod Tour " · AGED" leaves the name for the rank line), the pilot's SCENARIOS poster (tile; SEBULBA and
+-- the pods: figure = {full, crop} on the empty poster), the game's model names (vehicles.modelName) and the CHOOSE
+-- MODEL window, the livery value, the kit label, POWER / ENERGY as numbers, the short detail tags (perks.detail style
+-- "v2"), the READY rows by P1's input mode (pad: START / SAVE on P1's card; mouse + keyboard: they are setup's command
+-- row, and P1's READY cursor paints there through setup.commandFocus) and sentence-case hints with per-class maxima.
+-- Status (§6.5): the join hint and ALL READY are entries of setup's status pill; the "P1 PILOT · P2 PERKS" summary is
+-- gone (every card's rail shows its stage). M.lastPilotThumb(ctrlId) gives the lobby's players strip a head shot. The
+-- input model (P1 sink, guests polled, keyboard, mouse filter) is unchanged in both styles.
+-- VERIFY ids (§14): V-FIN-11 (P1's READY card and the command row switch together; START never shown twice).
 
 local C        = require("consts")
 local cfg      = require("config")
@@ -52,12 +66,18 @@ end
 local floor, abs = math.floor, math.abs
 
 -- Everything but G1, vehicles and perkdata is reached lazily (ARCH §4.0; spec §5.1 require rules).
-local function CD() return U.mod("cards") end
+-- 0.12.0: CD() is this page's card renderer, "cards" | "cards2" (M.build picks it by cfg.UiStyle); cards.lua before
+-- the first build (every call that can come that early is guarded).
+local function CD()
+    local s = St.racers
+    return U.mod((type(s) == "table" and s.renderer) or "cards")
+end
 local function K() return U.mod("perks") end
 local function P() return U.mod("pilots") end
 local function PA() return U.mod("perkapply") end
 local function ui() return U.mod("ui") end
 local function setupM() return U.mod("setup") end
+local function TH() return U.mod("theme") end              -- 0.12.0 v2 only: P1's input mode (theme.inputMode)
 
 -- vpreview stays optional as in setup.lua: a load error leaves every card on its 2D art.
 local vpMod = nil
@@ -114,22 +134,37 @@ local G_LR, G_UD = { "Dpad_Left", "Dpad_Right" }, { "Dpad_Top", "Dpad_Bottom" }
 local G_UP, G_DN = { "Dpad_Top" }, { "Dpad_Bottom" }
 local G_A, G_B, G_NONE = { "FaceButton_Bottom" }, { "FaceButton_Right" }, {}
 
+-- 0.12.0 UI v2: hint entries per width class (§9.1 HINT.max), the CHOOSE MODEL window (§9.4; N has one title row
+-- instead), the pod styles' icon (§9.3: perkdata gives them the pilot's head shot, RP6) and this module's two entries
+-- of setup's status pill (§6.5).
+local HINT_MAX = { W = 3, M = 3, N = 2 }
+local MODEL_TILES = { W = 6, M = 4 }
+local POD_STYLE_ICON = "Icons/VehicleArchetypes/T_UI_Vehicle_Plane_Icn"
+local PILL_JOIN, PILL_READY = "racers.join", "racers.ready"
+
 ---------------------------------------------------------------------------------------------------- state
 -- St.racers (diag: racers.status / dump / state):
 --   players[ctrlId] = {ctrlId, pnum, pc, isP1, arch, stage, row = {[stage] = 0 (strip) | 1..n}, last = {[stage] = the
 --     last row >= 1 (cursor memory)}, picker = nil | {slot, kind, cats, cat, items, sel (0 = category row)}, pilotId,
 --     presetId, lo, follow = {vehicle, perks}, nav (a guest's pad edges and repeats), presses, toast, toastUntil,
 --     backArmUntil, dirty, dirtyAt, pilotAt, view}
---   memory[ctrlId] = {pilot = {[arch] = id}, preset = {[arch] = id}, lo}: the session's picks (kept when a pad leaves)
+--   memory[ctrlId] = {pilot = {[arch] = id}, preset = {[arch] = id}, lo, last = id}: the session's picks (kept when a
+--     pad leaves; last = the latest pilot pick in any class, for M.lastPilotThumb)
 --   order = {ctrlId, ...}: card i shows order[i] (pnum i); p1 = P1's input counters and guards; visit = set from the
 --   first enter until setup closes (MODE and back keeps every card; a new visit starts every card at PILOT)
+--   0.12.0: renderer = "cards" | "cards2" and style = "classic" | "v2" (this page's, M.build); mode = P1's input mode
+--   ("pad" | "mouse", the last poll's); cmdFocus = what setup.commandFocus was last told; pillJoin / pillReady = the
+--   status-pill entries posted (text / signature); readySig = the READY flags the READY cards' pips show; namesFor /
+--   namesWait = the class whose model-name read finished / a read this module waited for (namesTick)
 local function S()
     local s = St.racers
     if type(s) ~= "table" then
         s = { active = false, built = false, visit = nil, ctx = nil, sink = nil, cls = nil, arch = nil, planet = nil,
               players = {}, memory = {}, order = {}, orderSig = nil, persisted = nil, classInfo = {}, action = nil,
               inPoll = false, allReady = nil, soundAt = -1e9, statusText = nil, statusAt = 0, statusHoldUntil = 0,
-              dormant = nil, dormantAt = -1e9, reconcileAt = -1e9,
+              dormant = nil, dormantV2 = nil, dormantAt = -1e9, reconcileAt = -1e9,
+              renderer = nil, style = nil, mode = nil, cmdFocus = nil, pillJoin = nil, pillReady = nil, readySig = nil,
+              namesFor = nil, namesWait = nil,
               p1 = { acceptAt = nil, lastKbMs = -1e9, kbAcceptMs = -1e9, lastDir = nil, lastDirMs = -1e9,
                      lastKey = nil, lastKeyMs = -1e9, sawB = false, sinkEvents = 0, clicked = false, drops = 0,
                      leaks = 0, leaking = false, held = false, override = nil, ringAt = nil, keepNext = 0 } }
@@ -211,6 +246,27 @@ local function widthClass()
     return (ok and c) or "W"
 end
 
+-- 0.12.0 §6.4: P1's input mode, "pad" | "mouse": theme.inputMode (P1's CommonInput type once stable for
+-- InputModeDebounceMs; KeyboardIsP1 = "mouse"; setup.debugInputMode pins it through theme.forceInputMode), else
+-- setup.p1Gamepad (undebounced). theme stamps the debounce with its own clock: no argument is passed. v2 pages only;
+-- the input handling below keeps p1Gamepad (unchanged).
+local function p1Mode()
+    local ok, m = pcall(function() return TH().inputMode() end)
+    if ok and (m == "pad" or m == "mouse") then return m end
+    U.logOnce("racers.inputmode", TAG, "theme.inputMode unavailable (%s): P1's input mode from setup.p1Gamepad",
+        tostring(m))
+    return (p1Gamepad() and not kbP1()) and "pad" or "mouse"
+end
+
+-- The input mode a card shows (vm.inputMode, the READY rows, P1's hints): P1's from the last poll (read now before
+-- the first one), every guest "pad".
+local function modeOf(pl)
+    if not pl or not pl.isP1 then return "pad" end
+    local s = S()
+    if s.mode == nil then s.mode = p1Mode() end
+    return s.mode
+end
+
 ---------------------------------------------------------------------------------------------------- memory
 local function memOf(ctrlId)
     local s = S()
@@ -228,6 +284,7 @@ local function remember(pl)
     if arch == nil then return end
     local m = memOf(pl.ctrlId)
     m.pilot[arch], m.preset[arch] = pl.pilotId, pl.presetId
+    m.last = pl.pilotId or m.last                -- 0.12.0: the lobby strip's head shot (M.lastPilotThumb)
     m.lo = K().copy(pl.lo)
 end
 
@@ -562,7 +619,8 @@ end
 local function setPilot(pl, id, now)
     local s = S()
     local Pm, arch = P(), s.arch
-    local oldSig = Pm.signature(pl.pilotId, arch)
+    local oldId = pl.pilotId
+    local oldSig = Pm.signature(oldId, arch)
     pl.pilotId, pl.pilotAt = id, now
     local sig = Pm.signature(id, arch)
     if sig and (pl.follow.vehicle or pl.presetId == oldSig) then pl.presetId = sig end
@@ -571,6 +629,16 @@ local function setPilot(pl, id, now)
         pl.lo = (K().fromKit(pl.lo.kit, arch, style))
     else
         if pl.lo.kit == "s_" .. style then pl.lo.kit = "pilot" end   -- the new pilot's own style kit: the same loadout
+        -- 0.12.0: a kept custom loadout names the kit it came from; "pilot" / "max" would now name the new pilot's
+        -- style (live 2026-10-10: TECH EXPERT traits under "FROM AFTERBURNER"), so they become the old style's kit
+        if pl.lo.kit == "custom" then
+            local oldStyle = oldId and Pm.styleKey(oldId, arch)
+            if (pl.lo.from == "pilot" or pl.lo.from == "max") and oldStyle and oldStyle ~= style then
+                pl.lo.from = "s_" .. oldStyle
+            elseif pl.lo.from == "s_" .. style then
+                pl.lo.from = "pilot"
+            end
+        end
         toast(pl, "LOADOUT KEPT", now)
     end
     pl.follow.perks = isPilotKit(pl.lo)
@@ -1126,10 +1194,30 @@ local function classTraits()
     return c
 end
 
--- §3.4 info line: the maker (badge code) or the pod's name, then the class traits.
-local function infoLine(m)
+-- 0.12.0: the game's name of a model (vehicles.modelName: TH_<Model>.ItemName, the decoded table until the class's
+-- read finished; each call advances that budgeted read, one theme load per 250 ms), m.name when it fails. v2 cards.
+local function modelName(m)
+    if m == nil then return "?" end
+    local ok, n = pcall(V.modelName, m)
+    if ok and type(n) == "string" and n ~= "" and n ~= "?" then return n end
+    return m.name or "?"
+end
+
+-- 0.12.0 integration: the classic view model (cards.lua, UiStyle "classic" or the cards2 fallback) keeps the 0.11.0
+-- model words: the codename (the upper-cased base model, "BELUGA"; vehicles.models' name is the game's name since
+-- WI-09), the pods' own name in the signature and the info line.
+local function classicModel(m) return m and (m.codename or m.name) or "?" end
+
+-- §3.4 info line: the maker (badge code) or the pod's name, then the class traits. 0.12.0 v2: a pod's name is its
+-- model name (vehicles.models, WI-09), shown on the card already: it is not repeated there; classic as 0.11.0.
+local function infoLine(m, v2)
     local parts = {}
-    local who = m and (m.maker or m.podName)
+    local who
+    if v2 then
+        who = m and (m.maker or ((m.podName ~= nil and m.podName ~= modelName(m)) and m.podName or nil))
+    else
+        who = m and (m.maker or m.podName)
+    end
     if who then parts[#parts + 1] = who end
     local t = classTraits()
     if t ~= "" then parts[#parts + 1] = t end
@@ -1137,12 +1225,27 @@ local function infoLine(m)
 end
 
 -- vpreview's brush of the player's bay (key = ControllerId + 1), built in this tick (GC rule); nil = the 2D art.
+-- -> brush, kind, dim, backdrop. 0.12.0 (§10): v2 also gets the bay's backdrop rung (VP.backdrop: "studio" |
+-- "scenario" | "cutout", the rung in use after a fall), so cards2 picks the fill / wash / cut-out of the rung the
+-- capture really has. The classic view model keeps cards.lua's contract (kind "material" | "texture" + a dim): a v2
+-- bay's "building" frame (cards2 unusable on a v2 page) becomes its brush type at today's 0.5 dim.
+local BUILDING_DIM = 0.5
 local function brushOf(pl)
     local vp = VP()
     if not vp then return nil end
-    local ok, b, kind, dim = U.try(TAG, vp.brush, pl.ctrlId + 1)
-    if ok and b then return b, kind, dim end
-    return nil
+    local key = pl.ctrlId + 1
+    local ok, b, kind, dim, _, base = U.try(TAG, vp.brush, key)
+    local rung = nil
+    if S().style == "v2" and type(vp.backdrop) == "function" then
+        local okB, r = pcall(vp.backdrop, key)                 -- also without a frame yet: the cut-out's fill
+        if okB and type(r) == "string" then rung = r end
+    end
+    if not (ok and b) then return nil, nil, nil, rung end
+    if S().style ~= "v2" and kind == "building" then
+        kind = (base == "texture") and "texture" or "material"
+        dim = BUILDING_DIM
+    end
+    return b, kind, dim, rung
 end
 
 -- The ability's energy cost for the detail tag (perkapply: the native config CDO, RC-4).
@@ -1231,7 +1334,7 @@ local function pilotVm(pl, e, style)
     local sig = Pm.signature(e, s.arch)
     if sig then
         local _, _, m = V.modelOf(s.arch, sig)
-        if m then sigText = "SIGNATURE " .. label .. " · " .. (m.podName or m.name) end
+        if m then sigText = "SIGNATURE " .. label .. " · " .. (m.podName or classicModel(m)) end
     end
     local i, n = Pm.indexOf(s.arch, pl.pilotId)
     return {
@@ -1248,21 +1351,32 @@ local function vehicleVm(pl, e, live)
     local models = V.models(s.arch)
     local mi, _, m = V.modelOf(s.arch, pl.presetId)
     local pr = V.presetById(s.arch, pl.presetId)
+    local model = classicModel(m)                -- 0.11.0 words (the v2 card shows the game's name)
     local v = {
         fallback = classArt(), badge = m and m.badge or nil, code = m and m.code or nil,
         driver = { thumb = e.thumb, name = e.name },
         signature = pl.presetId ~= nil and pl.presetId == P().signature(e, s.arch),
-        model = m and m.name or "?", counter = string.format("%d / %d", mi or 0, #models),
-        modelRow = "MODEL: " .. (m and m.name or "?"), liveryRow = "LIVERY: " .. (pr and pr.livery or "STANDARD"),
-        info = infoLine(m), cursor = pl.row.vehicle or 0,
+        model = model, counter = string.format("%d / %d", mi or 0, #models),
+        modelRow = "MODEL: " .. model, liveryRow = "LIVERY: " .. (pr and pr.livery or "STANDARD"),
+        info = infoLine(m, false), cursor = pl.row.vehicle or 0,
     }
     if live then v.brush, v.brushKind, v.dim = brushOf(pl) end
     return v
 end
 
-local function perksVm(pl, style)
+-- 0.12.0 v2: the pilot's poster (§9.3) is e.tile (pilots.lua, the SCENARIOS tile); SEBULBA and the pod pilots have
+-- none: their art window shows the empty poster with the full body on it, figure = {full, crop} (nil otherwise).
+local function figureOf(e)
+    if type(e) ~= "table" or e.tile or not e.full then return nil end
+    return { full = e.full, crop = P().crop(e, widthClass()) }
+end
+
+-- 0.12.0: the v2 extras need the pilot (e: the PERKS poster column / strip, §9.5). perks.detail gets this page's style:
+-- "classic" = the 0.11.0 texts cards.lua shows, "v2" = the short tag lines without prose key hints (WI-13).
+local function perksVm(pl, style, e)
     local s = S()
     local Km = K()
+    local v2 = s.style == "v2"
     local board = Km.board(pl.lo, s.arch, style)
     local slots = Km.slots(s.arch)
     local r = pl.row.perks or 0
@@ -1271,12 +1385,22 @@ local function perksVm(pl, style)
     -- the detail panel follows the slot (or the picker row) under the cursor; on the strip, the stage's last row
     local itemId = nil
     if pk and pk.sel >= 1 and pk.items[pk.sel] then itemId = pk.items[pk.sel].id end
-    local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, s.arch, itemId, style)
-    if d.costId then
+    local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, s.arch, itemId, style,
+        v2 and "v2" or "classic")
+    if d.costId then                             -- v2: d-pad abilities only ("LEVEL 2 · COST 3"; a crash costs nothing)
         local c = abilityCost(d.costId)
         if c then d.tag = (d.tag or "") .. " · COST " .. tostring(c) end
     end
     board.cursor, board.detail = cursor, d
+    if v2 then
+        -- §9.9: POWER / ENERGY as numbers (W / M POWER block "31 / 60" + "ENERGY 12", N totals line); kitLabel /
+        -- kitLabelShort / kitFrom / powerMax come with perks.board; the 0.11.0 strings stay as powerText / energyText
+        board.powerText, board.energyText = board.power, board.energy
+        board.power, board.energy = board.powerValue, board.energyValue
+        local st = D.STYLES[pl.lo and pl.lo.style]
+        if st and st.pod and board.style then board.style.icon = tex(POD_STYLE_ICON) end
+        if e then board.tile, board.figure = e.tile, figureOf(e) end
+    end
     if pk then
         local cat = pk.cats[pk.cat] or {}
         board.picker = { catName = cat.name, catIcon = cat.icon,
@@ -1301,7 +1425,7 @@ local function readyVm(pl, e, style, live)
     local rp = {
         fallback = classArt(),
         figure = { full = e.full, crop = P().crop(e, widthClass()), backdrop = backdropOf(style) },
-        line = (e.name or "?") .. " · " .. (m and m.name or "?"), styleName = board.style and board.style.name or "",
+        line = (e.name or "?") .. " · " .. classicModel(m), styleName = board.style and board.style.name or "",
         strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, style = board.style and board.style.icon,
                   traits = board.traits },
         totals = sum.totals, rows = rows, cursor = pl.row.ready or 0,
@@ -1312,9 +1436,213 @@ local function readyVm(pl, e, style, live)
     return rp
 end
 
--- One card's view model. live = false (dump): no vpreview brush is made.
+---------------------------------------------------------------------------------------------------- v2 view model §9.9
+-- cards2.lua's view model: the §5.6 contract of vehicle-step-v2 with the §9.9 changes. Shared with the classic one:
+-- pnum, colour, isP1, view, ready, strip, stage, toast, the roster, the picker, brush / brushKind / dim. Every name
+-- shown is the pilot's baseName: the Pod Tour " · AGED" is vm.rankTag (the rank line, §9.7). Extra fields beyond §9.9
+-- (kept small): header.tile / figure and the same pair on perks and readyPanel (every stage that shows the poster),
+-- vm.rank (the rank line's words composed), pilot.signatureModel, traits[k].rich, vehicle.models[k].index,
+-- readyPanel.name / model / power / powerMax / energy.
+
+-- The style icon (§9.3): perkdata gives pod styles the pilot's head shot (RP6); the card shows the podracer glyph.
+local function styleIconOf(st)
+    if type(st) ~= "table" then return nil end
+    if st.pod then return tex(POD_STYLE_ICON) end
+    return st.icon and tex(st.icon) or nil
+end
+
+-- §9.1 / §9.3-9.6 hints: sentence-case words, at most HINT_MAX[width class] entries (the first ones). hintsFor's back
+-- rule: P1 goes back through the strip ("Stages") until pollP1Back saw a B, the KeyboardIsP1 pad-1 guest always.
+-- READY: P1 with a pad "Start" / "Save" + "Row" (none in N: the rows are the prompt), P1 with mouse + keyboard the way
+-- back only (START / SAVE are the command row), guests "Change" + "Hold: leave".
+local function hintsV2(pl)
+    local s = S()
+    local strip = (pl.isP1 and not s.p1.sawB) or padOneGuest(pl)
+    local function back(word) return strip and hint(G_UP, "Stages") or hint(G_B, word) end
+    local leave = padOneGuest(pl) and hint(G_NONE, "Hold Start: leave") or hint(G_B, "Hold: leave")
+    local cls = widthClass()
+    local r = pl.row[pl.stage] or 1
+    local out
+    if pl.picker then
+        out = { hint(G_UD, "Choose"), hint(G_A, "Equip"), strip and hint(G_UP, "Top: cancel") or hint(G_B, "Cancel") }
+    elseif r == 0 then
+        out = { hint(G_LR, "Stage"), hint(G_DN, "Select") }      -- not "Options": v2 has an OPTIONS page (§5)
+    elseif pl.stage == "pilot" then
+        out = { hint(G_LR, "Pilot"), hint(G_A, "Confirm"), pl.isP1 and back("Back") or leave }
+    elseif pl.stage == "vehicle" then
+        out = { hint(G_LR, (r == 2) and "Livery" or "Model"), hint(G_UD, "Row"), hint(G_A, "Confirm") }
+    elseif pl.stage == "perks" then
+        local Km = K()
+        local slot = Km.slots(s.arch)[r]
+        local kind = Km.slotKind(slot)
+        if kind == "kit" then
+            out = { hint(G_LR, "Kit"), hint(G_A, "Ready"), back("Back") }
+        elseif kind == "tune" then
+            out = { hint(G_LR, "Level"), hint(G_A, "Next"), back("Back") }
+        else
+            out = {}
+            local lr = Km.lrMode(pl.lo, slot)           -- nil: a single part or an empty slot, L/R does nothing
+            if lr then out[#out + 1] = hint(G_LR, (lr == "tier") and "Tier" or "Change") end
+            out[#out + 1] = hint(G_A, "Pick")
+            out[#out + 1] = back("Back")
+        end
+    elseif pl.isP1 then
+        if modeOf(pl) == "mouse" then
+            out = { back("Change") }
+        elseif cls == "N" then
+            out = {}
+        else
+            out = { hint(G_A, (r == 2) and "Save" or "Start"), hint(G_UD, "Row") }
+        end
+    else
+        out = { padOneGuest(pl) and hint(G_UP, "Stages") or hint(G_B, "Change"), leave }
+    end
+    local maxN = HINT_MAX[cls] or 3
+    while #out > maxN do table.remove(out) end
+    return out
+end
+
+-- §9.4 CHOOSE MODEL: a window of MODEL_TILES[class] models around the current one, wrapping (the current tile right of
+-- the middle: 4th of 6, 3rd of 4, as the mockups), each {name = the game's name, badge, code (no badge: ANTAGONIST, the
+-- pods but MYTH), current, index}; nil in N (one title row). Fewer models than tiles: each model once.
+local function modelsWindow(models, mi)
+    local n, total = MODEL_TILES[widthClass()], #models
+    if not n or total == 0 then return nil end
+    local k0 = math.min(n, total)
+    local before = floor(k0 / 2)
+    local out = {}
+    for k = 1, k0 do
+        local idx = (((mi or 1) - 1 - before + k - 1) % total) + 1
+        local md = models[idx]
+        out[k] = { name = modelName(md), badge = md.badge, code = md.code, current = idx == mi, index = idx }
+    end
+    return out
+end
+
+-- READY flags of every card in view order (the READY pills' AMBER pips, §9.6).
+local function readyPips()
+    local s = S()
+    local out = {}
+    for i, c in ipairs(s.order) do
+        local o = s.players[c]
+        out[i] = o ~= nil and o.stage == "ready"
+    end
+    return out
+end
+
+-- §9.3 PILOT: the poster (tile / figure), the style column (pod styles: the podracer glyph), "PILOT'S OWN STYLE", the
+-- description (W), 3 traits (rich: GOLD keywords), the signature ("SIGNATURE · ARZ 41" with the game's model name, or
+-- "ANY LANDSPEEDER"; N draws a star + signatureModel), the name, the counter and the roster.
+local function pilotVmV2(pl, e, style)
+    local s = S()
+    local Pm = P()
+    local st = D.STYLES[style] or {}
+    local traits = {}
+    for k = 1, 3 do
+        local t = st.traits and D.TRAITS[st.traits[k]]
+        if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc, rich = t.rich } end
+    end
+    local sigModel = nil
+    local sig = Pm.signature(e, s.arch)
+    if sig then
+        local _, _, m = V.modelOf(s.arch, sig)
+        if m then sigModel = modelName(m) end
+    end
+    local i, n = Pm.indexOf(s.arch, pl.pilotId)
+    return {
+        tile = e.tile, figure = figureOf(e), styleIcon = styleIconOf(st), styleName = st.name or "",
+        styleLine = "PILOT'S OWN STYLE", styleDesc = st.short or st.desc or "", traits = traits,
+        signature = sigModel and ("SIGNATURE · " .. sigModel) or ("ANY " .. (s.cls and s.cls.label or "")),
+        signatureModel = sigModel, name = e.baseName or e.name or "",
+        counter = string.format("%s / %d", i and tostring(i) or "-", n or 0),
+        roster = rosterVm(pl), cursor = (pl.row.pilot or 0) >= 1,
+    }
+end
+
+-- §9.4 VEHICLE: the game's model name, the CHOOSE MODEL window (W / M), the livery value (today's labels: STANDARD,
+-- the pilot's name, AGED, MYTH P1-P3), DRIVEN BY, the signature chip, the info line, the photo brush.
+local function vehicleVmV2(pl, e, live)
+    local s = S()
+    local models = V.models(s.arch)
+    local mi, _, m = V.modelOf(s.arch, pl.presetId)
+    local pr = V.presetById(s.arch, pl.presetId)
+    local v = {
+        fallback = classArt(), badge = m and m.badge or nil, code = m and m.code or nil,
+        driver = { thumb = e.thumb, name = e.baseName or e.name },
+        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, s.arch),
+        model = modelName(m), counter = string.format("%d / %d", mi or 0, #models), models = modelsWindow(models, mi),
+        livery = pr and pr.livery or "STANDARD", info = infoLine(m, true), cursor = pl.row.vehicle or 0,
+    }
+    if live then v.brush, v.brushKind, v.dim, v.backdrop = brushOf(pl) end
+    return v
+end
+
+-- §9.6 READY: the poster is the hero (no figure box), the still render on a plate, model + style, the loadout strip,
+-- the totals; P1 with a pad: rows START RACE / SAVE AND RETURN (+ allReady: the tick; pulse); P1 with mouse +
+-- keyboard: rows nil, p1Pill (a READY pill; START / SAVE are setup's command row); guests: rows nil, waiting
+-- ("WAITING FOR P1"); pips = every card's READY flag.
+local function readyVmV2(pl, e, style, live)
+    local s = S()
+    local Km = K()
+    local board = Km.board(pl.lo, s.arch, style)
+    local sum = Km.summary(pl.lo, s.arch)
+    local _, _, m = V.modelOf(s.arch, pl.presetId)
+    local st = D.STYLES[pl.lo and pl.lo.style]
+    local name, model = e.baseName or e.name or "?", modelName(m)
+    local pad = modeOf(pl) == "pad"
+    local rp = {
+        fallback = classArt(), tile = e.tile, figure = figureOf(e), name = name, model = model,
+        line = name .. " · " .. model, styleName = board.style and board.style.name or "",
+        strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, traits = board.traits,
+                  style = (st and st.pod) and tex(POD_STYLE_ICON) or (board.style and board.style.icon) },
+        totals = sum.totals, power = sum.power, powerMax = board.powerMax, energy = sum.energy,
+        allReady = s.allReady == true, pips = readyPips(), cursor = pl.row.ready or 0,
+        pulse = (pl.isP1 and pad and s.allReady == true and opt("CardStartPulse", true) ~= false) or nil,
+    }
+    if pl.isP1 and pad then rp.rows = { "START RACE", "SAVE AND RETURN" }
+    elseif pl.isP1 then rp.p1Pill = true
+    else rp.waiting = true end
+    if live then rp.brush, rp.brushKind, rp.dim, rp.backdrop = brushOf(pl) end
+    return rp
+end
+
+-- The rank line's words (§9.3-9.6; cards2 applies the N fitting rule "MODEL dropped"): "TOP LEFT · 2 / 13",
+-- "TOP · AGED · 3 / 8", "TOP · MODEL 1 / 13", "BOTTOM RIGHT · READY"; nil on PERKS (no rank line there).
+local function rankOf(pl, e, vm)
+    local parts = {}
+    if type(pl.view) == "string" and pl.view ~= "" then parts[1] = pl.view end
+    if pl.stage ~= "vehicle" and e.rankTag then parts[#parts + 1] = e.rankTag end
+    if pl.stage == "pilot" and vm.pilot then parts[#parts + 1] = vm.pilot.counter
+    elseif pl.stage == "vehicle" and vm.vehicle then parts[#parts + 1] = "MODEL " .. vm.vehicle.counter
+    elseif pl.stage == "ready" then parts[#parts + 1] = "READY"
+    else return nil end
+    return table.concat(parts, " · ")
+end
+
+local function buildVmV2(pl, now, live)
+    local e = P().byId(pl.pilotId) or {}
+    local style = pilotStyle(pl)
+    local list = stageList()
+    local r = pl.row[pl.stage] or 1
+    local vm = {
+        pnum = pl.pnum, colour = colourOf(pl.pnum), isP1 = pl.isP1, view = pl.view, ready = pl.stage == "ready",
+        inputMode = modeOf(pl), rankTag = e.rankTag,
+        header = { pilotName = e.baseName or e.name or "", thumb = e.thumb, tile = e.tile, figure = figureOf(e) },
+        strip = { stages = list, current = indexOf(list, pl.stage) or 1, cursor = r == 0 and not pl.picker },
+        stage = pl.stage, hint = hintsV2(pl), toast = (pl.toast and now < pl.toastUntil) and pl.toast or nil,
+    }
+    if pl.stage == "pilot" then vm.pilot = pilotVmV2(pl, e, style)
+    elseif pl.stage == "vehicle" then vm.vehicle = vehicleVmV2(pl, e, live)
+    elseif pl.stage == "perks" then vm.perks = perksVm(pl, style, e)
+    else vm.readyPanel = readyVmV2(pl, e, style, live) end
+    vm.rank = rankOf(pl, e, vm)
+    return vm
+end
+
+-- One card's view model. live = false (dump): no vpreview brush is made. 0.12.0: a v2 page gets buildVmV2's.
 local function buildVm(pl, now, live)
     local s = S()
+    if s.style == "v2" then return buildVmV2(pl, now, live) end
     local e = P().byId(pl.pilotId) or {}
     local style = pilotStyle(pl)
     local list = stageList()
@@ -1350,6 +1678,41 @@ local function timers(now)
         markDirty(p1Player(), now)
         if all and #s.order > 1 then U.log(TAG, "all %d players READY (P1: A TO START) (V-RC-18)", #s.order) end
     end
+    if s.style == "v2" then
+        -- §9.6: every READY pill carries one pip per player (filled = on READY): a change re-renders the READY cards
+        local flags = {}
+        for i, c in ipairs(s.order) do
+            local o = s.players[c]
+            flags[i] = (o and o.stage == "ready") and "1" or "0"
+        end
+        local sig = table.concat(flags)
+        if sig ~= s.readySig then
+            s.readySig = sig
+            for _, c in ipairs(s.order) do
+                local o = s.players[c]
+                if o and o.stage == "ready" then markDirty(o, now) end
+            end
+        end
+    end
+end
+
+-- 4b (v2). P1's input mode (§6.4, theme.inputMode, debounced): a switch re-renders P1's card first in this tick (its
+-- READY rows become the READY pill or back), while setup's command row shows / hides START and SAVE from the same
+-- debounced mode. VERIFY(V-FIN-11): one "P1 input mode" line per real switch, START never twice on screen.
+local function modeTick(now)
+    local s = S()
+    local m = p1Mode()
+    if m == s.mode then return end
+    local was = s.mode
+    s.mode = m
+    local pl = p1Player()
+    if was == nil or not pl then return end
+    pl.dirty, pl.dirtyAt = true, -1e9             -- ahead of every other dirty card (render budget, step 7)
+    local what = "re-rendered"
+    if pl.stage == "ready" then
+        what = (m == "mouse") and "READY pill, START / SAVE in the command row" or "START / SAVE rows on the card"
+    end
+    U.log(TAG, "P1 input mode %s -> %s: P1's card %s (V-FIN-11)", tostring(was), m, what)
 end
 
 -- 5. previews: VEHICLE spins, PERKS / READY stills, PILOT a still prebuild of the pick once the pilot was unchanged
@@ -1377,6 +1740,33 @@ local function previews(now)
     end
 end
 
+-- 5b (v2). The class's model-name read (vehicles.lua: TH_<Model>.ItemName by hard path, one theme load per 250 ms, the
+-- decoded English table meanwhile) only advances when a name is asked for: this asks every poll until
+-- vehicles.nameStatus no longer reports the class pending, then every card showing a model name re-renders once (a
+-- localised game shows its own names without waiting for an input; VERIFY(V-FIN-10) is vehicles.lua's log line).
+-- Pods have no theme names (never pending). Once per class and session.
+local function namesTick(now)
+    local s = S()
+    local key = s.cls and tostring(s.cls.key) or nil
+    if not key or s.namesFor == key then return end
+    local ok, st = pcall(V.nameStatus)
+    if ok and type(st) == "string"
+        and (st:find(key .. " pending", 1, true) or st:find(key .. " not read", 1, true)) then
+        local models = V.models(s.arch)
+        if models[1] then pcall(V.modelName, models[1]) end
+        s.namesWait = true
+        return
+    end
+    s.namesFor = key
+    if not s.namesWait then return end
+    s.namesWait = nil
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl and pl.stage ~= "perks" then markDirty(pl, now) end
+    end
+    U.dbg(TAG, "model names of %s read: the cards re-render", key)
+end
+
 -- 7. up to CardRendersPerTick dirty cards, oldest first: view model (with this tick's brush) -> cards.render. A
 -- render that waits for the build budget stays dirty (its next render carries a fresh brush).
 local function renders(now)
@@ -1402,10 +1792,12 @@ local function renders(now)
     end
 end
 
--- Join hints (§2.6): connected pads that did not join (join.dormantList), refreshed once a second.
+-- Join hints (§2.6): connected pads that did not join (join.dormantList), refreshed once a second. Returns the classic
+-- status-line text and (0.12.0) the v2 pill text, where "(A)" becomes the pad glyph (§6.5 "PADS 3, 4: PRESS (A) TO
+-- JOIN"; start-only pads keep the word START); nil, nil when every connected pad joined.
 local function dormantHint(now)
     local s = S()
-    if now < s.dormantAt then return s.dormant end
+    if now < s.dormantAt then return s.dormant, s.dormantV2 end
     s.dormantAt = now + DORMANT_MS
     local list = {}
     pcall(function() list = U.mod("join").dormantList() end)
@@ -1415,17 +1807,23 @@ local function dormantHint(now)
         local t = byButton[startOnly and "START" or "A"]
         t[#t + 1] = (tostring(d.label or ""):gsub("^PAD ", ""))
     end
-    local parts = {}
+    local parts, partsV2 = {}, {}
     for _, b in ipairs({ "A", "START" }) do
         local nums = byButton[b]
+        local who = nil
         if #nums == 1 then
-            parts[#parts + 1] = string.format("PAD %s: PRESS %s TO JOIN", nums[1], b)
+            who = string.format("PAD %s", nums[1])
         elseif #nums > 1 then
-            parts[#parts + 1] = string.format("PADS %s: PRESS %s TO JOIN", table.concat(nums, ", "), b)
+            who = string.format("PADS %s", table.concat(nums, ", "))
+        end
+        if who then
+            parts[#parts + 1] = string.format("%s: PRESS %s TO JOIN", who, b)
+            partsV2[#partsV2 + 1] = string.format("%s: PRESS %s TO JOIN", who, (b == "A") and "(A)" or b)
         end
     end
     s.dormant = (#parts > 0) and table.concat(parts, "   ·   ") or nil
-    return s.dormant
+    s.dormantV2 = (#partsV2 > 0) and table.concat(partsV2, " · ") or nil
+    return s.dormant, s.dormantV2
 end
 
 -- §2.9 status line under the footer: "P1 PILOT · P2 PERKS · P3 READY" or "ALL READY · P1: A TO START", the join hint
@@ -1464,31 +1862,148 @@ St.on("status", TAG, function()
     end
 end)
 
+-- 0.12.0 §6.5 (v2): this module's entries of the status pill on setup's page (theme C5; the pill picks gate 3 > all
+-- ready 2 > launching 1 > the latest transient 0; other modules' St.emit("status") texts are setup's / lobby's):
+--   PILL_JOIN   "PADS 3, 4: PRESS (A) TO JOIN": transient (StatusPillMs) at entry and whenever that set changes;
+--   PILL_READY  "ALL READY · P1: (A) TO START" (pad) / "ALL READY · P1: START RACE" (mouse + keyboard): sticky while
+--               every card is READY, one AMBER pip per player (at most 4).
+-- Posted through ctx.pill (a theme status pill, when setup's racers context carries one) or setup.setStatus(text,
+-- opts) (opts = the theme pill options {key, sticky, prio, pips, ms}; text "" with a key removes that entry). The
+-- classic page keeps statusTick.
+local function pillPost(text, o)
+    local s = S()
+    local p = type(s.ctx) == "table" and s.ctx.pill or nil
+    if type(p) == "table" and type(p.post) == "function" then
+        local ok, err = pcall(p.post, text, o)
+        if not ok then U.logEvery("racers.pill", 5000, TAG, "status pill post failed: %s", tostring(err)) end
+        return
+    end
+    local okF, f = pcall(function() return setupM().setStatus end)
+    if not okF or type(f) ~= "function" then
+        U.logOnce("racers.pill?", TAG, "no status pill route (ctx.pill / setup.setStatus): the join hint and ALL READY "
+            .. "are not shown")
+        return
+    end
+    local ok, err = pcall(f, text, o)
+    if not ok then U.logEvery("racers.pill", 5000, TAG, "setup.setStatus failed: %s", tostring(err)) end
+end
+
+local function pillTick(now)
+    local s = S()
+    local _, join = dormantHint(now)
+    if join ~= s.pillJoin then
+        s.pillJoin = join
+        pillPost(join or "", { key = PILL_JOIN, ms = num("StatusPillMs", 5000) })
+        if join then U.dbg(TAG, "status pill: %s", join) end
+    end
+    local n = #s.order
+    local text = nil
+    if s.allReady == true and n > 0 then
+        text = (s.mode == "mouse") and "ALL READY · P1: START RACE" or "ALL READY · P1: (A) TO START"
+    end
+    local sig = text and (text .. "|" .. n) or nil
+    if sig == s.pillReady then return end
+    s.pillReady = sig
+    if not text then
+        pillPost("", { key = PILL_READY })
+        return
+    end
+    local pips = {}
+    for i = 1, math.min(n, 4) do pips[i] = true end
+    pillPost(text, { key = PILL_READY, sticky = true, prio = 2, pips = pips })
+    U.dbg(TAG, "status pill: %s (%d pips, sticky)", text, #pips)
+end
+
+-- The page leaves the step (or another visit starts): this module's pill entries go.
+local function pillClear()
+    local s = S()
+    if s.pillReady then pillPost("", { key = PILL_READY }) end
+    if s.pillJoin then pillPost("", { key = PILL_JOIN }) end
+    s.pillJoin, s.pillReady = nil, nil
+end
+
+-- 0.12.0 §6.4 (v2): with mouse + keyboard, START RACE and SAVE AND RETURN are setup's command row, and P1's READY
+-- cursor (row 1 START, row 2 SAVE: keyboard Up / Down as before) is its painted focus: setup.commandFocus("start" |
+-- "save"), nil once the cursor leaves READY, P1 uses a pad again or the step is left. Told only on a change;
+-- setup.commandFocus may not exist (logged once, then the command row shows ghost focus / hover only).
+local function commandFocus()
+    local s = S()
+    local want = nil
+    if s.active and s.style == "v2" and s.mode == "mouse" then
+        local pl = p1Player()
+        local r = (pl and pl.stage == "ready" and not pl.picker) and (pl.row.ready or 0) or 0
+        want = (r == 1) and "start" or ((r == 2) and "save" or nil)
+    end
+    if want == s.cmdFocus then return end
+    s.cmdFocus = want
+    local okF, f = pcall(function() return setupM().commandFocus end)
+    if not okF or type(f) ~= "function" then
+        U.logOnce("racers.cmdfocus?", TAG, "setup.commandFocus unavailable: P1's READY cursor does not paint the "
+            .. "command row (V-FIN-11)")
+        return
+    end
+    local ok, err = pcall(f, want)
+    if ok then
+        U.dbg(TAG, "command row focus %s (P1 on READY, mouse + keyboard) (V-FIN-11)", tostring(want or "released"))
+    else
+        U.logEvery("racers.cmdfocus", 5000, TAG, "setup.commandFocus(%s) failed: %s", tostring(want), tostring(err))
+    end
+end
+
 -- RC-9: the class roster's head shots and full bodies queued at low priority (cards.lua loads one big texture a tick).
+-- 0.12.0 v2 (§9.8): the SCENARIOS posters instead of the full bodies, which only SEBULBA and the pods still need (on
+-- the empty poster).
 local function prefetch()
     local cd = CD()
+    local v2 = S().style == "v2"
+    local empty = false
     for _, e in ipairs(P().list(S().arch)) do
         cd.tex(e.thumb)
-        cd.tex(e.full)
+        if v2 and e.tile then
+            cd.tex(e.tile)
+        else
+            cd.tex(e.full)
+            empty = v2
+        end
     end
+    if empty then pcall(function() cd.tex(P().EMPTY_TILE) end) end
 end
 
 ---------------------------------------------------------------------------------------------------- API (§5.7.1)
 -- setup.buildWidgets, once per page: cards.init (four collapsed card slots in ctx.row) + P1's sink in ctx.sinkHost.
--- ctx = {tree, pc, newW, row, sinkHost, realMs [, footer = {back, save, start}]}. Raises (setup's pcall) or returns
--- false when the cards are unusable: that page keeps the classic columns. VERIFY(V-RC-01)
+-- ctx = {tree, pc, newW, row, sinkHost, realMs [, footer = {back, save, start}] [, pill = theme status pill]}. Raises
+-- (setup's pcall) or returns false when the cards are unusable: that page keeps the classic columns. VERIFY(V-RC-01)
+-- 0.12.0 (§8): the renderer of this page is cards2.lua unless cfg.UiStyle = "classic"; a cards2 that cannot load or
+-- init falls back to cards.lua with the classic view model (logged), so the cards still work before / without it.
 function M.build(ctx)
     if type(ctx) ~= "table" then error("racers.build: no context") end
     local s = S()
     local t0 = St.nowMs()
     s.built = false
-    CD().init(ctx)
+    local want = (opt("UiStyle", "v2") == "classic") and "cards" or "cards2"
+    local old = s.renderer
+    if old and old ~= want then
+        pcall(function() U.mod(old).forget() end)          -- its widgets belonged to an earlier page (UiStyle switched)
+    end
+    s.renderer, s.style = want, (want == "cards2") and "v2" or "classic"
+    s.mode, s.cmdFocus, s.pillJoin, s.pillReady, s.readySig = nil, nil, nil, nil, nil
+    if want == "cards2" then
+        local ok, err = pcall(function() U.mod("cards2").init(ctx) end)
+        if not ok then
+            U.warn(TAG, "cards2.lua unusable (%s): this page draws the 0.11.0 cards (cards.lua, classic view model)",
+                tostring(err):match("^[^\n]*") or "?")
+            pcall(function() U.mod("cards2").forget() end)    -- a half-done init keeps nothing of this page
+            s.renderer, s.style = "cards", "classic"
+        end
+    end
+    if s.renderer == "cards" then CD().init(ctx) end
     s.ctx = ctx
     s.sink = buildSink(ctx)
     s.p1.ringAt = nil
     wireSink(s.sink, inputMode())
     s.built = true
-    U.log(TAG, "built (4 card slots, P1 sink %s, %.1f ms) (V-RC-01)", tostring(s.sink.wired), St.nowMs() - t0)
+    U.log(TAG, "built (4 card slots, P1 sink %s, %.1f ms; renderer %s, UiStyle %s) (V-RC-01)", tostring(s.sink.wired),
+        St.nowMs() - t0, s.renderer, tostring(opt("UiStyle", "v2")))
     return true
 end
 
@@ -1512,6 +2027,10 @@ function M.enter(cls, planet)
     s.p1.lastKbMs, s.p1.kbAcceptMs, s.p1.lastDirMs, s.p1.lastKeyMs = -1e9, -1e9, -1e9, -1e9
     s.persisted, s.classInfo, s.allReady = nil, {}, nil
     s.statusText, s.statusAt, s.statusHoldUntil, s.dormantAt, s.reconcileAt = nil, 0, 0, -1e9, now + RECONCILE_MS
+    -- 0.12.0 v2: the pill entries start again (the join hint shows for StatusPillMs at entry, §6.5), the READY pips and
+    -- P1's input mode are read at the first poll (before its renders)
+    if s.style == "v2" then pillClear() end
+    s.readySig = nil
     -- RC-2: the class's ramjet / critical-malfunction flags reach perks.lua before any loadout is built
     U.try(TAG, function() PA().systems(cls.arch) end)
     U.try(TAG, reconcile, newVisit and "new visit" or (classChange and "class change" or "same visit"), newVisit, now)
@@ -1546,6 +2065,12 @@ function M.leave(why)
     s.p1.acceptAt = nil
     if not why:match("^step ") then s.visit = nil end
     if not was then return end
+    if s.style == "v2" then
+        -- 0.12.0: ALL READY / the join hint leave the pill (LAUNCHING... and the next step's texts are setup's),
+        -- and P1's READY cursor lets go of the command row
+        U.try(TAG, pillClear)
+        U.try(TAG, commandFocus)
+    end
     pcall(function() CD().releaseRenders(nil) end)
     local vp = VP()
     if vp then U.try(TAG, vp.releaseAll, "racers: " .. why, true) end
@@ -1557,6 +2082,8 @@ function M.forget()
     local s = S()
     s.active, s.built, s.visit, s.sink, s.ctx, s.action = false, false, nil, nil, nil, nil
     s.p1.acceptAt, s.p1.ringAt = nil, nil
+    -- 0.12.0: the pill and the command row died with the page: nothing to clear there, only what this module recorded
+    s.mode, s.cmdFocus, s.pillJoin, s.pillReady, s.readySig = nil, nil, nil, nil, nil
     for _, pl in pairs(s.players) do pl.pc = nil end
     local vp = VP()
     if vp then U.try(TAG, vp.releaseAll, "racers: menu replaced", false) end
@@ -1596,16 +2123,25 @@ function M.poll(p1)
     s.inPoll = false
     flushAction()
     if not s.active then return end              -- START / SAVE / MODE left the step
-    -- 4. timers
+    -- 4. timers (+ v2: P1's input mode, before the renders that show it)
     U.tryEvery("racers.timers", nil, TAG, timers, now)
-    -- 5. previews
+    local v2 = s.style == "v2"
+    if v2 then U.tryEvery("racers.mode", nil, TAG, modeTick, now) end
+    -- 5. previews (+ v2: the class's model-name read)
     U.tryEvery("racers.previews", nil, TAG, previews, now)
+    if v2 then U.tryEvery("racers.names", nil, TAG, namesTick, now) end
     -- 6. cards: texture queue, deferred panels, START pulse
     U.tryEvery("racers.cards", nil, TAG, function() CD().tick() end)
     -- 7. renders
     U.tryEvery("racers.renders", nil, TAG, renders, now)
-    -- 8. status line
-    U.tryEvery("racers.status", nil, TAG, statusTick, now)
+    -- 8. status line (classic) / this module's status-pill entries (v2)
+    if v2 then
+        U.tryEvery("racers.pill", nil, TAG, pillTick, now)
+        -- 9. (v2) P1's READY cursor -> setup's command row (mouse + keyboard)
+        U.tryEvery("racers.cmdfocus", nil, TAG, commandFocus)
+    else
+        U.tryEvery("racers.status", nil, TAG, statusTick, now)
+    end
 end
 
 -- setup.keepFocus (lobby not covered): P1's focus back on the sink every KEEP_MS while P1 uses a pad and it is
@@ -1649,6 +2185,7 @@ function M.onKey(name)
         dispatch(pl, name, rep, "key", now)
     end
     flushAction()
+    U.try(TAG, commandFocus)                     -- 0.12.0 v2: Up / Down on READY moves the command row's focus now
 end
 
 -- setup.pollP1Back: P1's B on its own PlayerController (after a race; never with KeyboardIsP1). From now on P1's hints
@@ -1666,6 +2203,7 @@ function M.onP1Back()
     markDirty(pl, now)
     dispatch(pl, "back", false, "padB", now)
     flushAction()
+    U.try(TAG, commandFocus)
 end
 
 -- ui.pollClicks (opts.noClaim) for any of the five sink buttons. The accept waits one FAST tick (p1Accept). Ignored:
@@ -1717,6 +2255,29 @@ function M.sink() return target() end
 -- [extension] The LastRaceRacers parser for setup.deriveSetup: text -> {[ctrlId] = {pilot, preset, code}}.
 M.parseRacers = parseRacers
 
+-- 0.12.0 (§12.2; the lobby's players strip, §4.3): the head shot (Texture2D path) of the pad's last pilot, by
+-- ControllerId (P1 = 0): this session's memory (the latest pick in any class), else the pad's LastRaceRacers entry
+-- (read once per visit); nil when there is neither (the strip shows the player icon). Pure data: no engine call, cheap
+-- enough for every lobby refresh.
+function M.lastPilotThumb(ctrlId)
+    local c = tonumber(ctrlId)
+    if c == nil then return nil end
+    local s = S()
+    local id = nil
+    local m = s.memory[c]
+    if m then
+        id = m.last
+        if id == nil and s.arch ~= nil then id = m.pilot[s.arch] end
+    end
+    if type(id) ~= "string" then
+        local ok, e = pcall(persisted, c)
+        id = (ok and type(e) == "table") and e.pilot or nil
+    end
+    if type(id) ~= "string" then return nil end
+    local ok, e = pcall(function() return P().byId(id) end)
+    return (ok and type(e) == "table") and e.thumb or nil
+end
+
 -- The single mutator, for tests (test.cmd: require("racers").event(2, "right")): who = pnum (1..4) | "c<ctrlId>";
 -- ev = up | down | left | right | accept | back; rep = an auto-repeat. -> true when the card changed.
 function M.event(who, ev, rep, src)
@@ -1732,6 +2293,7 @@ function M.event(who, ev, rep, src)
     if not pl then return false end
     local ok, r = U.try(TAG, dispatch, pl, ev, rep == true, src or "test", nowMs())
     flushAction()
+    U.try(TAG, commandFocus)
     return ok and r == true
 end
 
@@ -1822,7 +2384,9 @@ function M.restore(src)
         if cid == nil and tonumber(pnum) == 1 and type(p) == "table" then cid = 0 end
         if cid then
             local m = memOf(cid)
-            if type(p.pilotId) == "string" and Pm.byId(p.pilotId) then m.pilot[arch] = p.pilotId end
+            if type(p.pilotId) == "string" and Pm.byId(p.pilotId) then
+                m.pilot[arch], m.last = p.pilotId, p.pilotId     -- 0.12.0: the last race's pilot (M.lastPilotThumb)
+            end
             if type(p.presetId) == "string" and V.presetById(arch, p.presetId) then m.preset[arch] = p.presetId end
             local style = Pm.styleKey(m.pilot[arch] or p.pilotId, arch)
             local lo = nil
@@ -1859,10 +2423,16 @@ function M.status()
     local p = s.p1
     local cards = "cards ?"
     pcall(function() cards = CD().status() end)
-    return string.format("racers %s%s: %s | P1 input %s (sink events %d, drops %d, leaks %d, B seen %s) | %s",
+    -- 0.12.0: the renderer and view model of this page; v2: P1's input mode, the command-row focus, the pill entries
+    local look = string.format("%s (%s view model)", tostring(s.renderer or "not built"), tostring(s.style or "-"))
+    if s.style == "v2" then
+        look = look .. string.format(", P1 mode %s, command focus %s, pill %s%s", tostring(s.mode or "?"),
+            tostring(s.cmdFocus or "-"), s.pillReady and "ALL READY" or "-", s.pillJoin and " + join hint" or "")
+    end
+    return string.format("racers %s%s: %s | P1 input %s (sink events %d, drops %d, leaks %d, B seen %s) | %s | %s",
         s.active and "on" or "off", s.cls and (" " .. tostring(s.cls.key)) or "",
         (#parts > 0) and table.concat(parts, "; ") or "no players", s.sink and tostring(s.sink.wired) or "none",
-        p.sinkEvents, p.drops, p.leaks, tostring(p.sawB), cards)
+        p.sinkEvents, p.drops, p.leaks, tostring(p.sawB), look, cards)
 end
 
 -- Text dump of a value: sorted keys, object paths shortened to their asset name, depth-limited.

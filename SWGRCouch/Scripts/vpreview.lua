@@ -46,6 +46,26 @@
 -- MID (transient) never reference a world. Hot reload: the actor paths are kept in the UE4SS shared variable
 -- SWGRCouch.vpreview.actors whenever they change; the next Lua state destroys them on its first game-thread tick
 -- (persistShared/restoreShared also exist, for main.lua's PERSIST_MODULES).
+--
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §10, VERIFY V-FIN-05): the backdrop goes INTO the capture (no
+-- shipped UI material turns a capture's alpha into opacity, ui-parts-catalogue.md §4.7). cfg.PreviewBackdrop picks a
+-- rung of the ladder; cfg.UiStyle "classic" always takes "cutout". Per bay, built with the capture (apply), placed by
+-- frame() from the bounds:
+--   * "studio": a back plane (StaticMeshActor + /Engine/BasicShapes/Plane, MID of the unlit
+--     MI_Widget3DPassThroughUnlit_Masked_OneSided: SlateUI T_UI_SolidFill_Cmn, TintColorAndOpacity / BackColor STUDIO
+--     x PreviewStudioGain) square to the camera axis, 2 x the bounds radius behind the model, 1.2 x the frustum there;
+--     a floor plane (MID of /Engine/BasicShapes/BasicShapeMaterial, Color #B9B4AB, lit by the front-end sun: the
+--     contact shadow) 2 uu under the bounds, 4 x the radius (PreviewStudioFloor = false drops it, V-FIN-14). The
+--     capture's exposure is forced "fixed" (SetupPreviewEV) and its vignette off. Once per bay, after CALIB_CAPS
+--     captures, the target's top-left corner is read back (KismetRenderingLibrary.ReadRenderTargetPixel) and logged
+--     against #E3DFD6 +- 8 with a PreviewStudioGain suggestion (calibrate() re-arms it after a live config change);
+--   * "scenario": the back plane only, SlateUI T_UI_Scenario_Bg, tint WHITE; exposure as configured, vignette off;
+--   * "cutout": no plane: today's capture exactly (the v2 card shows the class cut-out on STUDIO: backdrop()).
+-- The planes are movable, collision-free, shadow-free, drawn by scene captures only, in the show-only list and never
+-- turned (the turntable spins the model only); they die with the bay (release / releaseAll; shared variable for a hot
+-- reload). A plane that cannot be built drops its rung for the session (one WARN) and the next rung is built at once.
+-- brush(): while a new pick builds, a studio / scenario bay reports kind "building" (dim 1: the card washes the last
+-- frame, PAGE / BAND @0.43) instead of today's 0.5 dim; cutout keeps today's values.
 
 local C     = require("consts")
 local cfg   = require("config")
@@ -76,6 +96,22 @@ local CAPTURE_SLACK_MS = 10                 -- FAST ticks come a few ms early or
                                             --   33 ms ticks waits a third tick half of the time (~12 instead of 15/s)
 local DIM = 0.5                             -- alpha of the previous model's render while the new pick builds
 local ZERO_ROT = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
+-- 0.12.0 backdrop (§10). Paths: the spec's and notes/asset-list.txt (engine BasicShapes in pakchunk0).
+local MESH_ACTOR = "/Script/Engine.StaticMeshActor"
+local PLANE_MESH = "/Engine/BasicShapes/Plane.Plane"       -- 100 x 100 uu, centred, normal +Z, BlockAll (decoded)
+local UNLIT_MAT  = "/Game/Griffin/UI/Library/Materials/Diegetic/MI_Widget3DPassThroughUnlit_Masked_OneSided."
+                   .. "MI_Widget3DPassThroughUnlit_Masked_OneSided"   -- Masked unlit; SlateUI, TintColorAndOpacity, BackColor
+local FLOOR_MAT  = "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"                  -- lit; Color, Roughness
+local FILL_TEX   = "/Game/Griffin/UI/Library/Textures/Common/T_UI_SolidFill_Cmn.T_UI_SolidFill_Cmn"        -- 32 px white
+local SCEN_TEX   = "/Game/Griffin/UI/Library/Textures/Backgrounds/T_UI_Scenario_Bg.T_UI_Scenario_Bg"      -- teal #1E353F
+local NO_COLLISION = 0                      -- ECollisionEnabled::NoCollision
+local BEHIND, COVER = 2, 1.2                -- back plane: x bounds radius behind the centre, x the frustum at its depth
+local FLOOR_SIZE, FLOOR_GAP = 4, 2          -- floor: x bounds radius, uu under the bounds
+local CALIB_CAPS = 6                        -- captures of a ready model before the corner read (TSR / Lumen settled)
+local CALIB_TOL = 8                         -- §10: #E3DFD6 +- 8 per sRGB channel
+local STUDIO_SRGB = { 227, 223, 214 }       -- #E3DFD6 (theme STUDIO)
+local STUDIO_LIN  = { 0.7682, 0.7379, 0.6724 }
+local FLOOR_LIN   = { 0.4851, 0.4564, 0.4072 }   -- #B9B4AB
 
 local function opt(name, default)
     local v = cfg[name]
@@ -100,7 +136,10 @@ local orphans = nil        -- hot reload: the previous Lua state's actor paths (
 local lastTick = nil
 local lastApplyMs = nil    -- last build (spawn / in-place rebuild) of any bay: SetupPreviewSpawnGapMs counts from it
 local verbose = 0          -- per-pick lines at INFO for the first builds of the session, then dbg
-local stats = { spawns = 0, rebuilds = 0, ready = 0, failed = 0, captures = 0, gapWaits = 0, bursts = 0 }
+local stats = { spawns = 0, rebuilds = 0, ready = 0, failed = 0, captures = 0, gapWaits = 0, bursts = 0, planes = 0,
+                calibrations = 0 }
+local fallen = {}          -- 0.12.0: [rung] = why: a backdrop rung that failed this session (the ladder skips it)
+local cardCol = nil        -- 0.12.0: card colours per rung (backdrop(), brush()), made once
 local capLog, capFirst, capSince = {}, 1, nil   -- capture times of the last CAPS_WINDOW_MS; start of this capture run
 
 local function modeOf(b) return modes[b.i] or "spin" end
@@ -120,7 +159,7 @@ end
 local function record()
     local parts = {}
     for _, b in pairs(bays) do
-        for _, k in ipairs({ "veh", "cap", "fill" }) do
+        for _, k in ipairs({ "veh", "cap", "fill", "back", "floor" }) do
             if b.path[k] then parts[#parts + 1] = b.path[k] end
         end
     end
@@ -131,9 +170,10 @@ local function record()
     end
 end
 
--- One of ours: a static vehicle / capture / light of the current world, far above the sets (never the game's).
+-- One of ours: a static vehicle / capture / light / backdrop plane of the current world, far above the sets (never
+-- the game's).
 local function isBayActor(a)
-    if not (U.isA(a, VEH_NATIVE) or U.isA(a, CAPTURE) or U.isA(a, LIGHT)) then return false end
+    if not (U.isA(a, VEH_NATIVE) or U.isA(a, CAPTURE) or U.isA(a, LIGHT) or U.isA(a, MESH_ACTOR)) then return false end
     local okW, w = pcall(function() return a:GetWorld() end)
     if not (okW and U.same(w, U.world())) then return false end
     local ok, z = pcall(function() return tonumber(a:K2_GetActorLocation().Z) end)
@@ -180,9 +220,13 @@ end
 
 -- shown: the target holds a capture (the card shows it); fresh: that capture is of the applied pick, made after it
 -- was ready (else the previous render, dimmed); burst: still captures left; due: a capture wanted this tick.
+-- 0.12.0: rung = the backdrop the bay is built for (nil until its first build); post = the rung whose post-process the
+-- capture carries (nil = untouched, today's); placed = the planes are where frame() put them; calibrated = the corner
+-- read of V-FIN-05 is done (calibDue: this tick; calibAt: capN that arms it).
 local function newBay(i)
     return { i = i, O = origin(i), gen = St.worldGen, wk = U.key(U.world()), path = {}, state = "idle",
-             shown = false, everReady = false, fresh = false, burst = 0, due = false }
+             shown = false, everReady = false, fresh = false, burst = 0, due = false,
+             rung = nil, post = nil, placed = false, calibrated = false, calibDue = false }
 end
 
 -- Deferred spawn (chasecam.spawnRig pattern). init(a) runs between BeginDeferredActorSpawnFromClass and
@@ -211,11 +255,13 @@ local function spawn(cls, loc, init)
     return a, nil, initErr
 end
 
--- Destroys bay actor k ("veh" | "cap" | "fill") when it belongs to the current world. Returns 1 when destroyed.
+-- Destroys bay actor k ("veh" | "cap" | "fill" | "back" | "floor") when it belongs to the current world. Returns 1 when
+-- destroyed.
 local function destroyActor(b, k)
     local a = b[k]
     b[k], b.path[k] = nil, nil
     if k == "cap" then b.comp = nil end
+    if k == "back" then b.backMid = nil elseif k == "floor" then b.floorMid = nil end
     if a ~= nil and b.gen == St.worldGen and U.ok(a) then
         pcall(function() a:K2_DestroyActor() end)
         return 1
@@ -293,7 +339,8 @@ local function ensureInfra(b)
         destroyActor(b, "cap")
         return markBroken("capture component set-up: " .. tostring(okC and initErr or errC))
     end
-    b.rt = rt
+    b.rt, b.rtW, b.rtH = rt, w, h
+    b.post = nil                                           -- a new capture: today's post-process until backdropPost
     exposure(b.comp)
     if num("SetupPreviewFillLux", 60) > 0 then
         local fill, whyF = spawn(U.class(LIGHT), b.O, function(a) a.PointLightComponent:SetMobility(MOVABLE) end)
@@ -313,6 +360,358 @@ local function ensureInfra(b)
         b.i, b.O.X, b.O.Y, b.O.Z, w, h, fmt, int("SetupPreviewCaptureSource", 2), num("SetupPreviewFov", 30),
         opt("SetupPreviewShowOnly", true) == false and "all primitives" or "show-only list", b.fill and "on" or "off")
     return true
+end
+
+---------------------------------------------------------------------------------------------------- backdrop (0.12.0)
+-- The rung asked for: "cutout" while UiStyle is "classic" (the 0.11.0 cards: today's capture), else PreviewBackdrop.
+local function askedRung()
+    if opt("UiStyle", "v2") == "classic" then return "cutout" end
+    local r = opt("PreviewBackdrop", "studio")
+    if r == "scenario" or r == "cutout" then return r end
+    return "studio"
+end
+
+-- The rung in use: the asked one, else the first rung below it that has not failed this session.
+local function rungNow()
+    local r = askedRung()
+    if r == "studio" and fallen.studio then r = "scenario" end
+    if r == "scenario" and fallen.scenario then r = "cutout" end
+    return r
+end
+
+-- A rung whose plane could not be built (or placed) is off for the session. quiet: the caller logs the whole fall (a
+-- missing material drops both plane rungs) in one line. Returns true when the rung was still on.
+local function fall(rung, why, quiet)
+    if fallen[rung] then return false end
+    fallen[rung] = tostring(why)
+    if not quiet then
+        U.warn(TAG, "backdrop %s off for this session (%s): %s from now on (V-FIN-05)", rung, fallen[rung], rungNow())
+    end
+    return true
+end
+
+-- PreviewStudioGain (V-FIN-05 calibration): a number or {r, g, b}, each > 0, multiplying STUDIO on the studio plane.
+local function studioGain()
+    local g = opt("PreviewStudioGain", 1)
+    if type(g) == "number" and g > 0 and g < math.huge then return g, g, g end
+    if type(g) == "table" then
+        local r, gg, bl = tonumber(g[1] or g.R or g.r), tonumber(g[2] or g.G or g.g), tonumber(g[3] or g.B or g.b)
+        if r and gg and bl and r > 0 and gg > 0 and bl > 0 and math.max(r, gg, bl) < math.huge then return r, gg, bl end
+    end
+    U.logOnce("vpreview.gain", TAG, "PreviewStudioGain %s ignored (a number or {r, g, b}, each > 0): 1", tostring(g))
+    return 1, 1, 1
+end
+
+local function gainText()
+    local r, g, bl = studioGain()
+    if r == g and g == bl then return string.format("%.2f", r) end
+    return string.format("{%.2f, %.2f, %.2f}", r, g, bl)
+end
+
+local function expText()
+    if opt("SetupPreviewExposure", "inherit") ~= "fixed" then return "inherited" end
+    return string.format("fixed at EV100 %.2f", num("SetupPreviewEV", 8))
+end
+
+-- Card colours per rung (§2.6 "building render", §10): fill = behind the class cut-out while a bay has no frame yet,
+-- wash = over a "building" frame. theme's identity-stable tables (the diffed setters compare colours by identity);
+-- vpreview's own copies of the same values when theme.lua cannot load (lazy: theme is not a group-1 module).
+local function cardColours()
+    if cardCol then return cardCol end
+    local ok, T = pcall(U.mod, "theme")
+    local K = ok and type(T) == "table" and type(T.alpha) == "function" and type(T.COL) == "table" and T.COL or nil
+    if K and K.STUDIO and K.PAGE and K.BAND and K.PANEL then
+        cardCol = { studio = { fill = K.STUDIO, wash = T.alpha(K.PAGE, 0.43) },
+                    scenario = { fill = T.alpha(K.PANEL, 1), wash = T.alpha(K.BAND, 0.43) },   -- the texture's #1E353F
+                    cutout = { fill = K.STUDIO } }
+    else
+        U.warn(TAG, "theme tokens unavailable (%s): the backdrop card colours are vpreview's copies",
+            tostring(ok and "no COL" or T))
+        local studio = { R = 0.7682, G = 0.7379, B = 0.6724, A = 1 }
+        cardCol = { studio = { fill = studio, wash = { R = 0.8148, G = 0.8070, B = 0.7529, A = 0.43 } },
+                    scenario = { fill = { R = 0.0130, G = 0.0369, B = 0.0482, A = 1 },
+                                 wash = { R = 0.0273, G = 0.0595, B = 0.0666, A = 0.43 } },
+                    cutout = { fill = studio } }
+    end
+    return cardCol
+end
+
+local function s2l(v)                                      -- sRGB channel (0..1) -> linear
+    if v <= 0.04045 then return v / 12.92 end
+    return ((v + 0.055) / 1.055) ^ 2.4
+end
+
+local function vec4(r, g, bl, a) return { R = r, G = g, B = bl, A = a or 1.0 } end   -- a new table per engine write
+
+-- A transient MID of `path`. Its only UPROPERTY referencer will be a plane's material slot, set in this same tick (GC
+-- rule, as brush()): the assets it needs are resolved before it is made. mid | nil, why.
+local function newMid(path)
+    local parent, kml = U.obj(path), U.cdo(KML)
+    if not (U.ok(parent) and U.ok(kml)) then return nil, "material " .. path .. " not found" end
+    local ok, mid = pcall(function()
+        return kml:CreateDynamicMaterialInstance(U.world(), parent, U.fname("None"), MID_TRANSIENT)
+    end)
+    if not (ok and U.ok(mid)) then return nil, "CreateDynamicMaterialInstance(" .. path .. "): " .. tostring(mid) end
+    return mid
+end
+
+-- The back plane's look for `rung` on b.backMid: studio = the white fill tinted STUDIO x PreviewStudioGain (tint alpha
+-- 1: the Masked clip is 0.333); scenario = T_UI_Scenario_Bg, WHITE. tex: the resolved texture (nil = the material's
+-- own white square). true | false, why.
+local function paintBack(b, rung, tex)
+    local mid = b.backMid
+    if not U.ok(mid) then return false, "back plane material gone" end
+    local col = vec4(1.0, 1.0, 1.0)
+    if rung == "studio" then
+        local gr, gg, gb = studioGain()
+        col = vec4(STUDIO_LIN[1] * gr, STUDIO_LIN[2] * gg, STUDIO_LIN[3] * gb)
+    end
+    local ok, err = pcall(function()
+        if U.ok(tex) then mid:SetTextureParameterValue(U.fname("SlateUI"), tex) end
+        mid:SetVectorParameterValue(U.fname("TintColorAndOpacity"), col)
+        mid:SetVectorParameterValue(U.fname("BackColor"), vec4(col.R, col.G, col.B))
+    end)
+    if not ok then return false, "back plane parameters: " .. tostring(err) end
+    return true
+end
+
+-- One plane: a StaticMeshActor showing `mesh`, made movable before the mesh is set (a Static component refuses
+-- SetStaticMesh once registered, and a deferred spawn registers native components before FinishSpawning), no
+-- collision (the Plane is BlockAll; K2_TeleportTo then skips its encroachment check), no shadow, drawn by scene
+-- captures only (never in a menu camera), material `mid`. actor | nil, why.
+local function spawnPlane(b, mesh, mid, what)
+    local a, why, initErr = spawn(U.class(MESH_ACTOR), b.O, function(x)
+        local c = x.StaticMeshComponent
+        c:SetMobility(MOVABLE)
+        if c:SetStaticMesh(mesh) == false then error("SetStaticMesh refused") end
+        c:SetCollisionEnabled(NO_COLLISION)
+        c:SetCastShadow(false)
+        c:SetVisibleInSceneCaptureOnly(true)
+        c:SetMaterial(0, mid)
+    end)
+    if not a then return nil, what .. " spawn: " .. tostring(why) end
+    if initErr then
+        pcall(function() a:K2_DestroyActor() end)
+        return nil, what .. " set-up: " .. initErr
+    end
+    stats.planes = stats.planes + 1
+    return a
+end
+
+local function dropPlanes(b)
+    local n = destroyActor(b, "back") + destroyActor(b, "floor")
+    b.placed = false
+    return n
+end
+
+-- The planes of `rung` (none for cutout). Assets first (T_UI_Scenario_Bg is a 4 MB NeverStream texture: one hitch per
+-- session), then each MID and the plane that holds it. true | false, why (the caller drops what was built).
+local function buildPlanes(b, rung)
+    if rung == "cutout" then return true end
+    local mesh = U.obj(PLANE_MESH)
+    if not U.ok(mesh) then return false, "mesh " .. PLANE_MESH .. " not found" end
+    local tex = U.obj(rung == "scenario" and SCEN_TEX or FILL_TEX)
+    if not U.ok(tex) then
+        if rung == "scenario" then return false, "texture " .. SCEN_TEX .. " not found" end
+        tex = nil
+        U.logOnce("vpreview.filltex", TAG, "%s not found: the studio plane keeps the material's white square", FILL_TEX)
+    end
+    local mid, why = newMid(UNLIT_MAT)
+    if not mid then return false, why end
+    local back
+    back, why = spawnPlane(b, mesh, mid, "back plane")
+    if not back then return false, why end
+    b.back, b.path.back, b.backMid = back, U.pathOf(back), mid
+    local okP, whyP = paintBack(b, rung, tex)
+    if not okP then return false, whyP end
+    if rung ~= "studio" or opt("PreviewStudioFloor", true) == false then return true end
+    local fmid, whyF = newMid(FLOOR_MAT)
+    if not fmid then return false, "floor: " .. tostring(whyF) end
+    local okC, errC = pcall(function()
+        fmid:SetVectorParameterValue(U.fname("Color"), vec4(FLOOR_LIN[1], FLOOR_LIN[2], FLOOR_LIN[3]))
+    end)
+    if not okC then return false, "floor Color: " .. tostring(errC) end
+    local floor
+    floor, whyF = spawnPlane(b, mesh, fmid, "floor plane")
+    if not floor then return false, whyF end
+    b.floor, b.path.floor, b.floorMid = floor, U.pathOf(floor), fmid
+    return true
+end
+
+-- The capture's post-process for `rung`: studio forces the "fixed" exposure (SetupPreviewEV, §12.3), studio and
+-- scenario turn the vignette off (a flat backdrop into the corners); back on cutout, what exposure() left (the
+-- configured exposure, the front end's vignette). Nothing is written while a capture never left cutout (today's).
+local function backdropPost(b, rung)
+    local c = b.comp
+    if not U.ok(c) or b.post == rung or (rung == "cutout" and b.post == nil) then return end
+    local fixed = rung == "studio" or opt("SetupPreviewExposure", "inherit") == "fixed"
+    local flat, ev = rung ~= "cutout", num("SetupPreviewEV", 8)
+    local ok, err = pcall(function()
+        local pp = c.PostProcessSettings                   -- struct fields written in place (as exposure())
+        pp.bOverride_AutoExposureMinBrightness = fixed
+        pp.bOverride_AutoExposureMaxBrightness = fixed
+        if fixed then
+            pp.AutoExposureMinBrightness = ev
+            pp.AutoExposureMaxBrightness = ev
+        end
+        pp.bOverride_VignetteIntensity = flat
+        if flat then pp.VignetteIntensity = 0.0 end
+    end)
+    b.post = rung
+    U.logOnce("vpreview.post." .. rung .. "." .. tostring(fixed and ev), TAG,
+        "backdrop %s: capture exposure %s, vignette %s: %s (V-FIN-05)", rung,
+        fixed and string.format("fixed at EV100 %.2f", ev) or "inherited", flat and "off" or "restored",
+        ok and "ok" or tostring(err))
+end
+
+-- A Lua error in the backdrop code: both plane rungs off for the session (cutout = today's capture), one WARN.
+local function backdropBroken(b, err)
+    local why = "error: " .. tostring(err):match("^[^\n]*")
+    if not (fallen.studio and fallen.scenario) then
+        fallen.studio, fallen.scenario = fallen.studio or why, fallen.scenario or why
+        U.warn(TAG, "backdrop off for this session (%s): cutout from now on (V-FIN-05)", why)
+    end
+    pcall(dropPlanes, b)
+    b.rung, b.calibDue = "cutout", false
+    pcall(backdropPost, b, "cutout")
+    record()
+end
+
+-- Bay b's backdrop for the rung in use (apply, after ensureInfra): built once, again when the rung, PreviewStudioFloor
+-- or a plane changed. A rung whose plane cannot be built is dropped for the session and the next one is built at once.
+-- Placement is frame()'s (the bounds are not known yet; until then no capture runs).
+local function ensureBackdrop(b)
+    local want = rungNow()
+    local floor = want == "studio" and opt("PreviewStudioFloor", true) ~= false
+    if not (b.rung == want and (want == "cutout" or U.ok(b.back)) and U.ok(b.floor) == floor) then
+        local had, off = b.rung, {}
+        dropPlanes(b)
+        while want ~= "cutout" do
+            local ok, why = buildPlanes(b, want)
+            if ok then break end
+            dropPlanes(b)
+            if fall(want, why, true) then off[#off + 1] = want .. ": " .. tostring(why) end
+            want = rungNow()
+        end
+        if #off > 0 then                                   -- the one log line of this fall
+            U.warn(TAG, "backdrop off for this session (%s): %s from now on (V-FIN-05)", table.concat(off, "; "), want)
+        end
+        b.rung, b.calibrated, b.calibDue, b.calibAt = want, false, false, nil
+        record()
+        if want ~= had and opt("UiStyle", "v2") ~= "classic" then
+            local what = "no plane: today's capture, the card shows the class cut-out on STUDIO ("
+                .. (askedRung() == "cutout" and "PreviewBackdrop" or ("scenario off: " .. tostring(fallen.scenario))) .. ")"
+            if want == "studio" then
+                what = string.format("back plane STUDIO x %s%s, exposure fixed at EV100 %.2f", gainText(),
+                    U.ok(b.floor) and " + lit floor #B9B4AB" or " (no floor)", num("SetupPreviewEV", 8))
+            elseif want == "scenario" then
+                what = "back plane T_UI_Scenario_Bg, exposure " .. expText()
+                    .. (fallen.studio and (" (studio off: " .. fallen.studio .. ")") or "")
+            end
+            U.log(TAG, "bay %d backdrop %s: %s (V-FIN-05)", b.i, want, what)
+        end
+    end
+    backdropPost(b, b.rung)
+end
+
+-- The planes for the camera frame() just placed (el, az: its elevation / azimuth seen from the bounds centre; hHalf,
+-- vHalf: half FOVs). Back plane: square to the camera axis, BEHIND x the radius behind the centre, COVER x the frustum
+-- at that depth, 16:9 like the target (local X = the camera's up, local Y = its right: the texture stands upright, its
+-- +Z normal faces the camera); floor: FLOOR_GAP uu under the yaw-0 bounds (a turn about Z keeps the bottom), FLOOR_SIZE
+-- x the radius, square to the camera's azimuth. Neither turns with the model. A plane that cannot be placed drops the
+-- rung (a plane left at the bay origin would show inside the model).
+local function placeBackdrop(b, el, az, hHalf, vHalf)
+    if not (U.ok(b.back) or U.ok(b.floor)) then return end
+    local Cn, E, r = b.box.C, b.box.E, b.box.r
+    local okB, errB, okF, errF = true, nil, true, nil
+    if U.ok(b.back) then
+        local behind = BEHIND * r
+        local depth = (b.dist or 0) + behind
+        local w, h = 2 * depth * math.tan(hHalf) * COVER, 2 * depth * math.tan(vHalf) * COVER
+        local ce = math.cos(el)
+        local loc = { X = Cn.X - behind * ce * math.cos(az), Y = Cn.Y - behind * ce * math.sin(az),
+                      Z = Cn.Z - behind * math.sin(el) }
+        okB, errB = pcall(function()
+            if b.back:K2_TeleportTo(loc, { Pitch = 90.0 - math.deg(el), Yaw = math.deg(az) + 180.0, Roll = 0.0 }) == false
+            then error("K2_TeleportTo refused") end
+            b.back:SetActorScale3D({ X = h / 100, Y = w / 100, Z = 1.0 })
+        end)
+    end
+    if U.ok(b.floor) then
+        local s = FLOOR_SIZE * r / 100
+        okF, errF = pcall(function()
+            if b.floor:K2_TeleportTo({ X = Cn.X, Y = Cn.Y, Z = Cn.Z - E.Z - FLOOR_GAP },
+                { Pitch = 0.0, Yaw = math.deg(az), Roll = 0.0 }) == false then error("K2_TeleportTo refused") end
+            b.floor:SetActorScale3D({ X = s, Y = s, Z = 1.0 })
+        end)
+    end
+    if not (okB and okF) then
+        fall(b.rung, "placement: " .. tostring(errB or errF))
+        dropPlanes(b)
+        b.rung, b.calibDue = "cutout", false
+        backdropPost(b, "cutout")
+        record()
+        return
+    end
+    b.placed = true
+    U.dbg(TAG, "bay %d backdrop %s placed: back plane %.0f uu behind, floor at z %.0f", b.i, tostring(b.rung),
+        BEHIND * r, Cn.Z - E.Z - FLOOR_GAP)
+end
+
+-- One pixel of the target as sRGB bytes at (fx, fy) of its size: ReadRenderTargetPixel returns an FColor (a float
+-- target comes back sRGB-encoded). A GPU readback flushes the render thread: once per bay (V-FIN-05). px | nil, why.
+local function readPixel(b, fx, fy)
+    local krl = U.cdo(KRL)
+    if not (U.ok(krl) and U.ok(b.rt)) then return nil, "KismetRenderingLibrary / target missing" end
+    local x = math.floor((b.rtW or int("SetupPreviewW", 960)) * fx)
+    local y = math.floor((b.rtH or int("SetupPreviewH", 540)) * fy)
+    local ok, r, g, bl = pcall(function()
+        local c = krl:ReadRenderTargetPixel(U.world(), b.rt, x, y)
+        return tonumber(c.R), tonumber(c.G), tonumber(c.B)
+    end)
+    if not (ok and r and g and bl) then return nil, tostring(ok and "no colour" or r) end
+    local function byte(v) return math.max(0, math.min(255, math.floor(v + 0.5))) end
+    return { byte(r), byte(g), byte(bl), x = x, y = y }
+end
+
+local function hexOf(p) return string.format("#%02X%02X%02X", p[1], p[2], p[3]) end
+
+-- V-FIN-05: the target's top-left corner (the back plane) against #E3DFD6 +- 8 (studio; scenario logs its colour), with
+-- the floor's colour (bottom-left corner) and a PreviewStudioGain suggestion (a linear ratio: the tonemapper bends it,
+-- so a second calibrate() may be needed). One log line per bay.
+local function calibrate(b)
+    b.calibrated, b.calibDue = true, false
+    stats.calibrations = stats.calibrations + 1
+    local wall, err = readPixel(b, 0.03, 0.04)
+    if not wall then
+        U.warn(TAG, "bay %d backdrop %s: the render target corner could not be read (%s) (V-FIN-05)", b.i,
+            tostring(b.rung), tostring(err))
+        return
+    end
+    if b.rung ~= "studio" then
+        U.log(TAG, "bay %d backdrop %s: RT corner (%d, %d) %s (the texture is #1E353F), exposure %s (V-FIN-05)", b.i,
+            tostring(b.rung), wall.x, wall.y, hexOf(wall), expText())
+        return
+    end
+    local floor = U.ok(b.floor) and readPixel(b, 0.03, 0.96) or nil
+    local d = 0
+    for k = 1, 3 do d = math.max(d, math.abs(wall[k] - STUDIO_SRGB[k])) end
+    local verdict
+    if math.max(wall[1], wall[2], wall[3]) < 8 then
+        verdict = "FAIL: black, the back plane is not in the picture (culled, misplaced or not in the show-only list)"
+    elseif d <= CALIB_TOL then
+        verdict = string.format("PASS (max delta %d)", d)
+    else
+        local g, s = { studioGain() }, {}
+        for k = 1, 3 do
+            s[k] = math.max(0.05, math.min(64, g[k] * STUDIO_LIN[k] / math.max(1e-3, s2l(wall[k] / 255))))
+        end
+        verdict = string.format("FAIL (max delta %d): try PreviewStudioGain = {%.2f, %.2f, %.2f} and calibrate(); "
+            .. "SetupPreviewEV moves the model and the floor; fallback PreviewBackdrop = \"scenario\"", d, s[1], s[2], s[3])
+    end
+    U.log(TAG, "bay %d backdrop studio: RT corner (%d, %d) %s, target #E3DFD6 +-%d, gain %s, exposure fixed at EV100 "
+        .. "%.2f%s: %s (V-FIN-05)", b.i, wall.x, wall.y, hexOf(wall), CALIB_TOL, gainText(), num("SetupPreviewEV", 8),
+        floor and (", floor " .. hexOf(floor)) or "", verdict)
 end
 
 ---------------------------------------------------------------------------------------------------- models
@@ -346,6 +745,8 @@ local function apply(b, w, now)
     local gap = lastApplyMs and math.floor(now - lastApplyMs) or nil
     lastApplyMs = now                                      -- every attempt counts: ensureInfra spawns too
     if not ensureInfra(b) then return end
+    local okB, errB = xpcall(ensureBackdrop, debug.traceback, b)   -- 0.12.0: planes of the rung in use (cutout: none)
+    if not okB then backdropBroken(b, errB) end
     local cls = V.presetClass(w.p)
     if not cls then return failBay(b, w.id, "preset class not resolvable: " .. tostring(w.p.classPath)) end
     local update = opt("SetupPreviewRebuild", "respawn") == "update" and U.ok(b.veh)
@@ -448,6 +849,8 @@ local function frame(b)
             L:SetAttenuationRadius(d * 3)
         end)
     end
+    local okP, errP = pcall(placeBackdrop, b, el, az, hHalf, vHalf)   -- 0.12.0: the planes follow the camera
+    if not okP then backdropBroken(b, errP) end
 end
 
 local function showOnly(b)
@@ -456,6 +859,9 @@ local function showOnly(b)
         b.comp:ClearShowOnlyComponents()
         b.comp:ShowOnlyActorComponents(b.veh, true)        -- UFunctions: never write the TArray from Lua
     end)
+    for _, k in ipairs({ "back", "floor" }) do              -- 0.12.0 backdrop planes (§10): in the picture, never turned
+        if U.ok(b[k]) then pcall(function() b.comp:ShowOnlyActorComponents(b[k], true) end) end
+    end
 end
 
 -- SetupPreviewCaptureOnly (V-VP-05 fallback): the model is drawn by scene captures only and casts no shadow.
@@ -504,7 +910,12 @@ local function capture(b, now)
     end
     stats.captures = stats.captures + 1
     noteCapture(now)
-    if b.state == "ready" then b.shown, b.fresh = true, true end
+    if b.state == "ready" then
+        b.shown, b.fresh = true, true
+        -- 0.12.0 V-FIN-05: the backdrop's corner is read once per bay, after CALIB_CAPS captures of a ready model
+        if cfg.PreviewCalibrate == true and b.placed and not b.calibrated and b.rung ~= nil and b.rung ~= "cutout"
+            and b.capN >= (b.calibAt or CALIB_CAPS) then b.calibDue = true end
+    end
 end
 
 -- RC-12: a still is a burst of SetupPreviewStillBurst captures on consecutive budget slots (Lumen GI / reflections,
@@ -526,6 +937,7 @@ local function becomeReady(b, box, now, how)
     spinTo(b, b.yaw)
     b.state, b.readyAt, b.prestreamAt, b.nextLate, b.capN = "ready", now, now, now + 500, 0
     b.everReady, b.fresh, b.lateBurst, b.modeChanged = true, false, false, false
+    b.calibAt = nil                                        -- 0.12.0: capN restarted (V-FIN-05 read after CALIB_CAPS)
     if modeOf(b) == "still" then arm(b, "ready") else b.burst = 0 end
     b.due = true                                           -- the first capture: this tick's budget (M.tick)
     stats.ready = stats.ready + 1
@@ -729,15 +1141,24 @@ function M.recapture(why)
     return n
 end
 
--- What key i shows: brush, "material" | "texture", alpha multiplier, aspect; nil = the 2D card. The previous
--- model stays (dimmed) while a new pick builds, until the first capture of the new one. The MID is made here, in the
--- tick that puts it on the image: an object only Lua knows (no UPROPERTY reference) may be garbage collected.
+-- What key i shows: brush, kind, alpha multiplier, aspect, base, wash; nil = the 2D card. The previous model stays
+-- while a new pick builds, until the first capture of the new one. The MID is made here, in the tick that puts it on
+-- the image: an object only Lua knows (no UPROPERTY reference) may be garbage collected.
+--   kind  "material" | "texture": a capture of the applied pick; 0.12.0 "building" (§12.2): a studio / scenario bay
+--         shows an older frame: the card draws `wash` over it (dim is then 1: the wash replaces the 0.5 dim, which
+--         turns a cream photo grey). A cutout bay (UiStyle "classic" included) keeps today's kind and DIM.
+--   base  "material" | "texture": what the brush is, also while "building" (pick the image setter by it);
+--   wash  {R, G, B, A}: PAGE @0.43 (studio) | BAND @0.43 (scenario) while "building", else nil (theme's tables).
 function M.brush(i)
     if not M.enabled() then return nil end
     local b = bays[i]
     if not (b and b.shown and U.ok(b.rt)) then return nil end
-    local dim = (b.state == "ready" and b.fresh and b.want ~= nil and b.want.id == b.applied) and 1.0 or DIM
-    if opt("SetupPreviewBrush", "material") == "texture" then return b.rt, "texture", dim, M.aspect() end
+    local fresh = b.state == "ready" and b.fresh and b.want ~= nil and b.want.id == b.applied
+    local base = opt("SetupPreviewBrush", "material") == "texture" and "texture" or "material"
+    local wash = (not fresh and b.rung ~= nil and b.rung ~= "cutout") and cardColours()[b.rung].wash or nil
+    local kind, dim = base, fresh and 1.0 or DIM
+    if wash then kind, dim = "building", 1.0 end
+    if base == "texture" then return b.rt, kind, dim, M.aspect(), base, wash end
     if not U.ok(b.mid) then
         b.mid = nil
         local path, param = opt("SetupPreviewMaterial", RBMAT), opt("SetupPreviewMaterialParam", "Texture")
@@ -754,7 +1175,44 @@ function M.brush(i)
         b.mid = mid
         U.logOnce("vpreview.mid", TAG, "column image = MID of %s, texture parameter %s (V-VP-03)", path, tostring(param))
     end
-    return b.mid, "material", dim, M.aspect()
+    return b.mid, kind, dim, M.aspect(), base, wash
+end
+
+-- 0.12.0 (§10): the backdrop of key i, for the card around the render. rung "studio" | "scenario" | "cutout" (the
+-- bay's, else the rung a bay would get now; "cutout" while no 3D preview can be shown), fill = the colour behind the
+-- class cut-out while there is no frame yet (STUDIO; scenario PANEL, T_UI_Scenario_Bg's own teal), wash = the colour
+-- over a "building" frame (PAGE / BAND @0.43; nil for cutout: today's dim). On "cutout" the v2 card shows the class
+-- cut-out on the fill instead of the render (§10: no live render). Pure Lua; theme's identity-stable colour tables.
+function M.backdrop(i)
+    local r = "cutout"
+    if M.enabled() then
+        local b = bays[i]
+        r = (b and b.rung) or rungNow()
+    end
+    local c = cardColours()[r]
+    return r, c.fill, c.wash
+end
+
+-- 0.12.0 test.cmd (V-FIN-05 calibration): the backdrop of key i (nil = every bay) takes the current PreviewStudioGain
+-- and SetupPreviewEV, and its corner is read again after CALIB_CAPS more captures (a still bay captures a new burst).
+-- Returns a text.
+function M.calibrate(i)
+    local n = 0
+    for k, b in pairs(bays) do
+        if (i == nil or k == i) and b.rung ~= nil and b.rung ~= "cutout" then
+            b.post = nil
+            backdropPost(b, b.rung)
+            if b.rung == "studio" and U.ok(b.backMid) then
+                local ok, why = paintBack(b, "studio", nil)
+                if not ok then U.warn(TAG, "bay %d calibrate: %s", b.i, tostring(why)) end
+            end
+            b.calibrated, b.calibDue, b.calibAt = false, false, (b.capN or 0) + CALIB_CAPS
+            if b.state == "ready" and modeOf(b) == "still" then arm(b, "calibrate") end
+            n = n + 1
+        end
+    end
+    return string.format("%d bay(s) re-armed for the corner read: backdrop %s, gain %s, EV100 %.2f (V-FIN-05)", n,
+        rungNow(), gainText(), num("SetupPreviewEV", 8))
 end
 
 -- FAST (setup.pollNav while the VEHICLES / RACERS step shows). Returns changed, keys: changed = what a card shows
@@ -818,6 +1276,17 @@ function M.tick()
         end)
         for k = 1, math.min(#due, math.max(1, int("SetupPreviewCaptureBudget", 1))) do capture(due[k], now) end
     end
+    -- 0.12.0 V-FIN-05: at most one backdrop corner read per tick (a GPU readback), once per bay
+    for _, b in pairs(bays) do
+        if b.calibDue then
+            local ok, err = xpcall(calibrate, debug.traceback, b)
+            if not ok then
+                b.calibDue = false
+                U.dbg(TAG, "bay %d corner read error: %s", b.i, tostring(err))
+            end
+            break
+        end
+    end
     local changed = next(keys) ~= nil
     for i, b in pairs(bays) do
         if sig(b) ~= before[i] then keys[i], changed = true, true end
@@ -831,7 +1300,7 @@ function M.release(i, why, freeTarget)
     local b = bays[i]
     if not b then return end
     bays[i] = nil
-    local n = destroyActor(b, "veh") + destroyActor(b, "fill") + destroyActor(b, "cap")
+    local n = destroyActor(b, "veh") + dropPlanes(b) + destroyActor(b, "fill") + destroyActor(b, "cap")
     if freeTarget and U.ok(b.rt) then pcall(function() U.cdo(KRL):ReleaseRenderTarget2D(b.rt) end) end
     b.rt, b.mid = nil, nil
     record()
@@ -844,7 +1313,7 @@ function M.releaseAll(why, freeTargets)
     local nb, na = 0, 0
     for _, b in pairs(bays) do
         nb = nb + 1
-        na = na + destroyActor(b, "veh") + destroyActor(b, "fill") + destroyActor(b, "cap")
+        na = na + destroyActor(b, "veh") + dropPlanes(b) + destroyActor(b, "fill") + destroyActor(b, "cap")
         if freeTargets and U.ok(b.rt) then pcall(function() U.cdo(KRL):ReleaseRenderTarget2D(b.rt) end) end
         b.rt, b.mid = nil, nil
     end
@@ -858,9 +1327,24 @@ function M.releaseAll(why, freeTargets)
     end
 end
 
+-- 0.12.0 launch hold (state.lua St.launchHold): the bays' actors go with the front-end world being torn down; the
+-- references are dropped and nothing is called on them.
+function M.dropAll(why)
+    pendingRelease = nil
+    local nb = 0
+    for _ in pairs(bays) do nb = nb + 1 end
+    bays, lastTick, modes = {}, nil, {}
+    record()
+    if nb > 0 then
+        U.log(TAG, "dropped (%s): %d bay(s), their actors go with the front-end world (launch hold, V-LCH-07)",
+            tostring(why), nb)
+    end
+end
+
 -- Counters for diag / test commands (V-RC-17), a new table per call: captures (session), capturesPerSec (the last
 -- 10 s; a run that started later counts from its start, at least 1 s), spawns, rebuilds, ready, failed, gapWaits
--- (builds that waited for SetupPreviewSpawnGapMs), bursts (still bursts armed), bays, spin, still (bays per mode).
+-- (builds that waited for SetupPreviewSpawnGapMs), bursts (still bursts armed), bays, spin, still (bays per mode);
+-- 0.12.0: backdrop (the rung in use now), planes (backdrop planes spawned), calibrations (corner reads, V-FIN-05).
 function M.stats()
     local now = St.nowMs()
     local k = capFirst
@@ -869,7 +1353,8 @@ function M.stats()
     local span = math.max(1000, math.min(CAPS_WINDOW_MS, now - (capSince or now)))
     local s = { captures = stats.captures, capturesPerSec = n * 1000 / span, spawns = stats.spawns,
                 rebuilds = stats.rebuilds, ready = stats.ready, failed = stats.failed, gapWaits = stats.gapWaits,
-                bursts = stats.bursts, bays = 0, spin = 0, still = 0 }
+                bursts = stats.bursts, bays = 0, spin = 0, still = 0, backdrop = rungNow(), planes = stats.planes,
+                calibrations = stats.calibrations }
     for _, b in pairs(bays) do
         local m = modeOf(b)
         s.bays, s[m] = s.bays + 1, s[m] + 1
@@ -877,14 +1362,17 @@ function M.stats()
     return s
 end
 
--- One line for diag / test commands: bays as key=state:mode:pick.
+-- One line for diag / test commands: bays as key=state:mode:pick:backdrop; 0.12.0 "backdrop <asked>[ -> <in use>]".
 function M.status()
     local parts = {}
     for i, b in pairs(bays) do
-        parts[#parts + 1] = string.format("%s=%s:%s:%s", tostring(i), b.state, modeOf(b), tostring(b.applied))
+        parts[#parts + 1] = string.format("%s=%s:%s:%s:%s", tostring(i), b.state, modeOf(b), tostring(b.applied),
+            tostring(b.rung or "-"))
     end
     table.sort(parts)
-    return string.format("3D %s, bays {%s}, captures %d (%.1f/s), spawns %d", broken and ("off: " .. broken) or "on",
+    local asked, now = askedRung(), rungNow()
+    return string.format("3D %s, backdrop %s, bays {%s}, captures %d (%.1f/s), spawns %d",
+        broken and ("off: " .. broken) or "on", asked == now and now or (asked .. " -> " .. now),
         table.concat(parts, " "), stats.captures, M.stats().capturesPerSec, stats.spawns)
 end
 
@@ -901,7 +1389,9 @@ end)
 
 -- Safety net (lobby.lua closes the setup on a phase change, which releases): never a bay outside the front end.
 St.on("phase", TAG, function(new)
-    if new ~= "FRONTEND" and next(bays) ~= nil then M.releaseAll("phase " .. tostring(new)) end
+    if new ~= "FRONTEND" and next(bays) ~= nil then
+        if St.launchHold() then M.dropAll("phase " .. tostring(new)) else M.releaseAll("phase " .. tostring(new)) end
+    end
 end)
 
 -- Hot reload without main.lua's PERSIST_MODULES: the previous Lua state's actors, if any.

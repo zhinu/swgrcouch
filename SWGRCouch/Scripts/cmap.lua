@@ -27,6 +27,19 @@
 -- SetBrushFromSoftTexture from Lua, ActivateWidget on the selector.
 -- Every game call is guarded. A failure marks the view broken: setup.lua then shows the 0.8.0 lists for that step.
 -- VERIFY ids V-CMAP-01..12 (README §9 "0.9.0 checks").
+-- 0.12.0 UI v2 (WI-06; binding spec notes/design/ui-v2/ui-redesign-final.md §7.2, §7.3), on setup's v2 page (ctx.v2):
+-- both views are page-sized canvases placed on setup's page canvas (ctx.place) in screen su (ctx.geo).
+--   PLANET: the campaign's T_UI_Map_Bg is setup's page background (no map strip here, SetupCMapBackground false); the
+--     arc's area at x 170-3670, y 555-1635 with cmap's own anchors (arc, info block unchanged); the planet x class
+--     Arcade tile (setup.arcadeTile) as a framed poster where the video box was (the movie plays in that frame only
+--     when SetupCMapVideoW > 0); a disc pager at y 1705 (T_UI_Planet_<Pl>_Select 96 su on PANEL discs, the selected
+--     one 128 su + WHITE ring) whose ghosts are the old chips (focus = select, A = choose); no name chips.
+--   TRACK: the run map as one framed print at (128, 540), 3584 x 1316 = the virtual map (scale 1.0: the 27-su floor
+--     holds), T_UI_MapEvent_Bg's top 1300 rows (ax 0.6); WBP_RunMap_Planet at the left, half transparent; names Moki 36
+--     wrapping at 660 (2 lines max); rows at pitch min(190, (1316 - 160) / rows); nodes from x 1130, NODE_DX 300; node
+--     labels Overpass Medium 27 LS 150, one variant word per line, on every row while the pitch is >= 186 (else the
+--     focused row only); the WBP_Tooltip_Holder detail card at (2560, 600, 1020 x 1196).
+-- The last row of focus targets reaches setup's BACK with Down (M.navDown). The classic views are unchanged.
 
 local C   = require("consts")
 local cfg = require("config")
@@ -67,6 +80,7 @@ local TEX = {
     pod     = tx("Icons/Arcade/", "T_UI_Arcade_Plane_Icn"),
 }
 local FONT_DISPLAY = "/Game/Griffin/UI/Library/Fonts/Font_Display.Font_Display"
+local FONT_BODY    = "/Game/Griffin/UI/Library/Fonts/Font_Body.Font_Body"          -- 0.12.0 v2 node labels, card
 local FONT_DECO    = "/Game/Griffin/UI/Library/Fonts/Font_Decorative.Font_Decorative"
 local RICH_STYLE   = "/Game/Griffin/UI/Library/Fonts/DT_RichText_Body_Dark_Italic.DT_RichText_Body_Dark_Italic"
 local AUDIO_DT     = "/Game/Griffin/Audio/UI/DT_UI_Audio_ForceFeedback.DT_UI_Audio_ForceFeedback"
@@ -105,6 +119,23 @@ local NODE_X0, NODE_DX, LABEL_W = 1010, 240, 240         -- variant columns and 
 local CARD_MARGIN = 128                                  -- card inset from the right edge (campaign RiskReward place)
 local PANEL_W, PANEL_H = 2140, 2400                      -- WBP_RunMap_Planet natural size (disc centred)
 local ROW_MAX = 10
+
+-- 0.12.0 UI v2 (§7.2 / §7.3), screen su; the views convert with ctx.geo (map-local = screen - frame origin).
+local V2G = {
+    centreX = 1920, areaY = 555,                          -- the arc's area: centred on x 1920 from y 555
+    art = { w = 768, h = 432, ay = 0.3 },                 -- planet x class art, 360 k right of the centre
+    discY = 1760, disc = 96, discSel = 128, discGap = 40, -- disc pager (0.12.0: 55 lower, see areaExtra)
+    areaExtra = 55,                                       -- 0.12.0: the info block's 2-line count was cut at y 1635
+    frame = { x = 128, y = 540 },                         -- run map frame (w x h = SetupCMapMapW x SetupCMapMapH)
+    nameX = 300, nameW = 660, nameLines = 2, nameSize = 36,
+    busX = 1000, nodeX0 = 1130, nodeDX = 300, labelGap = 20, labelY = 60,
+    pitchMax = 190, pitchPad = 160, rowShift = 40, labelPitch = 186,
+    card = { x = 2560, y = 600, w = 1020, h = 1196, artW = 956, artH = 420 },
+    planetX = 540, planetScale = 0.54, planetOpacity = 0.5,
+}
+local INK_SAGE = { R = 0.3613, G = 0.4564, B = 0.3763, A = 1 }        -- #A2B4A5 card section label (rank role)
+
+local function TH() return U.mod("theme") end              -- theme.lua (G3, lazy: v2 views only)
 
 ---------------------------------------------------------------------------------------------------- state
 -- X = per lobby page: { ctx = setup helpers, broken = {planet=why, track=why}, view = "planet"|"track"|nil,
@@ -152,12 +183,24 @@ local function fontObj(path)
 end
 
 -- Native text block. s = {font, typeface, size, colour, wrap, justify (0 left, 1 centre, 2 right), upper, shadow}.
+-- 0.12.0 v2 only: wrapAt (WrapTextAt, before the add), ls (letter spacing), lineH (LineHeightPercentage).
 local function newText(s)
     local t = ctx().newW(TEXT)
+    if s.wrapAt then pcall(function() t.WrapTextAt = s.wrapAt end) end
+    if s.lineH then
+        pcall(function() t.LineHeightPercentage = s.lineH end)
+        pcall(function() t.ApplyLineHeightToBottomLine = false end)
+    end
     local f = fontObj(s.font or FONT_DISPLAY)
     if f then
         -- FSlateFontInfo from a table: missing fields are zero-filled (no outline, no material) [ue4ss-api §8]
-        pcall(function() t:SetFont({ FontObject = f, TypefaceFontName = U.fname(s.typeface or "None"), Size = s.size or 32 }) end)
+        if s.ls then
+            pcall(function() t:SetFont({ FontObject = f, TypefaceFontName = U.fname(s.typeface or "None"),
+                                         Size = s.size or 32, LetterSpacing = s.ls }) end)
+        else
+            pcall(function() t:SetFont({ FontObject = f, TypefaceFontName = U.fname(s.typeface or "None"),
+                                         Size = s.size or 32 }) end)
+        end
     end
     pcall(function() t:SetColorAndOpacity(slate(s.colour or INK_LIGHT)) end)
     if s.wrap then pcall(function() t:SetAutoWrapText(true) end) end
@@ -411,6 +454,102 @@ local function buildPlanetView()
     layoutPlanet()
 end
 
+-- 0.12.0 v2 (§7.2): a page-sized canvas on setup's page canvas (one show / hide for the view) holding the arc's area
+-- (cmap's own anchors), the planet x class art poster and the disc pager. The info block is the classic one.
+local function buildPlanetViewV2()
+    local c, th = ctx(), TH()
+    local geo = c.geo
+    local P = { chips = {}, discs = {}, n = 0 }
+    X.P = P
+    P.root = c.newW(CANVAS)
+    pcall(function() P.root:SetVisibility(VIS.SelfHitTestInvisible) end)
+    c.place(P.root, { geo.x, geo.y, geo.w, geo.h }, 1)
+    local aw, ah = num("SetupCMapAreaW", 3500), num("SetupCMapAreaH", 1080) + V2G.areaExtra
+    P.area = c.sizeBox(aw, ah)
+    pcall(function() P.area:SetClipping(CLIP_BOUNDS) end)  -- the arc is 7200 su: cut to the area
+    place(P.root, P.area, { x = V2G.centreX - aw / 2 - geo.x, y = V2G.areaY - geo.y, size = { aw, ah }, z = 1 })
+    P.over = c.newW(OVER)
+    P.area:AddChild(P.over)
+    if opt("SetupCMapBackground", false) ~= false then    -- v2 default false: setup's page background is the map
+        local img, have = texImage(TEX.mapBg)
+        if have then overlayFill(P.over, (sizedScale(STRETCH_FILL, img))) end
+    end
+    P.canvas = c.newW(CANVAS)
+    overlayFill(P.over, P.canvas)
+    -- info block (WBP_RunMapOverview_Presentation VB_PlanetInfo), as the classic view; the Aurebesh line DEEP (§7.2)
+    P.infoBox = c.sizeBox(num("SetupCMapInfoW", 820), nil)
+    P.info = c.newW(VBOX)
+    P.infoBox:AddChild(P.info)
+    P.deco = newText({ font = FONT_DECO, typeface = "Aurebesh", size = 24, upper = true,
+                       colour = { R = 0.0052, G = 0.0232, B = 0.0307, A = 1 } })        -- DEEP #102A31
+    P.name = newText({ size = 75, colour = INK_TITLE, upper = true, wrap = true })
+    P.desc = newRich(RICH_STYLE)
+    P.count = newText({ size = 34, typeface = "Bold", colour = INK_ACCENT, upper = true, wrap = true })
+    c.vAdd(P.info, P.deco, c.pad(20, 0, 0, 0))
+    c.vAdd(P.info, P.name, c.pad(20, 0, 0, 6))
+    c.vAdd(P.info, P.desc, c.pad(20, 6, 0, 6))
+    c.vAdd(P.info, P.count, c.pad(20, 6, 0, 0))
+    -- the planet x class art (C6 look, no texts) where the video box was: right of the centre by 360 k, under the
+    -- expanded planet; display only (never the focused look), full colour
+    local k = num("SetupCMapArcScale", 0.85)
+    local top = V2G.areaY + num("SetupCMapPlanetY", 330) + 330 * k + 28
+    P.artP = th.poster(c.tctx, P.root, { V2G.centreX + 360 * k, top, V2G.art.w, V2G.art.h },
+        { geo = geo, ay = V2G.art.ay, z = 2 })
+    if not P.artP then error("planet x class art poster not built") end
+    th.set(P.artP.art, { colour = th.COL.WHITE })
+    if num("SetupCMapVideoW", 0) > 0 then                  -- the movie inside the same framed box (setup's Bink player)
+        P.vidE = th.image(c.tctx, P.artP.cv, { rect = { 2, 2, V2G.art.w - 4, V2G.art.h - 4 }, z = 2, visible = false })
+    end
+    -- disc pager: one PANEL disc per planet; the old chips are the discs' ghosts (focus = select, A = choose)
+    for i = 1, CHIP_MAX do
+        local idx = i
+        local d = {}
+        d.back = th.image(c.tctx, P.root, { tex = th.TEX.CircleFill, tint = th.COL.PANEL, z = 3, visible = false })
+        d.img = th.image(c.tctx, P.root, { z = 4, visible = false })
+        d.ring = th.image(c.tctx, P.root, { tex = th.TEX.CircleFrame, tint = th.COL.WHITE, z = 5, visible = false })
+        d.ghost = c.ghost("cmchip" .. i, function() M.onChip(idx) end, { 0, 0, V2G.disc, V2G.disc }, P.root)
+        if not U.ok(d.ghost) then error("planet disc ghost " .. i .. " not created") end
+        th.set(d.ghost, { visible = false })
+        P.discs[i], P.chips[i] = d, d.ghost
+    end
+    c.show(P.root, false)
+    makeSelector()
+    layoutPlanet()
+end
+
+-- The disc pager for planet sel (1-based) of P.n: 96-su discs, the selected one 128 su + the WHITE ring, gap 40,
+-- centred on x 1920 at y 1705; each ghost covers its disc (the row is laid out again when the selection moves).
+local function layoutDiscs(sel)
+    local P, th, geo = X.P, TH(), ctx().geo
+    local n = P.n or 0
+    local sizes, total = {}, 0
+    for i = 1, n do
+        sizes[i] = (i == sel) and V2G.discSel or V2G.disc
+        total = total + sizes[i]
+    end
+    total = total + V2G.discGap * math.max(0, n - 1)
+    local x, cy = V2G.centreX - total / 2 - geo.x, V2G.discY - geo.y
+    for i = 1, CHIP_MAX do
+        local d = P.discs[i]
+        if d and i <= n then
+            local s, e = sizes[i], P.entries and P.entries[i]
+            local y = cy - s / 2
+            th.set(d.back, { rect = { x - 2, y - 2, s + 4, s + 4 }, visible = true })
+            th.set(d.img, { tex = e and e.planet.select or nil, rect = { x + 4, y + 4, s - 8, s - 8 },
+                            visible = e ~= nil })
+            th.set(d.ring, { rect = { x - 6, y - 6, s + 12, s + 12 }, visible = i == sel })
+            th.set(d.ghost, { rect = { x, y, s, s }, visible = true })
+            x = x + s + V2G.discGap
+        elseif d then
+            th.set(d.back, { visible = false })
+            th.set(d.img, { visible = false })
+            th.set(d.ring, { visible = false })
+            th.set(d.ghost, { visible = false })
+        end
+    end
+    P.discSel = sel
+end
+
 -- entries = setup's S.planets ({planet = PLANETS entry, tracks = list|nil}); selIdx 1-based. Returns the chip to
 -- focus. Feeds the arc only when the planet list changed (a class change), else just selects.
 function M.showPlanets(entries, selIdx)
@@ -463,6 +602,11 @@ function M.showPlanets(entries, selIdx)
         end
         selectIndex(i0)
     end
+    if X.v2 then                                           -- 0.12.0: the disc pager instead of the name chips (PL4)
+        P.entries = entries
+        layoutDiscs(i0 + 1)
+        return P.chips[i0 + 1]
+    end
     for i = 1, CHIP_MAX do
         local ch = P.chips[i]
         if i <= n then
@@ -486,6 +630,15 @@ function M.previewPlanet(i, d)
     setFText(P.name, def, "PlayerFacingName", d.planet.name)
     setFText(P.desc, def, "GameDescriptionText", "")      -- <H1>...</> tags: the rich text style draws them
     setPlain(P.count, d.count)
+    if X.v2 then                                           -- 0.12.0: discs, the planet x class art, the framed movie
+        if P.discSel ~= i then layoutDiscs(i) end
+        if P.artP then P.artP.set({ art = d.art or false }) end
+        local playing = false
+        if P.vidE and U.ok(P.vidE.i) and d.url then playing = ctx().playVideoOn(P.vidE.i, d.url) == true end
+        if P.vidE then TH().set(P.vidE, { visible = playing }) end
+        if not playing then ctx().stopVideo("planet view without video") end
+        return
+    end
     if not P.vid then ctx().stopVideo("planet view without video") end
     if P.vid then
         local playing = d.url and ctx().playVideoOn(P.vid, d.url) or false
@@ -747,9 +900,353 @@ local function setNodeIcon(nd, tex)
     nd.tex = tex
 end
 
+---------------------------------------------------------------------------------------------------- track view (v2)
+-- 0.12.0 (§7.3): the run map as one framed print. A page-sized canvas on setup's page canvas holds the frame's shadow,
+-- the map box (3584 x 1316 at (128, 540), clipped: the virtual map at scale 1.0, map-local su = screen - (128, 540))
+-- and the frame's border over it.
+local function buildTrackShellV2()
+    local c, th = ctx(), TH()
+    local geo = c.geo
+    local T = { nodes = {}, rows = {}, nodeItem = {}, itemNode = {}, itemRow = {}, nodeRow = {}, used = 0,
+                ready = false }
+    X.T = T
+    local mw, mh = num("SetupCMapMapW", 3584), num("SetupCMapMapH", 1316)
+    local fx, fy = V2G.frame.x, V2G.frame.y
+    T.mw, T.mh = mw, mh
+    T.root = c.newW(CANVAS)
+    pcall(function() T.root:SetVisibility(VIS.SelfHitTestInvisible) end)
+    c.place(T.root, { geo.x, geo.y, geo.w, geo.h }, 1)
+    th.image(c.tctx, T.root, { mat = th.MAT.BlurShadow, drawAs = 1, margin = 0.5, size = 128, tint = th.COL.SHADOW,
+                               z = 0, rect = { fx - 30 - geo.x, fy - 20 - geo.y, mw + 60, mh + 60 } })
+    T.box = c.sizeBox(mw, mh)
+    pcall(function() T.box:SetClipping(CLIP_BOUNDS) end)  -- the planet rings reach 2912 su (5824 at the pulse peak)
+    place(T.root, T.box, { x = fx - geo.x, y = fy - geo.y, size = { mw, mh }, z = 1 })
+    T.over = c.newW(OVER)
+    T.box:AddChild(T.over)
+    overlayFill(T.over, solid(BACKER))
+    T.canvas = c.newW(CANVAS)
+    overlayFill(T.over, T.canvas)
+    -- T_UI_MapEvent_Bg: its top 1300 rows (of 2160) fill the frame, ScaleToFill, ax 0.6, top-aligned (T5: the swoop
+    -- line no longer runs through the rows)
+    local bg = V.texture(TEX.eventBg)
+    if bg then
+        local tw, tht = 3840, 2160
+        pcall(function()
+            local sx, sy = tonumber(bg:Blueprint_GetSizeX()), tonumber(bg:Blueprint_GetSizeY())   -- UTexture2D (texels)
+            if sx and sy and sx > 0 and sy > 0 then tw, tht = sx, sy end
+        end)
+        local k = math.max(mw / tw, mh / (tht * 1300 / 2160))
+        local img = c.newW(IMAGE)
+        pcall(function() img:SetBrushFromTexture(bg, false) end)
+        pcall(function() img:SetVisibility(VIS.HitTestInvisible) end)
+        place(T.canvas, img, { x = (mw - tw * k) * 0.6, y = 0, size = { tw * k, tht * k }, z = 0 })
+    end
+    th.image(c.tctx, T.root, { tex = th.TEX.TileStroke, drawAs = 1, margin = 0.5, size = 128, tint = th.COL.BORDER,
+                               z = 6, rect = { fx - geo.x, fy - geo.y, mw, mh } })
+    c.show(T.root, false)
+end
+
+-- A node (as the classic one) with the v2 label: Overpass Medium 27 LS 150, no shadow, one variant word per line,
+-- centred under the node (its box width follows the column pitch).
+local function newNodeV2(i, tex)
+    local T, c = X.T, ctx()
+    local cls = U.class(CLS_NODE)
+    if not U.ok(cls) then error("WBP_RunMap_Activity_Presentation_Btn_C not found") end
+    local b = U.WBL():Create(c.W.pc, cls, c.W.pc)
+    if not U.ok(b) then error("Create(activity button) failed") end
+    local t = V.texture(tex) or V.texture(TEX.race)        -- IconActivity: a resolved Texture2D, never the path
+    if not t then error("node icon texture missing: " .. tostring(tex)) end
+    b.IconActivity = t
+    b.NodeState = 1                                        -- Choosable: cream disc, accept sound on click
+    pcall(function() b.IsTooltipEnabled = false end)
+    local slot = place(T.canvas, b, { ax = 0.5, ay = 0.5, x = -500, y = -500, z = 3 })
+    local idx = i
+    U.mod("ui").registerButton(b, "setup:cmnode" .. i, function() M.onNode(idx) end)
+    c.W.focusables[#c.W.focusables + 1] = b
+    local lblBox = c.sizeBox(V2G.nodeDX - V2G.labelGap, nil)
+    local lbl = newText({ font = FONT_BODY, typeface = "Medium", size = 27, ls = 150, colour = INK_LIGHT, upper = true,
+                          wrap = true, justify = 1, lineH = 0.8 })
+    lblBox:AddChild(lbl)
+    local lblSlot = place(T.canvas, lblBox, { ax = 0.5, ay = 0, x = -500, y = -500, z = 2 })
+    hideW(b)
+    hideW(lblBox)
+    return { w = b, slot = slot, lbl = lbl, lblBox = lblBox, lblSlot = lblSlot, tex = tex }
+end
+
+-- Lazy like the classic map: the planet panel, the rows (names) and the detail card the first time TRACK shows.
+local function ensureTrackWidgetsV2(planet)
+    local T, c = X.T, ctx()
+    if T.ready then return end
+    local cls = U.class(CLS_PLANET)
+    if not U.ok(cls) then error("WBP_RunMap_Planet_C not found") end
+    local pl = U.WBL():Create(c.W.pc, cls, c.W.pc)
+    if not U.ok(pl) then error("Create(WBP_RunMap_Planet_C) failed") end
+    local def = U.obj(planet.path)
+    local hi = V.texture(planet.hires)
+    if not (U.ok(def) and hi) then error("planet " .. tostring(planet.key) .. ": PlanetDef or hi-res texture missing") end
+    pl.PlanetDef = def
+    pl.Planet = hi
+    local fx, fy = V2G.frame.x, V2G.frame.y
+    -- at the left of the frame, clipped by it, half transparent behind the names (§7.3)
+    T.plSlot = place(T.canvas, pl, { x = V2G.planetX - PANEL_W / 2, y = T.mh / 2 - PANEL_H / 2,
+                                     size = { PANEL_W, PANEL_H }, z = 0 })
+    pcall(function() pl:SetRenderTransformPivot({ X = 0.5, Y = 0.5 }) end)   -- the disc centre
+    pcall(function() pl:SetRenderScale({ X = V2G.planetScale, Y = V2G.planetScale }) end)
+    pcall(function() pl:SetRenderOpacity(V2G.planetOpacity) end)
+    pcall(function() pl:SetVisibility(VIS.HitTestInvisible) end)
+    T.pl = pl
+    T.plKey = nil
+    T.bus = strip(LINE_OLIVE, 1)
+    hideW(T.bus.w)
+    for r = 1, ROW_MAX do
+        local row = { line = strip(LINE_OLIVE, 1) }
+        hideW(row.line.w)
+        row.box = c.sizeBox(V2G.nameW, nil)
+        row.name = newText({ size = V2G.nameSize, typeface = "Bold", colour = INK_LIGHT, upper = true,
+                             wrapAt = V2G.nameW, lineH = 0.9 })
+        row.box:AddChild(row.name)
+        row.slot = place(T.canvas, row.box, { ax = 0, ay = 0.5, x = V2G.nameX - fx, y = -500, z = 2 })
+        hideW(row.box)
+        T.rows[r] = row
+    end
+    -- detail card: WBP_Tooltip_Holder (header = the track name, Moki 33 AMBER + its amber rule) at (2560, 600),
+    -- 1020 x 1196; content: the track art 956 x 420, two Moki 33 lines, CONDITIONS + the conditions, the next-step note
+    local ccls = U.class(CLS_CARD)
+    if not U.ok(ccls) then error("WBP_Tooltip_Holder_C not found") end
+    local card = U.WBL():Create(c.W.pc, ccls, c.W.pc)
+    if not U.ok(card) then error("Create(WBP_Tooltip_Holder_C) failed") end
+    pcall(function() card.ShowHeader = true end)
+    pcall(function() card.Label = U.ftext(" ") end)
+    pcall(function() card.WBP_DividerHorizontal_Panel:SetVisibility(VIS.HitTestInvisible) end)   -- the amber rule
+    local C2 = V2G.card
+    local cw = C2.w - 64                                   -- inside the holder's 32-su padding
+    local body = c.newW(VBOX)
+    T.artBox = c.sizeBox(C2.artW, C2.artH)
+    pcall(function() T.artBox:SetClipping(CLIP_BOUNDS) end)
+    T.art = c.newW(IMAGE)
+    pcall(function() T.art:SetVisibility(VIS.HitTestInvisible) end)
+    local artScale, artSlot = sizedScale(STRETCH_FILL, T.art)
+    T.artSlot = artSlot
+    pcall(function() artSlot:SetVerticalAlignment(1) end)
+    T.artBox:AddChild(artScale)
+    c.vAdd(body, T.artBox, c.pad(0, 0, 0, 26))
+    T.l1 = newText({ size = 33, typeface = "Bold", colour = INK_LIGHT, upper = true, wrapAt = cw })
+    c.vAdd(body, T.l1, c.pad(0, 0, 0, 4))
+    T.l2 = newText({ size = 33, typeface = "Bold", colour = INK_LIGHT, upper = true, wrapAt = cw })
+    c.vAdd(body, T.l2, c.pad(0, 4, 0, 0))
+    T.condHdr = newText({ font = FONT_BODY, typeface = "Medium", size = 27, ls = 300, colour = INK_SAGE, upper = true })
+    c.vAdd(body, T.condHdr, c.pad(0, 30, 0, 0))
+    T.conds = newText({ size = 33, typeface = "Bold", colour = INK_LIGHT, upper = true, wrapAt = cw })
+    c.vAdd(body, T.conds, c.pad(0, 4, 0, 0))
+    T.note = newText({ font = FONT_BODY, typeface = "Medium Italic", size = 30, colour = INK_LIGHT, wrapAt = cw })
+    c.vAdd(body, T.note, c.pad(0, 36, 0, 0))
+    local okS, errS = pcall(function() card.NS_TooltipContent:SetContent(body) end)
+    if not okS then error("card content slot: " .. tostring(errS)) end
+    local cardBox = c.sizeBox(C2.w, C2.h)
+    cardBox:AddChild(card)
+    T.card = card
+    T.cardSlot = place(T.canvas, cardBox, { x = C2.x - fx, y = C2.y - fy, z = 4 })
+    pcall(function() card:SetVisibility(VIS.HitTestInvisible) end)
+    pcall(function() cardBox:SetVisibility(VIS.HitTestInvisible) end)
+    T.ready = true
+    U.log(TAG, "run map built (UI v2): frame %dx%d at (128, 540), planet panel, %d row(s), card %dx%d (V-CMAP-08)",
+        T.mw, T.mh, ROW_MAX, C2.w, C2.h)
+end
+
+-- One variant word per line: "SCORCHING\nREVERSE"; "POINT TO POINT" wraps to two lines in the label box (§7.3).
+local function variantLines(e)
+    local t = {}
+    if isHard(e) then
+        local word = "HARD"
+        if #(e.conds or {}) == 1 then word = ctx().prettyCond(e.conds[1]) end
+        t[#t + 1] = word
+    end
+    if e.rev then t[#t + 1] = "REVERSE" end
+    if e.mines then t[#t + 1] = "MINES" end
+    if #t == 0 then t[1] = e.p2p and "POINT TO POINT" or "STANDARD" end
+    return table.concat(t, "\n")
+end
+
+-- A circuit name in at most 2 lines at 660 su (Moki 36): a third line is cut into the second with an ellipsis.
+local function fitName(s)
+    local th = TH()
+    local role = { font = th.FONT.display, face = "Bold", size = V2G.nameSize, ls = 0, upper = true }
+    local lines, cur = {}, ""
+    for w in tostring(s or ""):gmatch("%S+") do
+        local try = (cur == "") and w or (cur .. " " .. w)
+        if cur ~= "" and th.textWidth(try, role) > V2G.nameW then
+            lines[#lines + 1] = cur
+            cur = w
+        else
+            cur = try
+        end
+    end
+    if cur ~= "" then lines[#lines + 1] = cur end
+    if #lines <= V2G.nameLines then return s end
+    local second = table.concat(lines, " ", 2)
+    while second:find(" ") and th.textWidth(second .. "\u{2026}", role) > V2G.nameW do
+        second = second:gsub("%s+%S+$", "")
+    end
+    return lines[1] .. " " .. second .. "\u{2026}"
+end
+
+local function showTracksV2(d)
+    local T = X.T
+    local tracks = d.tracks or {}
+    if #tracks == 0 then error("no track for this planet") end
+    local maxNodes = math.floor(num("SetupCMapNodeMax", 40))
+    if #tracks > maxNodes then error(string.format("%d tracks > SetupCMapNodeMax %d", #tracks, maxNodes)) end
+    ensureTrackWidgetsV2(d.planet)
+    setMapPlanet(d.planet)
+    local rows = groupRows(tracks)
+    if #rows > ROW_MAX then error(string.format("%d circuits > %d rows", #rows, ROW_MAX)) end
+    local R, maxCols = #rows, 1
+    for _, r in ipairs(rows) do maxCols = math.max(maxCols, #r.items) end
+    local fx = V2G.frame.x
+    local x0, busX = V2G.nodeX0 - fx, V2G.busX - fx
+    local cardLeft = V2G.card.x - fx - 40
+    local dx = V2G.nodeDX
+    if maxCols > 1 then dx = math.min(V2G.nodeDX, (cardLeft - x0 - (V2G.nodeDX - V2G.labelGap) / 2) / (maxCols - 1)) end
+    local labelW = math.max(120, dx - V2G.labelGap)
+    local pitch = math.min(V2G.pitchMax, (T.mh - V2G.pitchPad) / R)
+    local function rowY(r) return T.mh / 2 + pitch * (r - (R + 1) / 2) - V2G.rowShift end
+    T.labelAll = pitch >= V2G.labelPitch                    -- 7+ circuits: only the focused row is labelled
+    T.nodeItem, T.itemNode, T.itemRow, T.rowLast, T.nodeRow = {}, {}, {}, {}, {}
+    local n = 0
+    for r, row in ipairs(rows) do
+        local y = rowY(r)
+        local rw = T.rows[r]
+        setPlain(rw.name, fitName(row.name))
+        pcall(function() rw.name:SetColorAndOpacity(slate(INK_LIGHT)) end)   -- a previous map's focus highlight off
+        rw.slot:SetPosition({ X = V2G.nameX - fx, Y = y })
+        showHT(rw.box)
+        -- labels: the variant words; the same label twice in a row (two layouts under one name) gets the layout hint
+        local seen = {}
+        for _, it in ipairs(row.items) do
+            it.v2label = variantLines(it.e)
+            seen[it.v2label] = (seen[it.v2label] or 0) + 1
+        end
+        local lastX = x0
+        for col, it in ipairs(row.items) do
+            n = n + 1
+            local nd = T.nodes[n]
+            if not nd then
+                nd = newNodeV2(n, TEX.race)
+                T.nodes[n] = nd
+            end
+            local x = x0 + dx * (col - 1)
+            lastX = x
+            setNodeIcon(nd, iconFor(it.e, d.isPod))
+            nd.slot:SetPosition({ X = x, Y = y })
+            pcall(function() nd.w:SetVisibility(VIS.Visible) end)   -- focusable + hit-testable
+            local label = it.v2label
+            if seen[label] > 1 and it.e.hint and it.e.hint ~= "" then label = label .. "\n" .. it.e.hint end
+            setPlain(nd.lbl, label)
+            pcall(function() nd.lbl:SetColorAndOpacity(slate(INK_LIGHT)) end)
+            if nd.lblW ~= labelW then
+                nd.lblW = labelW
+                pcall(function() nd.lblBox:SetWidthOverride(labelW) end)
+            end
+            nd.lblSlot:SetPosition({ X = x, Y = y + V2G.labelY })
+            if T.labelAll then showHT(nd.lblBox) else hideW(nd.lblBox) end
+            T.nodeItem[n], T.itemNode[it.i], T.itemRow[it.i], T.nodeRow[n] = it.i, n, r, r
+        end
+        setStrip(rw.line, busX, y, lastX, y)
+        pcall(function() rw.line.w:SetColorAndOpacity(lin(LINE_OLIVE)) end)
+        T.rowLast[r] = lastX
+    end
+    for r = R + 1, ROW_MAX do
+        hideW(T.rows[r].box)
+        hideW(T.rows[r].line.w)
+    end
+    for j = n + 1, #T.nodes do
+        hideW(T.nodes[j].w)
+        hideW(T.nodes[j].lblBox)
+    end
+    if R >= 2 then
+        setStrip(T.bus, busX, rowY(1), busX, rowY(R))
+        pcall(function()                                   -- the bus olive @0.6 (§7.3)
+            T.bus.w:SetColorAndOpacity({ R = LINE_OLIVE.R, G = LINE_OLIVE.G, B = LINE_OLIVE.B, A = 0.6 })
+        end)
+    else
+        hideW(T.bus.w)
+    end
+    T.used, T.R, T.focusRow, T.focusNode = n, R, nil, nil
+    U.log(TAG, "map %s (UI v2): %d circuit(s), %d node(s), %d column(s) max, pitch %.0f su, column step %.0f su, "
+        .. "labels %s (V-CMAP-08)", tostring(d.planet.key), R, n, maxCols, pitch, dx, T.labelAll and "on every row"
+        or "on the focused row")
+    local sel = T.itemNode[tonumber(d.sel) or 1] or 1
+    return T.nodes[sel] and T.nodes[sel].w or nil
+end
+
+-- Track item i focused: its row amber + CREAM name and node label, the card filled. d = {e, planet = "JAKKU",
+-- cls = "LANDSPEEDER", art = texture path, condNext = CONDITIONS follows}.
+local function previewTrackV2(i, d)
+    local T = X.T
+    if not T.ready then return end
+    local r, nIdx = T.itemRow[i], T.itemNode[i]
+    if T.focusRow and T.focusRow ~= r and T.rows[T.focusRow] then
+        pcall(function() T.rows[T.focusRow].line.w:SetColorAndOpacity(lin(LINE_OLIVE)) end)
+        pcall(function() T.rows[T.focusRow].name:SetColorAndOpacity(slate(INK_LIGHT)) end)
+    end
+    if r and T.rows[r] then
+        pcall(function() T.rows[r].line.w:SetColorAndOpacity(lin(LINE_AMBER)) end)
+        pcall(function() T.rows[r].name:SetColorAndOpacity(slate(INK_FOCUS)) end)
+    end
+    if T.focusNode and T.focusNode ~= nIdx and T.nodes[T.focusNode] then
+        pcall(function() T.nodes[T.focusNode].lbl:SetColorAndOpacity(slate(INK_LIGHT)) end)
+    end
+    if nIdx and T.nodes[nIdx] then pcall(function() T.nodes[nIdx].lbl:SetColorAndOpacity(slate(INK_FOCUS)) end) end
+    if not T.labelAll and T.focusRow ~= r then             -- a tight pitch: the focused row's labels only
+        for n = 1, (T.used or 0) do
+            local nd = T.nodes[n]
+            if T.nodeRow[n] == r then showHT(nd.lblBox) else hideW(nd.lblBox) end
+        end
+    end
+    T.focusRow, T.focusNode = r, nIdx
+    local e = d.e
+    pcall(function() T.card.Label = U.ftext(e.name) end)   -- PreConstruct re-applies Label after a Slate rebuild
+    local okL = pcall(function() T.card:SetTooltipLabel(U.ftext(e.name)) end)   -- BP custom event (Text)
+    if not okL then pcall(function() T.card.Txt_Label:SetText(U.ftext(e.name)) end) end
+    setPlain(T.l1, tostring(d.planet) .. " · " .. tostring(d.cls))
+    local parts = {}
+    if e.p2p then parts[#parts + 1] = "POINT TO POINT"
+    elseif (tonumber(e.laps) or 0) > 0 then
+        parts[#parts + 1] = string.format("%d LAP%s", e.laps, e.laps == 1 and "" or "S")
+    end
+    local vw = variantWords(e, true)
+    if vw ~= "STANDARD" then parts[#parts + 1] = vw end
+    if e.hint and e.hint ~= "" then parts[#parts + 1] = e.hint end
+    setPlain(T.l2, table.concat(parts, " · "))
+    local conds = {}
+    for _, t in ipairs(e.conds or {}) do conds[#conds + 1] = ctx().prettyCond(t) end
+    if #conds > 0 then
+        setPlain(T.condHdr, "CONDITIONS")
+        setPlain(T.conds, table.concat(conds, " · "))
+        showHT(T.condHdr)
+        showHT(T.conds)
+    else
+        hideW(T.condHdr)
+        hideW(T.conds)
+    end
+    if d.condNext then
+        setPlain(T.note, "You pick the condition next.")
+        showHT(T.note)
+    else
+        hideW(T.note)
+    end
+    local t = V.texture(d.art)
+    if t then
+        pcall(function() T.art:SetBrushFromTexture(t, true) end)
+        -- Arcade tiles keep their art up top; the planet x class _Bg art is centred
+        pcall(function() T.artSlot:SetVerticalAlignment(tostring(d.art):find("_Tile%.") and 1 or 2) end)
+    end
+end
+
 -- d = {planet = PLANETS entry, tracks = setup's S.tracks, sel = 1-based selected track, isPod = bool}.
 -- Returns the node to focus.
 function M.showTracks(d)
+    if X.v2 then return showTracksV2(d) end                -- 0.12.0 UI v2 page
     local T = X.T
     local tracks = d.tracks or {}
     if #tracks == 0 then error("no track for this planet") end
@@ -818,6 +1315,7 @@ end
 -- Track item i focused: highlight its row (amber line, bright labels) and fill the card.
 -- d = {e = track entry, planet = "JAKKU", cls = "LANDSPEEDER", art = texture path}
 function M.previewTrack(i, d)
+    if X.v2 then return previewTrackV2(i, d) end           -- 0.12.0 UI v2 page
     local T = X.T
     if not T.ready then return end
     local r, nIdx = T.itemRow[i], T.itemNode[i]
@@ -857,8 +1355,10 @@ end
 ---------------------------------------------------------------------------------------------------- setup API
 -- ctx = setup.lua helpers: {W, newW, sizeBox, button, show, showRow, setText, setImage, pad, vAdd, hAdd, prettyCond,
 --        playVideoOn(img, url) -> bool, onItem(i), realMs()}. Builds both views collapsed after W.body.
+-- 0.12.0: ctx.v2 (setup's UI v2 page) adds {geo, tctx, place(widget, rect, z, align), ghost(id, fn, rect, cv), back()}:
+--        both views are built on setup's page canvas (§7.2 / §7.3).
 function M.build(c)
-    X = { ctx = c, pageKey = c.W.pageKey, broken = {}, view = nil }
+    X = { ctx = c, pageKey = c.W.pageKey, broken = {}, view = nil, v2 = c.v2 == true }
     if opt("SetupCampaignMap", true) == false then
         X.broken.planet, X.broken.track = "SetupCampaignMap=false", "SetupCampaignMap=false"
         U.log(TAG, "campaign views off (SetupCampaignMap=false): PLANET / TRACK use the lists (V-CMAP-12)")
@@ -867,7 +1367,7 @@ function M.build(c)
     if opt("SetupCMapPlanetNav", "chips") == "list" then
         X.broken.planet = "SetupCMapPlanetNav=list"
     else
-        local ok, err = pcall(buildPlanetView)
+        local ok, err = pcall(X.v2 and buildPlanetViewV2 or buildPlanetView)
         if not ok then
             X.broken.planet = tostring(err)
             U.warn(TAG, "planet view unavailable (%s): the PLANET step uses the list (V-CMAP-01)", tostring(err))
@@ -876,22 +1376,27 @@ function M.build(c)
     if opt("SetupCMapTrackView", "map") == "list" then
         X.broken.track = "SetupCMapTrackView=list"
     else
-        local ok, err = pcall(buildTrackShell)
+        local ok, err = pcall(X.v2 and buildTrackShellV2 or buildTrackShell)
         if not ok then
             X.broken.track = tostring(err)
             U.warn(TAG, "track map unavailable (%s): the TRACK step uses the list (V-CMAP-01)", tostring(err))
         end
     end
-    U.log(TAG, "built: planet view %s (arc %d su x%.2f, area %dx%d, %d chips), track map %s (%dx%d) (V-CMAP-01)",
-        X.broken.planet and ("OFF: " .. X.broken.planet) or "on", ARC, num("SetupCMapArcScale", 0.85),
-        num("SetupCMapAreaW", 3500), num("SetupCMapAreaH", 1080), CHIP_MAX,
-        X.broken.track and ("OFF: " .. X.broken.track) or "on", num("SetupCMapMapW", 3500), num("SetupCMapMapH", 1200))
+    U.log(TAG, "built%s: planet view %s (arc %d su x%.2f, area %dx%d, %d %s), track map %s (%dx%d) (V-CMAP-01)",
+        X.v2 and " (UI v2)" or "", X.broken.planet and ("OFF: " .. X.broken.planet) or "on", ARC,
+        num("SetupCMapArcScale", 0.85), num("SetupCMapAreaW", 3500), num("SetupCMapAreaH", 1080), CHIP_MAX,
+        X.v2 and "discs" or "chips", X.broken.track and ("OFF: " .. X.broken.track) or "on", num("SetupCMapMapW", 3500),
+        num("SetupCMapMapH", 1200))
     return true
 end
 
 -- "planet" / "track" view usable for this page.
 function M.usable(step)
     if not X then return false end
+    if X.v2 then                                           -- 0.12.0: the list keys also apply live (spec §13 session B)
+        if step == "planet" and opt("SetupCMapPlanetNav", "chips") == "list" then return false end
+        if step == "track" and opt("SetupCMapTrackView", "map") == "list" then return false end
+    end
     if step == "planet" then return X.P ~= nil and X.broken.planet == nil and U.ok(X.P.root) end
     if step == "track" then return X.T ~= nil and X.broken.track == nil and U.ok(X.T.root) end
     return false
@@ -960,6 +1465,24 @@ function M.focusables()
     return out
 end
 
+-- 0.12.0 v2 (setup's §6.4 rule): the lowest focus targets of the shown view reach back (setup's BACK ghost) with Down:
+-- every planet disc; the nodes of the last circuit row (the other nodes' Down is geometric again: nodes are reused).
+function M.navDown(back)
+    if not (X and X.v2 and U.ok(back)) then return end
+    local th = TH()
+    if X.view == "planet" and X.P then
+        for i = 1, (X.P.n or 0) do th.nav(X.P.chips[i], "down", back) end
+    elseif X.view == "track" and X.T then
+        for n = 1, (X.T.used or 0) do
+            local nd = X.T.nodes[n]
+            if nd and U.ok(nd.w) then
+                pcall(function() nd.w:SetNavigationRuleBase(3, 0) end)   -- (EUINavigation Down, Rule Escape)
+                if X.T.nodeRow and X.T.nodeRow[n] == X.T.R then th.nav(nd.w, "down", back) end
+            end
+        end
+    end
+end
+
 -- FAST loop (setup.pollNav) while a view shows.
 function M.tick()
     if not X then return end
@@ -973,7 +1496,8 @@ end
 
 function M.status()
     if not X then return "no page" end
-    return string.format("view %s, planet %s, track %s", tostring(X.view), X.broken.planet or "on", X.broken.track or "on")
+    return string.format("%sview %s, planet %s, track %s", X.v2 and "UI v2, " or "", tostring(X.view),
+        X.broken.planet or "on", X.broken.track or "on")
 end
 
 return M

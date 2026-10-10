@@ -12,7 +12,7 @@
 -- Anchor: GetObjectExternalPackageInternal (UObjectHash.cpp), unique in the whole image:
 --   push rsi; sub rsp,20h; mov rsi,rcx; call Get; lea rcx,[rax+218h] (ObjectToPackageMap); mov rdx,rsi; call TMap::Find
 -- The CALL at +8 is decoded; Get()'s own prologue is then checked so a stale match fails safely.
--- Found/verified by ~/Games/project/galactic-racer/scripts/sig/ht_img.py + ht_xref.py.
+-- Found/verified by the project's signature scripts (ht_img.py + ht_xref.py).
 local CALL_OFFSET = 0x8
 local GET_PROLOGUE_0  = 0x28EC8348 -- 48 83 EC 28            (sub rsp, 0x28)
 local GET_PROLOGUE_10 = 0x148B4865 -- 65 48 8B 14 at Get+0x10 (mov rdx, gs:[0x58])

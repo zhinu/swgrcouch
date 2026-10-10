@@ -429,6 +429,26 @@ local function dumpMenubridge()
     b(cfg.MenuBridgeProfileOwner))
 end
 
+-- restart.lua (0.11.0): the pause menu's RESTART RACE entry: its RequestRestartEvent hook (registered / armed), the
+-- verdict of this race (and why not), rows placed so far, a pending request, restarts sent, the cleared
+-- LastPlayedArcadeEvent waiting for FRONTEND (V-RST-01..12).
+local function dumpRestart()
+  local ok, m = pcall(require, "restart")
+  if not (ok and type(m) == "table" and type(m.status) == "function") then
+    out("restart: module not loaded")
+    return
+  end
+  local okS, s = pcall(m.status)
+  if not okS or type(s) ~= "table" then
+    out("restart: status() failed: %s", b(s))
+    return
+  end
+  out("restart: hook=%s armed=%s offered=%s (%s) offers=%s placed=%s pending=%s restarts=%s arcadeSaved=%s; cfg on=%s "
+    .. "confirm=%s sequence=%s label=%s position=%s remote=%s", b(s.hook), b(s.armed), b(s.offered), b(s.whyNot),
+    b(s.offers), b(s.placed), b(s.pending), b(s.restarts), b(s.arcadeSaved), b(cfg.PauseRestart), b(s.confirm),
+    b(s.sequence), b(cfg.PauseRestartLabel), b(cfg.PauseRestartPosition), b(cfg.PauseRestartRemote))
+end
+
 -- subsplit.lua (0.8.0): subtitles per player: armed state, widget, hooks with ids, counters, cfg, layout, clones, the
 -- last line and the pending requests (V-SUB-00..08).
 local function dumpSubsplit()
@@ -512,6 +532,39 @@ local function dumpRacers()
     b(cfg.PerkPodRamjet), b(cfg.PerkHideInert), b(cfg.PerkLaunchBase))
 end
 
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §12.3, §14): the page style and its fallback selectors, theme's
+-- state (page geometry V-FIN-01, input mode V-FIN-11, pills, widgets, textures, failures), the lobby page, the photo
+-- bays' backdrop (V-FIN-05) and the model-name read (V-FIN-10). The RACERS renderer and cards2's counters are in the
+-- racers line (racers.status).
+local function dumpUiV2()
+  local function status(name, fnName)
+    local ok, m = pcall(require, name)
+    if not (ok and type(m) == "table" and type(m[fnName]) == "function") then return name .. ": module not loaded" end
+    local okS, s = pcall(m[fnName])
+    if not okS then return name .. "." .. fnName .. "() failed: " .. tostring(s) end
+    return tostring(s)
+  end
+  out("ui: UiStyle=%s pillMs=%s debounce=%s backdrop=%s pageOrigin=%s title=%s/%s heroPill=%s pillPlace=%s "
+    .. "fontMaterials=%s traitGlyph=%s condTint=%s figureTint=%s stripe=%s/%s studioGain=%s floor=%s names=%s",
+    b(cfg.UiStyle), b(cfg.StatusPillMs), b(cfg.InputModeDebounceMs), b(cfg.PreviewBackdrop),
+    type(cfg.UiPageOrigin) == "table" and "set" or "measured", b(cfg.UiTitleWidget), b(cfg.UiTitleBoxH),
+    b(cfg.UiHeroPill), b(cfg.StatusPillPlace), b(cfg.UiFontMaterials), b(cfg.UiTraitGlyph), b(cfg.UiCondTint),
+    b(cfg.CardFigureTint), b(cfg.CardStripe), b(cfg.CardStripeAngle),
+    type(cfg.PreviewStudioGain) == "table" and "rgb" or b(cfg.PreviewStudioGain), b(cfg.PreviewStudioFloor),
+    b(cfg.VehicleNameSource))
+  out("  %s", status("theme", "status"))
+  out("  %s", status("lobby", "status"))
+  out("  %s", status("vehicles", "nameStatus"))
+  local okV, vp = pcall(require, "vpreview")
+  if okV and type(vp) == "table" and type(vp.stats) == "function" then
+    local okS, s = pcall(vp.stats)
+    if okS and type(s) == "table" then
+      out("  backdrop: rung %s, %s plane(s) spawned, %s corner read(s) (V-FIN-05)", b(s.backdrop), b(s.planes),
+        b(s.calibrations))
+    end
+  end
+end
+
 -- ---------------------------------------------------------------------------------------------
 
 function M.dump()
@@ -535,9 +588,11 @@ function M.dump()
   section("uxsplit", dumpUxsplit)
   section("pause", dumpPause)
   section("menubridge", dumpMenubridge)
+  section("restart", dumpRestart)
   section("subsplit", dumpSubsplit)
   section("vpreview", dumpVpreview)
   section("racers", dumpRacers)
+  section("ui v2", dumpUiV2)
   out("===== end diag =====")
 end
 

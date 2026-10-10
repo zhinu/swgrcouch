@@ -136,6 +136,7 @@ local life = {
 -- InputDeviceLibrary poll. nil = never heard of; true/false = last report.
 local padHook = {}
 local padPoll = nil        -- last successful poll: uid -> deviceId (nil until a poll succeeded)
+local devUser = {}         -- 0.12.0: device InternalId -> the platform user it last connected for (onDeviceState)
 
 local function uidFor(id)
     return id - ((settings.get("KeyboardIsP1") == true) and 1 or 0)
@@ -609,6 +610,70 @@ function M.slotViews()
     return views
 end
 
+-- UI v2 players strip (notes/design/ui-v2/ui-redesign-final.md §4.3, §12.2, WI-14): the four cells as data, in
+-- slotViews' order and with its rules (P1, the joined guests by pnum, then the open guest ids ascending):
+--   {kind, pnum, ctrlId, pad, leaveKey, joinKey, leaveHold}
+--   kind: "host" (P1, pad or keyboard) | "ready" | "disconnected" | "leaving" (joined guests) | "join" (a dormant
+--     guest: its pad can join) | "connect" (no pad plugged in for that id, or the dormant guest's pad is gone) |
+--     "padsoff" (ADD PLAYERS not given yet) | "later" (removed in this world: available after the next race) |
+--     "frozen" (a connected client) | "empty";
+--   pnum = the cell's player number (P1..P4; a joined guest's own pnum); ctrlId = the ControllerId (P1 0; nil for a
+--   cell past cfg.MaxLocalPlayers); pad = "PAD 2" | "KEYBOARD" (P1 with KeyboardIsP1); leaveKey = "B" | "START" for a
+--   joined guest; leaveHold = true when leaving needs the key held (Start always; B only on the RACERS step: in the
+--   lobby a B press leaves at once); joinKey = "A" | "START" for an open cell (START: KeyboardIsP1's pad-1 guest, or
+--   cfg.JoinButtons = "start"). New tables per call. slotViews stays for the classic lobby.
+function M.slotStates()
+    local out = {}
+    local function pad(id) return string.upper(padLabel(id)) end
+    local function joinKey(id) return (startOnlyFor(id) or cfg.JoinButtons == "start") and "START" or "A" end
+    local holdB = false
+    pcall(function() holdB = U.mod("setup").guestBHoldsToLeave() == true end)
+    out[1] = { kind = "host", pnum = 1, ctrlId = 0,
+               pad = (settings.get("KeyboardIsP1") == true) and "KEYBOARD" or "PAD 1" }
+    local i = 2
+    local joined = M.joinedList()
+    for k = 1, #joined do
+        if i > 4 then break end
+        local e = joined[k]
+        local s = St.join.slots[e.ctrlId] or {}
+        local startLeave = startOnlyFor(e.ctrlId)
+        local kind = "ready"
+        if s.disconnected then kind = "disconnected" elseif s.leaving then kind = "leaving" end
+        out[i] = { kind = kind, pnum = e.pnum, ctrlId = e.ctrlId, pad = pad(e.ctrlId),
+                   leaveKey = startLeave and "START" or "B", leaveHold = startLeave or holdB }
+        i = i + 1
+    end
+    local world = U.world()
+    for id = 1, maxGuestId() do
+        if i > 4 then break end
+        local s = St.join.slots[id]
+        local pc = pcFor(id, world)
+        if not (s and s.joined and pc) then
+            local kind
+            if St.join.frozen then
+                kind = "frozen"
+            elseif St.join.active and s and pc then
+                kind = s.disconnected and "connect" or "join"
+            elseif St.join.active and not M.padsEnabled() then
+                kind = "padsoff"
+            elseif St.join.active and life.removedIn[id] == St.worldGen and not pc then
+                kind = "later"
+            elseif St.join.active and cfg.GuestCreate ~= "all" and padConnected(id) == false then
+                kind = "connect"
+            else
+                kind = "empty"
+            end
+            out[i] = { kind = kind, pnum = i, ctrlId = id, pad = pad(id), joinKey = joinKey(id) }
+            i = i + 1
+        end
+    end
+    while i <= 4 do
+        out[i] = { kind = "empty", pnum = i, ctrlId = nil, pad = pad(i - 1), joinKey = joinKey(i - 1) }
+        i = i + 1
+    end
+    return out
+end
+
 ---------------------------------------------------------------------------------------------------
 -- Lifecycle: open / close / commit / rebuild / resync
 ---------------------------------------------------------------------------------------------------
@@ -883,6 +948,7 @@ end
 
 function M.poll()
     if not St.join.active then return end
+    if St.launchHold() then return end              -- 0.12.0: the front end is being torn down (state.lua)
     if not phaseMod().isFrontEnd() then return end
     local world = U.world()
     if not U.ok(world) then return end
@@ -912,6 +978,7 @@ function M.poll()
                 local pc = U.GS():GetPlayerControllerFromID(world, id)
                 if not U.ok(pc) then
                     s.prevA, s.prevB, s.prevStart = false, false, false
+                    s.aWas = false                                      -- no stale "A down" for guestPressWithin
                     return
                 end
                 -- VERIFY(V-JOIN-03): guest pad input reaches PlayerInput in the UI-only front end (fallbacks:
@@ -919,6 +986,12 @@ function M.poll()
                 -- VERIFY(V-JOIN-06): P1's pad never shows up on a guest PC.
                 local slotStartOnly = startOnly or startOnlyFor(id)       -- VERIFY(V-JOIN-09)
                 local a = pc:IsInputKeyDown(k.A) == true
+                -- 0.12.0 (review fix, task #14): the raw A edges of every guest pad, for M.guestPressWithin (the v2
+                -- lobby's START tile drops a click that is a guest's A reaching P1's CommonUI focus)
+                if a ~= (s.aWas == true) then
+                    if a then s.aDownMs = now else s.aUpMs = now end
+                    s.aWas = a
+                end
                 local st = false
                 if cfg.JoinWithStart or slotStartOnly then st = pc:IsInputKeyDown(k.Start) == true end
                 -- VERIFY(V-JOIN-06): fallback cfg.JoinButtons = "start" when P1's A also reaches a guest PC.
@@ -967,6 +1040,25 @@ function M.poll()
         end
     end
     if changed then St.emit("players") end
+end
+
+-- 0.12.0 (review fix, task #14: a guest's A also clicks P1's focused menu widget): a guest pad's A is down, or went down
+-- or up within ms, as join.poll last read it (main's FAST loop runs join.poll before ui.pollClicks). -> ctrlId, age in
+-- ms | nil. The v2 lobby focuses START by default (spec §4.6), so its START tile drops such a click (racers.lua has the
+-- same guard on P1's sink, V-RC-07).
+function M.guestPressWithin(ms)
+    if not St.join.active then return nil end
+    ms = tonumber(ms) or 150
+    local now = St.nowMs()
+    for id = 1, maxGuestId() do
+        local s = St.join.slots[id]
+        if s then
+            if s.aWas then return id, 0 end
+            if s.aDownMs and now - s.aDownMs <= ms then return id, now - s.aDownMs end
+            if s.aUpMs and now - s.aUpMs <= ms then return id, now - s.aUpMs end
+        end
+    end
+    return nil
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1146,9 +1238,16 @@ end
 -- often behind other pads). cfg.HotplugPadToP1: "front" (default: in the front end; during a race it is applied at
 -- the next front end) | "always" | "off". Never with couch pads enabled (ADD PLAYERS: the pad joins as a guest), never
 -- for a pad a local player already uses, never during the boot enumeration.
+-- 0.12.0 (review hyg-3; a couch-over-Moonlight test setup of 2026-10-08 had to turn the rule off: "the second
+-- Moonlight pad must join as P2, never take P1"): only while P1's own pad is gone (its disconnect was seen: the Moonlight / Sunshine reconnect case), never with
+-- KeyboardIsP1 (the keyboard is P1). A second pad switched on at the menu next to a working P1 pad stays free for
+-- ADD PLAYERS.
 -- VERIFY(V-JOIN-20): connect a pad mid-session -> "[join] hot-plugged pad ctrlId N takes P1 (was ctrlId M): ok".
 local pendingP1 = nil
 local frontSinceMs = nil
+
+-- diag / tests: true / false / nil (nothing known) for a ControllerId's pad
+function M.padPresent(ctrlId) return padConnected(ctrlId) end
 function M.hotplugToP1(ctrlId, why)
     local mode = cfg.HotplugPadToP1
     if mode == nil then mode = "front" end
@@ -1159,6 +1258,7 @@ function M.hotplugToP1(ctrlId, why)
         U.log(TAG, "hot-plugged pad ctrlId %d: takes P1 at the next front end (%s)", ctrlId, tostring(why))
         return false, "deferred"
     end
+    if settings.get("KeyboardIsP1") == true then return false, "KeyboardIsP1" end
     local gs, p1 = U.GS(), U.p1()
     if not (U.ok(gs) and U.ok(p1)) then return false, "no P1" end
     for _, e in ipairs(U.localPlayers()) do
@@ -1167,6 +1267,11 @@ function M.hotplugToP1(ctrlId, why)
     end
     local was = -1
     pcall(function() was = gs:GetPlayerControllerID(p1) end)
+    if padConnected(was) ~= false then
+        U.log(TAG, "hot-plugged pad ctrlId %d: P1 keeps ctrlId %s, whose pad is still connected (ADD PLAYERS makes the "
+            .. "new pad a guest) (V-JOIN-20)", ctrlId, tostring(was))
+        return false, "P1's pad still connected"
+    end
     local ok, err = pcall(function() gs:SetPlayerControllerID(p1, ctrlId) end)
     U.log(TAG, "hot-plugged pad ctrlId %d takes P1 (was ctrlId %s; %s): %s (V-JOIN-20)", ctrlId, tostring(was),
         tostring(why), ok and "ok" or tostring(err))
@@ -1188,9 +1293,21 @@ end
 -- has is ignored (cfg.DeviceDetectMode "both" reports every change twice).
 function M.onDeviceState(st, uid, dev, source)
     -- VERIFY(V-JOIN-05): PlatformUserId.InternalId equals the pad's ControllerId (minus 1 with KeyboardIsP1).
-    local ctrlId = (tonumber(uid) or -1) + ((settings.get("KeyboardIsP1") == true) and 1 or 0)
-    U.log(TAG, "device %s: state=%s user=%s device=%s -> ctrlId %d", tostring(source or "event"),
-        tostring(st), tostring(uid), tostring(dev), ctrlId)
+    local kb = (settings.get("KeyboardIsP1") == true) and 1 or 0
+    local ctrlId = (tonumber(uid) or -1) + kb
+    -- 0.12.0: the hook reports a disconnect with user -1 (UE unmaps the device before the broadcast; live 2026-10-10
+    -- "state=2 user=-1 device=4"). Pad presence (padHook: the hot-plug rule, GuestCreate "connected") and P1's status
+    -- then go to the user this device last connected for; the guest slots below keep the reported user (their hook
+    -- disconnect handling stays as it was in 0.11).
+    local u, d = tonumber(uid), tonumber(dev)
+    local presence = u
+    if d and d >= 0 then
+        if st == C.E.DeviceConn.Connected and u and u >= 0 then devUser[d] = u
+        elseif st == C.E.DeviceConn.Disconnected and (u == nil or u < 0) and devUser[d] ~= nil then presence = devUser[d] end
+    end
+    U.log(TAG, "device %s: state=%s user=%s device=%s -> ctrlId %d%s", tostring(source or "event"),
+        tostring(st), tostring(uid), tostring(dev), ctrlId,
+        presence ~= u and string.format(" (the pad of user %d)", presence) or "")
     if st ~= C.E.DeviceConn.Disconnected and st ~= C.E.DeviceConn.Connected then return end
     local connected = (st == C.E.DeviceConn.Connected)
     -- 0.8.1: hot-plug -> P1 (not during the boot enumeration: the front end must have been up for 5 s)
@@ -1198,9 +1315,9 @@ function M.onDeviceState(st, uid, dev, source)
         U.try(TAG, M.hotplugToP1, ctrlId, tostring(source or "event"))
     end
     -- pad presence for cfg.GuestCreate "connected" (join.poll creates the guest; never from this callback)
-    if type(tonumber(uid)) == "number" then padHook[tonumber(uid)] = connected end
+    if type(presence) == "number" then padHook[presence] = connected end
     if ctrlId < 1 or ctrlId > maxGuestId() then
-        if ctrlId == 0 and not connected then status("P1 CONTROLLER DISCONNECTED") end
+        if not connected and presence ~= nil and presence + kb == 0 then status("P1 CONTROLLER DISCONNECTED") end
         return
     end
     local s = St.join.slots[ctrlId]

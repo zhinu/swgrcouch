@@ -1,10 +1,11 @@
 #!/bin/bash
 # Install UE4SS + SWGRCouch into a STAR WARS: Galactic Racer install, and/or the user-ini overrides (network
-# Engine.ini, NO-INTRO GameUserSettings.ini key) into a Wine prefix. Never deletes a file: existing UE4SS files are kept
-# (cp -n), edited files get a dated copy first.
+# Engine.ini, NO-INTRO GameUserSettings.ini key) into a Wine prefix. Never deletes a file: the UE4SS core files
+# (dwmapi.dll, UE4SS.dll, MemberVariableLayout.ini, UE4SS.json) are replaced, a different old one first saved as a dated
+# copy; every other existing UE4SS file is kept (cp -n); edited files get a dated copy first.
 # User config dir in the prefix (first live run 2026-10-06; NOT .../AppData/Local/Griffin/...):
 #   <prefix>/drive_c/users/steamuser/AppData/Local/StarWarsGalacticRacer/Saved/Config/Windows/
-# See SWGRCouch/README.md section 2.
+# See docs/REFERENCE.md section 2 (the release zip also ships it as SWGRCouch/README.md).
 set -euo pipefail
 
 usage() {
@@ -14,25 +15,27 @@ Usage: install.sh [<game root containing Griffin/>] [options]
   <game root>          install UE4SS (if missing) and SWGRCouch into <root>/Griffin/Binaries/Win64
 Options:
   --prefix <dir>       Wine prefix (Steam: ~/.local/share/Steam/steamapps/compatdata/4078430/pfx). Alone: append
-                       mod/config/Engine.ini (network override) to the user Engine.ini once
+                       config/Engine.ini (network override) to the user Engine.ini once
   --net-off            with --prefix: comment the override block out (official online play works again)
   --net-on             with --prefix: re-enable a block commented out by --net-off
   --fastboot-ini       with --prefix: GameUserSettings.ini [/Script/Griffin.GfnUserSettingsPC]
-                       bEnableEOSAccountLinking=False, changed in place (README "No-intro mode"; optional: fastboot.lua
-                       already turns the profile flag off at runtime). Does not touch Engine.ini unless --net is given
+                       bEnableEOSAccountLinking=False, changed in place (docs/REFERENCE.md 2.6 "No-intro mode";
+                       optional: fastboot.lua already turns the profile flag off at runtime). Does not touch
+                       Engine.ini unless --net is given
   --fastboot-ini-undo  with --prefix: the same key back to True (Epic account linking wanted again)
   --net                with --fastboot-ini(-undo): also append the network override (the --prefix default)
   --ue57               UE4SS-settings.ini: [EngineVersionOverride] MajorVersion=5 MinorVersion=7 (only if the
                        log shows a wrong engine version / failed scans)
   --gt-processevent    UE4SS-settings.ini: DefaultExecuteInGameThreadMethod = ProcessEvent (only if the boot
                        banner shows EngineTickAvailable=false; V-CORE-01)
-  --quiet-console      UE4SS-settings.ini: GUI console off again (after the first sessions)
+  --console            UE4SS-settings.ini: the log console and the GUI console on (testers, bug reports)
+  --quiet-console      UE4SS-settings.ini: both consoles off again
   -h, --help           this text
 Lutris: environment WINEDLLOVERRIDES="dwmapi=n,b" on the entry that starts Steam.
 EOF
 }
 
-GAME=""; PREFIX=""; NET_ACTION="add"; NET_EXPLICIT=0; FB_INI=""; UE57=0; GTPE=0; QUIET=0
+GAME=""; PREFIX=""; NET_ACTION="add"; NET_EXPLICIT=0; FB_INI=""; UE57=0; GTPE=0; QUIET=0; CONSOLE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
@@ -44,6 +47,7 @@ while [ $# -gt 0 ]; do
     --ue57) UE57=1; shift ;;
     --gt-processevent) GTPE=1; shift ;;
     --quiet-console) QUIET=1; shift ;;
+    --console) CONSOLE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *) [ -z "$GAME" ] || { echo "only one game root" >&2; exit 2; }; GAME="$1"; shift ;;
@@ -88,7 +92,7 @@ install_mod() {
   local BIN="$GAME/Griffin/Binaries/Win64"
   [ -f "$BIN/SWGR-Win64-Shipping.exe" ] || { echo "no SWGR-Win64-Shipping.exe in $BIN" >&2; exit 1; }
   # a re-install keeps the console choice of an existing UE4SS-settings.ini (2026-10-10: every re-install switched the
-  # windows back on); only a first install turns them on for the first boots
+  # windows back on); a first install keeps UE4SS's bundled values (both off) unless --console is given
   local HAD_SETTINGS=0
   [ -f "$BIN/ue4ss/UE4SS-settings.ini" ] && HAD_SETTINGS=1
   if [ -f "$UE4SS_SRC/dwmapi.dll" ]; then
@@ -104,8 +108,15 @@ install_mod() {
     cp -rn "$UE4SS_SRC/ue4ss/." "$BIN/ue4ss/"
   elif [ -f "$BIN/dwmapi.dll" ] && [ -d "$BIN/ue4ss" ]; then
     echo "UE4SS: already installed in $BIN (kept as it is)"
+    # UE4SS 3.0.1-1160 (the 0.9.0 / 0.9.1 zips) does not boot on the hotfixed game (CL382493)
+    if [ -f "$BIN/ue4ss/UE4SS.dll" ] && command -v md5sum > /dev/null \
+       && [ "$(md5sum < "$BIN/ue4ss/UE4SS.dll" | cut -c1-32)" = "a7e144e53056aebdee36df778def2473" ]; then
+      echo "WARNING: the installed UE4SS is 3.0.1-1160, which does not boot on the current game. Install from the" >&2
+      echo "         release zip 'with-UE4SS' (it ships the UE4SS Galactic Racer Edition) or set UE4SS_DIR to it." >&2
+    fi
   else
-    echo "UE4SS not found: use the release zip 'with-UE4SS', or set UE4SS_DIR to an unpacked UE4SS 3.0.1-1160 build" >&2
+    echo "UE4SS not found: use the release zip 'with-UE4SS' (it ships the UE4SS Galactic Racer Edition), or set" >&2
+    echo "UE4SS_DIR to an unpacked UE4SS Galactic Racer Edition (dwmapi.dll + ue4ss/)" >&2
     exit 1
   fi
 
@@ -185,17 +196,18 @@ PYEOF
     sed -i '1a ConsoleEnablerMod : 1\r' "$MT"
   fi
 
-  # 4. UE4SS-settings.ini: log window for the first boots; optional engine-version and game-thread fallbacks.
+  # 4. UE4SS-settings.ini: consoles only on request; optional engine-version and game-thread fallbacks.
   local SI="$BIN/ue4ss/UE4SS-settings.ini"
   backup "$SI"
   if [ "$QUIET" = 1 ]; then
     # run I (2026-10-07): both windows off (the text console and the OpenGL debug GUI sat behind the fullscreen game;
     # the GUI's toggle key O is also the game's keyboard player-menu key); UE4SS.log keeps everything
     set_ini "$SI" ConsoleEnabled 0; set_ini "$SI" GuiConsoleEnabled 0; set_ini "$SI" GuiConsoleVisible 0
-  elif [ "$HAD_SETTINGS" = 0 ]; then
+  elif [ "$CONSOLE" = 1 ]; then
     set_ini "$SI" ConsoleEnabled 1; set_ini "$SI" GuiConsoleEnabled 1; set_ini "$SI" GuiConsoleVisible 1
   else
-    echo "UE4SS: console windows left as they are (--quiet-console turns them off)"
+    # 0.12.0 (review hyg-7): a first install keeps the bundled values (both off); UE4SS.log has everything
+    [ "$HAD_SETTINGS" = 1 ] && echo "UE4SS: console windows left as they are (--console / --quiet-console change them)"
   fi
   # the Galactic Racer Edition needs these two on the hotfixed game (an older settings file is kept, so set them here)
   set_ini "$SI" bForceGUObjectArrayForIteration true; set_ini "$SI" UseCache 0
@@ -284,5 +296,7 @@ if [ -n "$PREFIX" ]; then
   [ -n "$FB_INI" ] && fastboot_ini
 fi
 echo "Lutris: WINEDLLOVERRIDES=\"dwmapi=n,b\" on the entry that starts Steam. Log: Griffin/Binaries/Win64/ue4ss/UE4SS.log"
-[ -n "$PREFIX" ] || echo "Network races: re-run with --prefix <wine prefix> on every machine (README section 2.4)."
+[ -n "$PREFIX" ] || echo "Network races: re-run with --prefix <wine prefix> on every machine (docs/REFERENCE.md 2.4)."
+echo "OFFLINE PLAY ONLY: with the mod, the game's online mode may stop working (the mod turns the game's Epic account"
+echo "link off in your profile). Start Steam in Offline Mode to play; see the warning at the top of README.md."
 exit 0

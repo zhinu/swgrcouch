@@ -183,12 +183,18 @@ end
 -- Instant Action build of P1's pilot's style (VBD_PvP_IA_*: no abilities, no parts, 4 / 10 slots, PL 26-31; the
 -- humans' levels are rewritten anyway). pilotId = P1's pick (nil = the zero base); pods always take the zero base
 -- (the VBD_MP_* pod builds bring pod traits and a pawn override). nil when unresolvable.
-function M.launchBase(arch, pilotId)
+-- 0.12.0: tierPath = RACE SETUP > MODE "Opponents" (a speeder tier build of the game's preset list, VBD_011_2Dal ..
+-- VBD_058_6Whippet): the race launches on it, so the AI race at that strength as in the 0.9 classic flow (task #31,
+-- RC-14 / V-RC-27); every human's loadout still replaces its build entry (writeEntry clears the slots the loadout
+-- leaves empty when the base is not the zero base). Pods: always the zero base.
+function M.launchBase(arch, pilotId, tierPath)
     arch = tonumber(arch)
     if arch == nil then return nil end
     local zero = M.basePath(arch)
     local path = zero
-    if arch ~= 1 and type(pilotId) == "string" and opt("PerkLaunchBase", "zero") == "pilot" then
+    if arch ~= 1 and type(tierPath) == "string" and tierPath ~= "" then
+        path = tierPath
+    elseif arch ~= 1 and type(pilotId) == "string" and opt("PerkLaunchBase", "zero") == "pilot" then
         local key = nil
         pcall(function() key = P().styleKey(pilotId, arch) end)
         local st = key and D.STYLES[key] or nil
@@ -230,8 +236,14 @@ function M.prepareLaunch(plan)
     ensureListener()
     M.restoreLaunch("new launch")                      -- never stack two patches on one asset
     local p1 = p1Pick(plan)
-    local base = M.launchBase(arch, p1 and p1.pilotId or nil)
+    local base = M.launchBase(arch, p1 and p1.pilotId or nil, plan.aiTierPath)
     if not U.ok(base) then return nil, "launch base not found" end
+    S().baseZero = U.pathOf(base) == M.basePath(arch)  -- writeEntry clears empty ability slots on any other base
+    S().baseName = shortName(U.pathOf(base))            -- the AI-builds log (the slot patch record is gone by then)
+    if not S().baseZero then
+        U.log(TAG, "launch base %s (opponents' tier; humans' empty ability slots are cleared) (V-RC-27)",
+            shortName(U.pathOf(base)))
+    end
     if mode ~= "full" then
         U.log(TAG, "launch base %s (PerkApply %s: affix slots not raised)", U.pathOf(base), tostring(mode))
         return base
@@ -501,7 +513,7 @@ end
 
 -- One build entry from a loadout (§6 step 6.4), each field group in its own pcall. mode "full" also writes the parts.
 -- -> errors (list), part slots of the entry, planned parts beyond them.
-local function writeEntry(e, lo, arch, mode)
+local function writeEntry(e, lo, arch, mode, clearEmpty)
     local errs = {}
     local function step(what, fn)
         local ok, err = pcall(fn)
@@ -540,7 +552,9 @@ local function writeEntry(e, lo, arch, mode)
         e.OverridenPowerLevel = 0
         e.PowerLevel = math.min(pl, D.POWER_MAX)
     end)
-    -- abilities: picked slots only (an empty slot stays empty from the zero base: a nil class write is a no-op)
+    -- abilities: picked slots only (an empty slot stays empty from the zero base: a nil class write is a no-op).
+    -- 0.12.0: on an opponents' tier base the entry starts with that tier's abilities: an empty slot gets an invalid
+    -- (null) class written (CreateInvalidObject); compare() reads every slot back and reports what stayed.
     for i = 1, 4 do
         local id = lo.ab[i]
         if id then
@@ -550,6 +564,8 @@ local function writeEntry(e, lo, arch, mode)
                 if not U.ok(cls) then error(a.cls .. " not loadable") end
                 e.AbilitySlots[i] = cls
             end)
+        elseif clearEmpty then
+            step("clear ability " .. i, function() e.AbilitySlots[i] = CreateInvalidObject() end)
         end
     end
     if lo.crash then
@@ -559,6 +575,8 @@ local function writeEntry(e, lo, arch, mode)
             if not U.ok(cls) then error(a.cls .. " not loadable") end
             e.CrashAbility = cls
         end)
+    elseif clearEmpty then
+        step("clear crash", function() e.CrashAbility = CreateInvalidObject() end)
     end
     -- parts: the fields of the slots the launch build gave (pod traits too: they work in normal slots on pods)
     local nSlots, dropped = 0, 0
@@ -728,7 +746,7 @@ local function applyOne(h, arch, plan, mode, race)
     local res = { ok = true, partial = false, text = "" }
     for k, idx in ipairs(idxs) do
         local e = vbs[idx + 1]
-        local errs, nSlots, dropped = writeEntry(e, lo, arch, mode)
+        local errs, nSlots, dropped = writeEntry(e, lo, arch, mode, S().baseZero == false)
         local rb = readEntry(e)
         local diffs = compare(rb, lo, mode, arch)
         local line = rbText(rb, arch, idx)
@@ -1032,6 +1050,58 @@ local function fixAiPilots(race, wk)
     end
 end
 
+-- 0.12.0 V-RC-27: once per race world, the AI racers' build entries for the race's class: PowerLevel min / avg / max,
+-- abilities and valid parts on average, next to the launch base (an opponents' tier must raise them). Read-only; waits
+-- for the recipe's bots (40 tries, as fixAiPilots).
+local function logAiPower(race, wk, arch)
+    if race.aiPowerLogged == wk then return end
+    if race.aiPwWk ~= wk then race.aiPwWk, race.aiPwTries = wk, 0 end
+    race.aiPwTries = race.aiPwTries + 1
+    local gs = nil
+    pcall(function() gs = U.world().GameState end)
+    if not U.ok(gs) then return end
+    local rs = nil
+    pcall(function() rs = gs.EventRecipeState_Replication.Racers end)
+    local n = rs and U.arrayCount(rs) or 0
+    if n == 0 then
+        if race.aiPwTries >= 40 then race.aiPowerLogged = wk end
+        return
+    end
+    local pls, abs, parts, bots = {}, 0, 0, 0
+    for i = 1, n do
+        pcall(function()
+            local ps = rs[i].Player
+            if not U.ok(ps) or ps.bIsABot ~= true then return end
+            local rbs = ps.RacerBuildState
+            local vbs = rbs.VehicleBuilds
+            local e = vbs[entryIndexes(rbs, arch, vbs:GetArrayNum())[1] + 1]
+            local pl = tonumber(e.PowerLevel)
+            if pl then pls[#pls + 1] = pl end
+            for k = 1, U.arrayCount(e.AbilitySlots) do
+                local c = nil
+                pcall(function() c = e.AbilitySlots[k] end)
+                if U.ok(c) then abs = abs + 1 end
+            end
+            for k = 1, U.arrayCount(e.AffixSlots) do
+                local a = nil
+                pcall(function() a = e.AffixSlots[k].PrimaryAffix end)
+                if U.ok(a) then parts = parts + 1 end
+            end
+            bots = bots + 1
+        end)
+    end
+    if bots == 0 and race.aiPwTries < 40 then return end
+    race.aiPowerLogged = wk
+    if bots == 0 then U.log(TAG, "AI builds: no AI racer in the recipe (V-RC-27)"); return end
+    table.sort(pls)
+    local sum = 0
+    for _, v in ipairs(pls) do sum = sum + v end
+    local base = S().baseName or "?"
+    U.log(TAG, "AI builds (%d AI, launch base %s): PowerLevel min %s / avg %.1f / max %s, abilities %.1f, parts %.1f "
+        .. "per AI (V-RC-27)", bots, tostring(base), tostring(pls[1] or "?"), #pls > 0 and sum / #pls or 0,
+        tostring(pls[#pls] or "?"), abs / bots, parts / bots)
+end
+
 -- launch.raceTick (MAIN, every race phase): in PRERACE / RACING of a cards race we launched, once per world and local
 -- human (ControllerId from the LocalPlayer) as soon as his PlayerState and car exist: verify, traits, parts as passives
 -- when needed, pilot check. An error marks that player done (no traceback every 250 ms).
@@ -1045,6 +1115,7 @@ function M.raceTick()
     if type(vp) == "table" and vp.flow ~= nil and vp.flow ~= "cards" then return end
     local wk = St.worldGen
     U.try(TAG, fixAiPilots, race, wk)
+    U.try(TAG, logAiPower, race, wk, tonumber(vp and vp.arch))
     if race.allDone == wk then return end
     local waiting = 0
     for _, lp in ipairs(U.localPlayers()) do

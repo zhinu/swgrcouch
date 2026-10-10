@@ -224,6 +224,7 @@ end
 
 -- c1: PickPrimaryMode is about to ChangeToState(Menu | Scenarios). No parameter is read.
 local function onPickPre()
+    if St.launchHold() then return end      -- 0.12.0: the front end is being torn down (state.lua St.launchHold)
     if not armed() or opt("FrontEndMenuPrecreate", true) == false or S.pre then return end
     tryPrecreate(C.BP.MainMenu, "PickPrimaryMode", "V-FEO-01")
 end
@@ -231,7 +232,7 @@ end
 -- c3: a ChangeStateTo into a main-menu leaf (the return from Settings) or into a front-end sub-screen (Settings,
 -- Credits, Stickerbook, inspect screens, Settings pages).
 local function onChangeStatePre(ctx, newState)
-    if St.phase ~= "FRONTEND" or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
+    if St.phase ~= "FRONTEND" or St.launchHold() or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
     local st
     pcall(function() st = newState:get() end)
     if not U.ok(st) then return end
@@ -249,7 +250,7 @@ end
 
 -- c3: a sub-screen's Back (FuseScreenWidget version: the screen is the context).
 local function onScreenBackPre(ctx)
-    if St.phase ~= "FRONTEND" or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
+    if St.phase ~= "FRONTEND" or St.launchHold() or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
     local w
     pcall(function() w = ctx:get() end)
     local cn = U.ok(w) and className(w) or ""
@@ -260,7 +261,7 @@ end
 -- c3: CosmeticStateMachine:BackToPreviousState (the context is the state machine): the known sub-screen on screen
 -- tells where Back goes.
 local function onStateMachineBackPre()
-    if St.phase ~= "FRONTEND" or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
+    if St.phase ~= "FRONTEND" or St.launchHold() or S.pre or not armed() or opt("FrontEndSubScreens", true) == false then return end
     for cn in pairs(BACK_TARGET) do
         local ok, w = pcall(FindFirstOf, cn)
         if ok and U.ok(w) then

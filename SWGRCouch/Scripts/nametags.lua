@@ -278,7 +278,7 @@ end
 
 ---------------------------------------------------------------------------------------------------- guest names
 -- Feedback 5 ("Name of the racer the same"): a guest LocalPlayer shares P1's online identity, so its PlayerState gets
--- P1's persona name ("Yuval" twice in session B). Name sources read by the game (2026-10-07, static):
+-- P1's persona name (the same name twice in session B). Name sources read by the game (2026-10-07, static):
 --   * WBP_Hud_PlayerTag: Conv_StringToText(PlayerState:GetPlayerName())  (APlayerState.PlayerNamePrivate)
 --   * results rows: native EventResultsTableEntry.PlayerName (Str), filled natively from the PlayerState; whether
 --     from GetPlayerName() or AGfnPlayerState:GetFilteredName() (profanity-filtered copy, refreshed when the name

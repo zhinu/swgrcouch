@@ -43,7 +43,20 @@ St.join = { active = false, frozen = false, keep = false,   -- keep: commit() ->
 St.race = newRace(nil)
 St.launch = { pending = false, atMs = 0, accepted = false }
            -- accepted: the game took the launch (PrimaryFlow == QuickRace; phase's long LAUNCHING timeout);
-           -- launch.lua may add gridPatch = {entry, old, ...}
+           -- launch.lua may add gridPatch = {entry, old, ...}; acceptCb = St.cb of the callback that made the accepted
+           -- LaunchCustomRace call (St.launchHold)
+St.cb = 0  -- callback serial: +1 at the start of every sched callback and native hook dispatch (U.anchorThread)
+
+-- 0.12.0 launch hold (crashes 2026-10-10 13:10, 13:21, 13:30, 13:33, 4 of 5 launches from RACE SETUP): an accepted
+-- LaunchCustomRace tears the front end down, and the garbage collector frees its widgets before the mod's next
+-- callback, while St.phase still says FRONTEND / LAUNCHING and every page still holds its widgets (theme forgets them
+-- only on a race phase). A call on a freed widget is an access violation inside UE4SS (UE4SS.dll+0x3e7ee5). True
+-- from the first callback after the one that made the accepted call until the launch is over (St.launch.pending is
+-- cleared on a race phase, a launch timeout or a refusal): no front-end page, theme widget or menu object is touched.
+function St.launchHold()
+    local l = St.launch
+    return l.pending == true and l.accepted == true and l.acceptCb ~= St.cb
+end
 St.hud = { p1hud = nil, p1Placed = false, guests = {}, lapCounters = {} }
            -- guests[pcKey] = {pc, widget, pnum, lapCounter, lastLapText}; lapCounters[addr] = pcKey
 St.tags = { seen = {} }

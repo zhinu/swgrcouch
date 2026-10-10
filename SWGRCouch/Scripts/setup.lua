@@ -28,6 +28,19 @@
 -- (READY, and RC-1: un-joined pads before the page closes), makes the race choice from the picks (the class's launch
 -- base build, c.setup.flow = "cards", pilots and loadouts per ControllerId) and persists them (LastRaceRacers).
 -- "classic", or a page whose cards cannot be built, keeps the VEHICLES columns below unchanged.
+-- 0.12.0 UI v2 (WI-05; binding spec notes/design/ui-v2/ui-redesign-final.md §6, §7.1, §7.4, §7.5, §8; user 2026-10-10:
+-- screens that "look like they belong to the game"): with cfg.UiStyle ~= "classic" (read at page build) W.panel is ONE
+-- FuseCanvasPanel (VerticalBoxSlot Size Fill in the lobby root) and every part sits on it in screen su through
+-- theme.pageGeometry: the hub / map page backgrounds, "/RACE SETUP" (WBP_Screen_Title), the step row in the game's tab
+-- style, the command row BACK / START RACE / SAVE AND RETURN (START and SAVE only on RACERS with P1 in mouse + keyboard
+-- mode, theme.inputMode), the status pill (§6.5 priorities), poster views for CLASS (Arcade posters + the VEHICLE
+-- SELECT info panel), CONDITIONS (tinted posters, facts only) and MODE (4 strips, detail column, GRID row, grid strip),
+-- the settings-look list fallback, the card row at (128, 548) and P1's sink host at (1800, cmdY). PLANET / TRACK stay
+-- cmap.lua's (its ctx gains place(widget, rect), ghost(...) and geo). Every focus target is a ghost (ui.ghost) under a
+-- painted look. S.items / M.onOption / M.onItem / the START gate / the input routes are unchanged; "classic" builds and
+-- runs the 0.11.0 page exactly as before (buildWidgets, showStep, the lists). New API: setup.raceArt(choice),
+-- setup.arcadeTile(planet, cls), setup.commandFocus(id), setup.debugInputMode(mode), setup.setStatus(text[, opts]),
+-- setup.clearStatus(key), setup.onPoster(i). VERIFY ids V-FIN-01..16 (§14) on the log lines a live tester needs.
 --
 -- Verified signatures (runtime JMAP 2026-10-07, work/runtime/idx via /tmp query; UMG/CommonUI as in ui.lua):
 --   UImage:SetBrushFromTexture(Texture2D, Bool bMatchSize), SetBrushFromMaterial(MaterialInterface),
@@ -78,6 +91,9 @@ local function opt(name, default)
     return v
 end
 
+-- 0.12.0: the UI v2 page (theme.lua) unless cfg.UiStyle = "classic"; read when a page is built (M.build, M.open).
+local function wantV2() return opt("UiStyle", "v2") ~= "classic" end
+
 ---------------------------------------------------------------------------------------------------- static data
 local PLA = "/Game/Griffin/Gameplay/Config/Planets/"
 local GMV = "/Game/Griffin/Gameplay/Campaign/GameModes/"
@@ -109,6 +125,56 @@ local function arcadeBg(planet, cls)
     if pl == "Hus" and k == "Car" then pl = "Cor" end
     if pl == "Bgl" and k ~= "Plane" then return planet.select end
     return tp("Arcade", "T_UI_Arcade_" .. pl .. "_" .. k .. "_Bg")
+end
+
+-- 0.12.0 (§7.2): the Arcade event tiles T_UI_Arcade_<Pl>_<Class>_Tile the game ships (notes/asset-list.txt). A pair it
+-- does not ship takes the planet's own class (Hus -> Car, Spa -> Bike, Bgl -> Plane), so the planet hue stays.
+local ARCADE_TILES = {
+    Mas = { Car = true, Bike = true, Skimmer = true, Plane = true },
+    Dal = { Car = true, Bike = true, Skimmer = true, Plane = true },
+    Cor = { Car = true, Bike = true, Skimmer = true, Plane = true },
+    Whp = { Car = true, Bike = true, Skimmer = true, Plane = true },
+    Hus = { Car = true }, Spa = { Bike = true, Plane = true }, Bgl = { Plane = true },
+}
+local ARCADE_TILE_OWN = { Hus = "Car", Spa = "Bike", Bgl = "Plane" }
+
+-- PLANETS entry for an entry, a key ("Mastiff"), a PlanetDef name ("PLA_Mastiff") or a display name ("JAKKU").
+local function planetEntry(p)
+    if type(p) == "table" then
+        if p.art and p.key then return p end
+        p = p.key
+    end
+    if type(p) ~= "string" then return nil end
+    local k, up = p:gsub("^PLA_", ""), string.upper(p)
+    for _, e in ipairs(PLANETS) do
+        if e.key == k or e.name == up then return e end
+    end
+    return nil
+end
+
+-- vehicles.CLASSES entry for an entry or a key ("Car").
+local function classEntry(c)
+    if type(c) == "table" then
+        if c.art then return c end
+        c = c.key
+    end
+    if type(c) ~= "string" then return nil end
+    return V.classByKey(c)
+end
+
+-- setup.arcadeTile(planet, cls) -> the planet x class Arcade tile (the class's own art when the pair exists, else the
+-- planet's own class); planet / cls as entries or keys; cls nil = the landspeeder. nil for an unknown planet.
+function M.arcadeTile(planet, cls)
+    local p, c = planetEntry(planet), classEntry(cls)
+    if not p then return nil end
+    local pl, k = p.art, c and c.art or "Car"
+    if not (ARCADE_TILES[pl] or {})[k] then k = ARCADE_TILE_OWN[pl] or "Car" end
+    return tp("Arcade", "T_UI_Arcade_" .. pl .. "_" .. k .. "_Tile")
+end
+
+-- true when the pair has its own tile (the CLASS posters keep their class art otherwise).
+local function ownArcadeTile(p, c)
+    return p ~= nil and c ~= nil and (ARCADE_TILES[p.art] or {})[c.art] == true
 end
 
 -- Track art: the Arcade event tile of the same TrackDef when one exists (summarize.py arcade, 48 tracks).
@@ -153,6 +219,21 @@ M.MODES = {
 }
 for _, m in ipairs(M.MODES) do m.path = GMV .. m.asset .. "." .. m.asset end
 
+-- 0.12.0 UI v2 (§7.5): the MODE strips' art (none of it is on a main-menu tab; RACE = the chosen class's strip) and
+-- title ink, and the sentence-case mode texts of the detail column (the caps desc above stays for "classic").
+local MODE_V2 = {
+    race       = { art = { Car = "T_UI_FE_Tile_05", Bike = "T_UI_FE_Tile_05_Bike", Skimmer = "T_UI_FE_Tile_05_Skim",
+                           Plane = "T_UI_FE_Tile_05_Plane" }, ink = "BEIGE",
+                   text = function(cls) return "A single-class race: the whole grid drives the <H1>"
+                       .. string.lower(cls and cls.label or "chosen class") .. "</>." end },
+    fullgrid   = { art = "T_UI_Difficulty_Tile_01", ink = "DEEP", scrim = "#93A495",   -- scrim: the art's base, idle
+                   text = "The game's own full-grid race. The game sets the grid." },
+    mixed      = { art = "T_UI_Difficulty_Tile_02", ink = "DEEP", scrim = "#B9924B",
+                   text = "4 landspeeders, 4 speeder bikes and 4 skim speeders." },
+    eliminator = { art = "T_UI_FE_Tile_MP_06", ink = "BEIGE",
+                   text = "Timed elimination with mixed classes, 12 racers." },
+}
+
 function M.modeByPath(path)
     for _, m in ipairs(M.MODES) do if m.path == path then return m end end
     return nil
@@ -175,8 +256,20 @@ function M.realMs()
     return os.time() * 1000
 end
 
-local function status(text)
+-- 0.12.0: v2 = the UI v2 page's functions (filled in the "UI v2" section below; the classic code calls them only on a
+-- v2 page). pillFeed = the v2 status pill (a no-op on a classic page or while the setup is closed).
+local v2 = {}
+local pillFeed = function() end
+local TH = nil
+local function T()                                         -- theme.lua (G3, lazy: only a v2 page needs it)
+    if TH == nil then TH = U.mod("theme") end
+    return TH
+end
+
+-- o (0.12.0, v2 page only): the status pill variant {warn, sticky, prio, key, ms, pips}; nil = classified by its text.
+local function status(text, o)
     U.log(TAG, "%s", text)
+    pillFeed(text, o)
     St.emit("status", text)
 end
 
@@ -201,6 +294,23 @@ M.PLANETS = PLANETS
 M.arcadeBg = arcadeBg
 M.trackKey = trackKey
 
+-- 0.12.0 sentence case for the v2 texts: "DEBRIS DUNES" -> "Debris Dunes", "LOOP B · SHORT 2" -> "loop B · short 2"
+-- (single letters and roman numerals keep their case).
+local ROMAN = { I = true, II = true, III = true, IV = true, V = true, VI = true, VII = true, VIII = true }
+local function keepCase(w) return #w <= 1 or ROMAN[w] == true or w:find("%d") ~= nil end
+local function titleCase(s)
+    return (tostring(s or ""):gsub("%S+", function(w)
+        if keepCase(w) then return w end
+        return w:sub(1, 1):upper() .. w:sub(2):lower()
+    end))
+end
+local function lowerWords(s)
+    return (tostring(s or ""):gsub("%S+", function(w)
+        if keepCase(w) then return w end
+        return w:lower()
+    end))
+end
+
 ---------------------------------------------------------------------------------------------------- state
 -- W: widgets of the current lobby page instance (rebuilt with the page; forget() drops it). 0.10.0: cardBox / cardRow /
 --    sinkHost (RACERS cards), cardsOk (racers.build succeeded), cardsBroken (this page keeps the classic columns).
@@ -208,6 +318,11 @@ M.trackKey = trackKey
 --    nav = {edges/repeat state}} - P1 is pnum 1 (CommonUI focus), guests come from join.joinedList(). These are the
 --    classic columns; in the cards flow racers.lua keeps the players (St.racers). cards: the shown step 5 is RACERS;
 --    startDormant: the un-joined pads the START window was armed for (RC-1).
+-- 0.12.0 v2 page (W.v2): W.panel = the page canvas; root, geo (theme.pageGeometry at build), tctx (theme ctx), bg
+--    {hub, map}, title, steps, cmd (command row; back / start / save = its ghosts), pill, views[class|cond|mode|list]
+--    (built the first time a step needs them), viewBroken, posters (4 shared poster ghosts) + posterMap, rows (the
+--    list's settings rows; opts = their ghosts), shift (render translation when the page moved after the build).
+--    S.view: "posters" (CLASS / CONDITIONS / MODE), "cmap" (PLANET / TRACK), "list" (fallback), "cards" (RACERS).
 local W = nil
 local cmapCtx            -- helpers handed to cmap.build (assigned below the data section)
 local S = { active = false, step = nil, cls = nil, planets = {}, planet = nil, tracks = {}, track = nil, conds = {},
@@ -222,6 +337,9 @@ local OVER  = { "/Script/Griffin.FuseOverlay", "/Script/UMG.Overlay" }
 local IMAGE = { "/Script/Griffin.FuseImage", "/Script/UMG.Image" }
 local SCROLL = { "/Script/UMG.ScrollBox" }
 local SCALE = { "/Script/Griffin.FuseScaleBox", "/Script/UMG.ScaleBox" }
+local CANVAS = { "/Script/Griffin.FuseCanvasPanel", "/Script/UMG.CanvasPanel" }   -- 0.12.0 v2 page
+local TEXT  = { "/Script/Griffin.FuseTextBlock", "/Script/UMG.TextBlock" }
+local RICH  = { "/Script/Griffin.FuseRichTextBlock", "/Script/UMG.RichTextBlock" }
 
 -- New native UMG widget with the page's WidgetTree as outer (what UWidgetTree::ConstructWidget does for non-user
 -- widgets). VERIFY(V-SET-01): widgets made with StaticConstructObject and added to the live page render and lay out.
@@ -474,8 +592,9 @@ local function buildSinkHost()
 end
 
 local function buildRacers()
+    -- 0.12.0 v2: pill = the page's theme status pill (racers posts its keyed join / ALL READY entries there, §6.5)
     local r = racers().build({ tree = W.tree, pc = W.pc, newW = newW, row = W.cardRow, sinkHost = W.sinkHost,
-                               realMs = M.realMs, footer = { W.back, W.save, W.start } })
+                               realMs = M.realMs, footer = { W.back, W.save, W.start }, pill = W.pill })
     if r ~= true then error("racers.build returned " .. tostring(r)) end
     W.cardsOk = true
 end
@@ -562,25 +681,32 @@ local function buildWidgets(root)
     cardsStage("racers.build", buildRacers)                -- 0.10.0: cards.init + the sink, on the complete page
 end
 
--- lobby.build: once per lobby page. false = the flow is unavailable (lobby falls back to the dev panel).
-function M.build(root, pc, page)
-    if W and W.pageKey == U.key(page) and U.ok(W.panel) then return not W.broken end
+-- One page build (M.build; 0.12.0 also M.open after a live UiStyle switch). v2 = cfg.UiStyle ~= "classic" now.
+local function buildPage(root, pc, page)
     W = { pageKey = U.key(page), page = page, pc = pc, tree = page.WidgetTree, cyclers = {}, opts = {}, cols = {},
-          focusables = {}, cardsOk = false, cardsBroken = false }
+          focusables = {}, cardsOk = false, cardsBroken = false,
+          v2 = wantV2(), root = root, views = {}, viewBroken = {}, rows = {} }
     textCache, imgCache = {}, {}
     M._resetVideoFlags()                                   -- address-keyed like the caches above (new page)
-    local ok, err = pcall(buildWidgets, root)
+    local ok, err = pcall(W.v2 and v2.buildWidgets or buildWidgets, root)
     if not ok then
         W.broken = true
-        U.err(TAG, "race setup page could not be built (%s): the lobby uses the dev race builder", tostring(err))
+        U.err(TAG, "race setup page could not be built (%s): the lobby uses the dev race builder%s", tostring(err),
+            W.v2 and " (UiStyle = \"classic\" builds the 0.11.0 page)" or "")
         if U.ok(W.panel) then show(W.panel, false) end
         return false
     end
     show(W.panel, false)
-    U.log(TAG, "race setup page built (%d option rows, %d focusable widgets, campaign views: %s, step 5: %s)", #W.opts,
-        #W.focusables, CM and CM.status() or "not loaded", W.cardsOk and "RACERS cards"
-        or (cardsWanted() and "classic columns (cards unavailable)" or "classic columns"))
+    U.log(TAG, "race setup page built (%s, %d option rows, %d focusable widgets, campaign views: %s, step 5: %s)",
+        W.v2 and "UI v2" or "classic", #W.opts, #W.focusables, CM and CM.status() or "not loaded",
+        W.cardsOk and "RACERS cards" or (cardsWanted() and "classic columns (cards unavailable)" or "classic columns"))
     return true
+end
+
+-- lobby.build: once per lobby page. false = the flow is unavailable (lobby falls back to the dev panel).
+function M.build(root, pc, page)
+    if W and W.pageKey == U.key(page) and U.ok(W.panel) then return not W.broken end
+    return buildPage(root, pc, page)
 end
 
 function M.available() return W ~= nil and not W.broken and U.ok(W.panel) end
@@ -1109,6 +1235,15 @@ cmapCtx = function()
         stopVideo = function(why) M.stopVideo(why) end,
         onItem = function(i) M.onItem(i) end,
         realMs = function() return M.realMs() end,
+        -- 0.12.0 v2 page (W.v2): the views go on the page canvas. place(widget, rect = {x, y[, w, h]} screen su, z,
+        -- align) -> CanvasPanelSlot; ghost(id, fn, rect, cv) -> a theme ghost ("setup:" .. id) on cv (default the
+        -- page canvas); back() -> the command row's BACK ghost (the lowest targets' Down rule); tctx = theme's ctx.
+        v2 = W.v2 == true, geo = W.geo, tctx = W.tctx,
+        place = function(w, rect, z, align) return v2.placeOn(W.panel, w, rect, z, align) end,
+        ghost = function(id, fn, rect, cv)
+            return T().ghost(W.tctx, cv or W.panel, rect, "setup:" .. id, fn, { geo = W.geo, z = 10 })
+        end,
+        back = function() return W.back end,
     }
 end
 
@@ -1148,6 +1283,7 @@ end
 
 -- Fill the option pool from S.items (paged: the last row becomes "MORE" when the list is longer than the pool).
 local function fillOptions()
+    if W.v2 then return v2.fillRows() end                  -- 0.12.0: the list as settings rows (same paging)
     local n, total = #W.opts, #S.items
     local per = total > n and (n - 1) or n
     local pages = math.max(1, math.ceil(total / per))
@@ -1194,7 +1330,10 @@ STEPS.class = function()
     for _, cls in ipairs(V.CLASSES) do
         S.items[#S.items + 1] = {
             label = cls.label,
+            cls = cls,                                     -- 0.12.0 v2: poster / list row data
+            row = { titleCase(cls.label), string.format("UP TO %d RACERS", V.maxRacers(cls)) },
             preview = function()
+                if W.v2 then v2.previewClass(cls); return end
                 local info = V.classInfo(cls)
                 local lines = { info.name, info.desc }
                 for _, t in ipairs(info.traits) do lines[#lines + 1] = t end
@@ -1227,14 +1366,19 @@ STEPS.planet = function()
         end
         S.items[#S.items + 1] = {
             label = p.name .. (n and string.format("   (%d TRACK%s)", n, n == 1 and "" or "S") or ""),
+            planet = p,                                    -- 0.12.0 v2: list row "Jakku" + "17 TRACKS"
+            row = { titleCase(p.name), n and string.format("%d TRACK%s", n, n == 1 and "" or "S") or "" },
             preview = function()
                 if S.view == "cmap" and CM then
-                    local count = n and string.format("%d CIRCUIT%s  ·  %d TRACK%s FOR THE %s", circuits,
-                        circuits == 1 and "" or "S", n, n == 1 and "" or "S", S.cls.label) or "TRACK LIST UNKNOWN"
-                    local okC, err = pcall(CM.previewPlanet, idx, { planet = p, count = count, url = p.url })
+                    local sep = W.v2 and " · " or "  ·  "   -- v2 (§7.2): "6 CIRCUITS · 17 TRACKS FOR THE LANDSPEEDER"
+                    local count = n and string.format("%d CIRCUIT%s%s%d TRACK%s FOR THE %s", circuits,
+                        circuits == 1 and "" or "S", sep, n, n == 1 and "" or "S", S.cls.label) or "TRACK LIST UNKNOWN"
+                    local okC, err = pcall(CM.previewPlanet, idx, { planet = p, count = count, url = p.url,
+                        art = W.v2 and M.arcadeTile(p, S.cls) or nil })
                     if not okC then cmapFailed("planet", err) end
                     return
                 end
+                if W.v2 then return end                    -- v2 list: the row is the preview
                 local flavour = ""
                 pcall(function() flavour = U.str(U.obj(p.path).FlavourText) end)
                 setInfo({ p.name, flavour, n and string.format("%d TRACK%s FOR THE %s", n, n == 1 and "" or "S",
@@ -1266,13 +1410,17 @@ STEPS.track = function()
     for idx, e in ipairs(S.tracks or {}) do
         S.items[#S.items + 1] = {
             label = trackLabel(e),
+            track = e,                                     -- 0.12.0 v2: list row "Debris Dunes · reverse"
+            row = { v2.trackRow and v2.trackRow(e) or trackLabel(e), "" },
             preview = function()
                 if S.view == "cmap" and CM then
                     local okC, err = pcall(CM.previewTrack, idx, { e = e, planet = S.planet.name, cls = S.cls.label,
-                        art = trackArt(e) })
+                        art = trackArt(e),
+                        condNext = #(e.conds or {}) > 1 and opt("SetupAskCondition", true) ~= false })
                     if not okC then cmapFailed("track", err) end
                     return
                 end
+                if W.v2 then return end                    -- v2 list: the row is the preview
                 local laps = e.p2p and "1 LAP (POINT TO POINT)" or string.format("%d LAPS", e.laps)
                 local conds = {}
                 for _, t in ipairs(e.conds) do conds[#conds + 1] = prettyCond(t) end
@@ -1302,7 +1450,10 @@ STEPS.cond = function()
     for _, tag in ipairs(S.track.conds) do
         S.items[#S.items + 1] = {
             label = prettyCond(tag),
+            tag = tag,                                     -- 0.12.0 v2: poster / list row data
+            row = { titleCase(prettyCond(tag)), "" },
             preview = function()
+                if W.v2 then v2.previewCond(tag); return end
                 setInfo({ trackLabel(S.track), "CONDITIONS: " .. prettyCond(tag), "" })
                 setMedia(S.planet.hires, S.planet.url, trackArt(S.track))
             end,
@@ -1327,8 +1478,11 @@ STEPS.mode = function()
     for _, m in ipairs(modesFor(S.cls, S.track)) do
         S.items[#S.items + 1] = {
             label = m.label,
+            mode = m,                                      -- 0.12.0 v2: poster / list row data
+            row = { titleCase(m.label), "" },
             preview = function()
                 S.focusMode = m
+                if W.v2 then v2.previewMode(m); return end
                 setText(W.gridCy.m, gridText(m), true)
                 setInfo({ m.label, m.desc, m.single and ("ALL RACERS DRIVE A " .. S.cls.label) or "",
                     m.grid == "max" and string.format("UP TO %d RACERS FOR THE %s", mx, S.cls.label) or "" })
@@ -1424,8 +1578,11 @@ local function renderCard(i, col, e, p, pr, h)
     local brush, kind, dim, asp
     if live then
         U.try(TAG, VP.want, i, pr, S.cls)
-        local ok, b1, k1, d1, a1 = U.try(TAG, VP.brush, i)
+        local ok, b1, k1, d1, a1, base1 = U.try(TAG, VP.brush, i)
         if ok then brush, kind, dim, asp = b1, k1, d1, a1 end
+        -- 0.12.0: a v2 bay (PreviewBackdrop studio / scenario) reports a building frame as kind "building" (the v2
+        -- card washes it); these columns draw no wash: its real brush type at the 0.11.0 0.5 dim
+        if kind == "building" then kind, dim = (base1 == "texture") and "texture" or "material", 0.5 end
     end
     if brush and col.vpBrush ~= brush then
         local okB = pcall(function()
@@ -1534,13 +1691,59 @@ function M.stepPlayer(pnum, what, dir)
     renderColumns()
 end
 
+-- 0.12.0 (task #31): RACE SETUP > MODE "Opponents" = the speeder build tier the race launches on, i.e. the AI's
+-- strength, as the 0.9 classic VEHICLES build column set it (0.10's cards flow always launched on TIER 1, the zero
+-- base). Persisted in settings OpponentTier (1 = TIER 1 [0%] .. 6 = TIER 6 [58%]); pods have no tier (the zero base).
+-- M.aiTierIndex() -> index, list (nil, {} for pods); M.aiTierPath() -> the tier build's path, nil for TIER 1 / pods.
+local function tierIndexFor(arch)
+    if arch == nil or tonumber(arch) == 1 then return nil, {} end
+    local ok, list = pcall(V.builds, arch)
+    if not ok or type(list) ~= "table" or #list == 0 then return nil, {} end
+    local i = math.floor(tonumber(settings.get("OpponentTier")) or 1)
+    return math.max(1, math.min(#list, i)), list
+end
+
+function M.aiTierIndex() return tierIndexFor(S.cls and S.cls.arch) end
+
+-- the tier build's path for class arch from the setting (nil: TIER 1 = the zero base, pods); the single source for a
+-- choice made here (makeChoice) and for one derived from settings.txt (the lobby's START RACE, deriveSetup)
+function M.aiTierPathFor(arch)
+    local i, list = tierIndexFor(arch)
+    if not i or i <= 1 or not list[i] then return nil end
+    return list[i].path
+end
+
+function M.aiTierPath() return M.aiTierPathFor(S.cls and S.cls.arch) end
+
+-- "TIER 3 · HUSKY (23%)" from the game's "03 - Husky [23%]"; pods: "Standard"
+function M.aiTierText()
+    local i, list = M.aiTierIndex()
+    if not i then return "Standard" end
+    local b = list[i] or {}
+    local n, name, pct = tostring(b.raw or ""):match("^%s*0?(%d+)%s*%-%s*(%a+)%s*%[([^%]]*)%]")
+    if n then return string.format("TIER %s · %s (%s)", n, string.upper(name), pct) end
+    return tostring(b.label or "TIER 1")
+end
+
+function M.stepAiTier(dir)
+    if S.step ~= "mode" then return end
+    local i, list = M.aiTierIndex()
+    if not i then return end
+    local j = math.max(1, math.min(#list, i + dir))
+    if j ~= i then
+        settings.set("OpponentTier", j)
+        U.log(TAG, "opponents: %s (V-RC-27)", M.aiTierText())
+    end
+    if W.v2 then v2.renderGrid(S.focusMode or S.mode) end
+end
+
 function M.stepGrid(dir)
     local m = S.focusMode or S.mode
     if S.step ~= "mode" or not m or m.grid ~= "max" then return end
     local lo, hi = humansCount(), V.maxRacers(S.cls)
     S.grid = math.max(lo, math.min(hi, S.grid + dir))
     S.gridTouched = true
-    setText(W.gridCy.m, gridText(m), true)
+    if W.v2 then v2.renderGrid(m) else setText(W.gridCy.m, gridText(m), true) end
 end
 
 function M.cyclerStep(id, dir, src)
@@ -1577,8 +1780,1364 @@ local function enterCards()
     return nil
 end
 
+---------------------------------------------------------------------------------------------------- UI v2 (0.12.0)
+-- The v2 page (spec §6 frame, §7.1 / 7.4 / 7.5 steps, §8 RACERS page level). theme.lua builds every part (tokens,
+-- builders, ghosts, texture budget); this section places them, fills them from S and paints the focus looks every FAST
+-- tick from the ghosts' focus / hover (§3.3: one painted look per target, the ghost is invisible). Positions are the
+-- spec's screen su (3840 x 2160), converted with the page geometry measured at the build (W.geo); a page that moved
+-- since is shifted as a whole (v2.measure: render translation, V-FIN-01). The poster views and the list are built the
+-- first time a step needs them (about 60-110 widgets each), so no tick builds the whole page.
+do   -- 0.12.0: the v2 page's helpers stay local to this block (the main chunk's 200-local limit)
+local L2 = {
+    class = { x = 128, dx = 708, y = 600, w = 668, h = 1120, title = 42, panel = { 2968, 600, 744 } },   -- §7.1
+    cond  = { x = 128, dx = 744, y = 600, w = 700, h = 1120, title = 48, detail = { 1700, 610, 1880 } },  -- §7.4
+    mode  = { x = 128, y = 600, dy = 324, w = 1720, h = 290, title = 60, detail = { 2000, 600, 1712 } },  -- §7.5
+    list  = { x = 128, y = 560, w = 1872, h = 96, pitch = 102, n = 12 },                                  -- §7
+    cards = { x = 128, y = 548 },                                                                         -- §8
+    sinkX = 1800,                                                                                         -- §6.4
+}
+local POSTER_KIND = { class = "class", cond = "cond", mode = "mode" }
+local CLASS_HOME = { Car = "Mastiff", Bike = "Dalmatian", Skimmer = "Corgi", Plane = "Spaniel" }   -- §7.1 poster art
+local PLURAL = { Car = "landspeeders", Bike = "speeder bikes", Skimmer = "skim speeders", Plane = "podracers" }
+local COND_TINT = { BLUEHOUR = "#9CC3D0", NIGHT = "#316375", DAY = "#D1C371", AFTERNOON = "#D1C371" }   -- §7.4
+local COND_AT = { SUNSET = "at sunset", BLUEHOUR = "at bluehour", NIGHT = "at night", AFTERNOON = "in the afternoon",
+                  DAY = "by day", OVERCAST = "under an overcast sky", SCORCHING = "in scorching heat" }
+local DT_RICH_BODY = "/Game/Griffin/UI/Library/Fonts/DT_RichText_Body.DT_RichText_Body"
+local KML = "/Script/Engine.Default__KismetMaterialLibrary"
+local MID_TRANSIENT = 1                                    -- EMIDCreationFlags::Transient (cards.lua, vpreview)
+
+local function posterRect(kind, i)
+    local g = L2[kind]
+    if kind == "mode" then return { g.x, g.y + g.dy * (i - 1), g.w, g.h } end
+    return { g.x + g.dx * (i - 1), g.y, g.w, g.h }
+end
+
+-- A child of a canvas at a SCREEN rect {x, y[, w, h]} (no w / h: the slot sizes to its content), point anchor (0, 0).
+function v2.placeOn(cv, w, rect, z, align)
+    local s = cv:AddChildToCanvas(w)                       -- -> CanvasPanelSlot
+    if not U.ok(s) then error("AddChildToCanvas returned no slot") end
+    local g = W.geo
+    s:SetAnchors({ Minimum = { X = 0, Y = 0 }, Maximum = { X = 0, Y = 0 } })
+    s:SetAlignment({ X = align and align[1] or 0, Y = align and align[2] or 0 })
+    if rect[3] and rect[4] then
+        s:SetAutoSize(false)
+        s:SetSize({ X = rect[3], Y = rect[4] })
+    else
+        s:SetAutoSize(true)
+    end
+    s:SetPosition({ X = rect[1] - g.x, Y = rect[2] - g.y })
+    if z then s:SetZOrder(z) end
+    return s
+end
+
+local function localRect(r)                                -- screen rect -> the page canvas's (T.set wants local su)
+    local g = W.geo
+    return { r[1] - g.x, r[2] - g.y, r[3], r[4] }
+end
+
+-- One of the game's widget Blueprints owned by P1 (the caller writes its variables before the add).
+local function createBP(path)
+    local cls = U.class(path)
+    if not U.ok(cls) then error(tostring(path) .. " not found") end
+    local w = U.WBL():Create(W.pc, cls, W.pc)              -- Create(WorldContextObject, Class, OwningPlayer)
+    if not U.ok(w) then error("Create(" .. tostring(path) .. ") failed") end
+    return w
+end
+
+local fontObjs = {}
+local function fontObj(path)
+    local f = fontObjs[path]
+    if f and U.ok(f) then return f end
+    f = U.obj(path)
+    if U.ok(f) then fontObjs[path] = f; return f end
+    return nil
+end
+
+-- A text block in a theme type role, for boxes (not a canvas). o = {colour, size, wrap (WrapTextAt, before the add),
+-- justify (ETextJustify 0 / 1 / 2)}.
+local function roleText(role, o)
+    o = o or {}
+    local r = type(role) == "table" and role or T().ROLE[role] or T().ROLE.helpText
+    local t = newW(TEXT)
+    if o.wrap then pcall(function() t.WrapTextAt = o.wrap end) end
+    local f = fontObj(r.font)
+    if f then
+        -- FSlateFontInfo from a table: missing fields are zero-filled (no outline, no material) [cmap.lua]
+        pcall(function() t:SetFont({ FontObject = f, TypefaceFontName = U.fname(r.face or "Bold"),
+                                     Size = o.size or r.size, LetterSpacing = r.ls or 0 }) end)
+    end
+    pcall(function() t:SetColorAndOpacity(slateColor(o.colour or r.colour)) end)
+    if r.upper then pcall(function() t:SetTextTransformPolicy(2) end) end   -- ETextTransformPolicy ToUpper
+    if o.justify then pcall(function() t:SetJustification(o.justify) end) end
+    pcall(function() t:SetVisibility(C.E.Vis.HitTestInvisible) end)
+    return t
+end
+
+local function navReset(w, dirs)                           -- EUINavigationRule::Escape = Slate's geometric move
+    if not U.ok(w) then return end
+    for _, d in ipairs(dirs or { 0, 1, 2, 3 }) do pcall(function() w:SetNavigationRuleBase(d, 0) end) end
+end
+
+local function isCommand(w)
+    return W ~= nil and (U.same(w, W.back) or U.same(w, W.start) or U.same(w, W.save))
+end
+
+-- BACK's Up rule follows P1's content focus (BACK sits alone at the bottom right: geometric Up finds nothing there).
+function v2.noteFocus(f)
+    if not (U.ok(f) and U.ok(W.back)) or isCommand(f) or U.same(W.backUp, f) then return end
+    if T().nav(W.back, "up", f) then W.backUp = f end
+end
+
+---------------------------------------------------------------------------------------------------- v2 texts
+local function condWords(tag)
+    local t = {}
+    for w in prettyCond(tag):gmatch("%S+") do if w ~= "MEM" then t[#t + 1] = w end end
+    return t
+end
+
+local function condTint(tag)                               -- §7.4: Bluehour / Night / Day tints (others: as is)
+    local w = condWords(tag)[1]
+    local h = w and COND_TINT[w]
+    return h and T().hex(h) or nil
+end
+
+local function condPhrase(tag)                             -- "NIGHT DRY" -> "at night, dry"
+    local w = condWords(tag)
+    if #w == 0 then return "" end
+    local s = COND_AT[w[1]] or ("in " .. string.lower(w[1]))
+    if #w > 1 then s = s .. ", " .. lowerWords(table.concat(w, " ", 2)) end
+    return s
+end
+
+local function condName(tag) return titleCase(table.concat(condWords(tag), " ")) end
+
+-- "DEBRIS DUNES · REVERSE": the CONDITIONS posters' caption (the condition is the poster's title).
+local function trackCaption(e)
+    local t = { e.name }
+    if e.rev then t[#t + 1] = "REVERSE" end
+    if e.p2p then t[#t + 1] = "POINT TO POINT" end
+    if e.mines then t[#t + 1] = "MINES" end
+    return table.concat(t, " · ")
+end
+
+-- §7.4 facts only: "Debris Dunes, reverse, loop B: 2 laps at sunset." + "This track also runs at Bluehour."
+local function condFacts(e, tag)
+    local t = { titleCase(e.name) }
+    if e.rev then t[#t + 1] = "reverse" end
+    if e.p2p then t[#t + 1] = "point to point" end
+    if e.mines then t[#t + 1] = "mines" end
+    if e.hint and e.hint ~= "" then t[#t + 1] = lowerWords((e.hint:gsub(" · ", ", "))) end
+    local laps = ""
+    if e.p2p then laps = "1 lap"
+    elseif (tonumber(e.laps) or 0) > 0 then laps = string.format("%d lap%s", e.laps, e.laps == 1 and "" or "s") end
+    local tail = table.concat({ laps, condPhrase(tag) }, " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return table.concat(t, ", ") .. (tail ~= "" and (": " .. tail) or "") .. "."
+end
+
+local function condFoot(e, tag)
+    local others = {}
+    for _, c in ipairs(e.conds or {}) do if c ~= tag then others[#others + 1] = condName(c) end end
+    if #others == 0 then return "" end
+    local s = (#others == 1) and others[1] or (table.concat(others, ", ", 1, #others - 1) .. " and " .. others[#others])
+    return "This track also runs at " .. s .. "."
+end
+
+-- §7.3 list fallback row: "Debris Dunes · reverse".
+function v2.trackRow(e)
+    local t = { titleCase(e.name) }
+    if e.dup and e.hint then t[#t + 1] = lowerWords(e.hint) end
+    if e.rev then t[#t + 1] = "reverse" end
+    if e.p2p then t[#t + 1] = "point to point" end
+    if e.mines then t[#t + 1] = "mines" end
+    return table.concat(t, " · ")
+end
+
+-- CLASS poster art (§7.1): the class's own Arcade tile; with a planet chosen (the class re-picked) that planet's
+-- tile of the class when the game ships the pair. -> path, planet key (its tone colours the "UP TO n RACERS" line).
+function v2.classArt(cls)
+    local p = S.planet
+    if p and ownArcadeTile(p, cls) then return M.arcadeTile(p, cls), p.key end
+    local home = planetEntry(CLASS_HOME[cls.key] or "Mastiff") or PLANETS[1]
+    return M.arcadeTile(home, cls), home.key
+end
+
+-- The CLASS poster caption "SWEEPING FORMS · DRIFT": the class's first VA trait + its class move. 0.12.0: the move is
+-- the VA trait whose description names an input action ("Use <action id=.../> to drift"), so it comes in the game's
+-- language like the first trait (live 2026-10-10 de: "RASENDE AGILITÄT · KINETIC BURST"); perkdata.ADVANCED (English:
+-- Drift, Air Brake, Kinetic Burst, Knife Edge) only for a class without one (VA_Plane has no traits: "AIR BRAKE").
+function v2.classCaption(cls)
+    local names = {}
+    local okI, info = pcall(V.classInfo, cls)
+    local list = okI and type(info) == "table" and type(info.traitList) == "table" and info.traitList or {}
+    if list[1] then names[1] = list[1].name end
+    local move = nil
+    for _, t in ipairs(list) do
+        if type(t) == "table" and t.action and (t.name or "") ~= "" then move = t.name end
+    end
+    if not move then
+        local okD, D = pcall(U.mod, "perkdata")
+        move = okD and type(D) == "table" and type(D.ADVANCED) == "table" and D.ADVANCED[cls.arch] or nil
+    end
+    if move and move ~= names[1] then names[#names + 1] = move end
+    return table.concat(names, " · ")
+end
+
+---------------------------------------------------------------------------------------------------- v2 page build
+local function setBackground(kind)                         -- §6.1: hub on every step but PLANET (map)
+    if W.bgKind == kind then return end
+    W.bgKind = kind
+    if W.bg.hub then T().set(W.bg.hub, { visible = kind == "hub" }) end
+    if W.bg.map then T().set(W.bg.map, { visible = kind == "map" }) end
+end
+
+-- §8 card row: W.cardBox (CardRowW x CardH, CardH = min(cfg, the page's derived CardH)) > DownOnly ScaleBox (RC-15)
+-- > W.cardRow, on the canvas at (128, 548).
+function v2.buildCardRow()
+    local h = math.min(tonumber(opt("CardH", 1300)) or 1300, tonumber(W.geo.cardH) or 1300)
+    local box = sizeBox(opt("CardRowW", 3584), h)
+    local sc = newW(SCALE)
+    pcall(function() sc:SetStretch(2); sc:SetStretchDirection(1) end)   -- EStretch ScaleToFit, EStretchDir. DownOnly
+    box:AddChild(sc)
+    local row = newW(HBOX)
+    local s = sc:AddChild(row)                             -- -> ScaleBoxSlot
+    if U.ok(s) then pcall(function() s:SetHorizontalAlignment(C.E.HAlign.Center); s:SetVerticalAlignment(1) end) end
+    v2.placeOn(W.panel, box, { L2.cards.x, L2.cards.y }, 2)
+    show(box, false)
+    W.cardBox, W.cardRow = box, row
+end
+
+-- §6.4 P1's input sink host (racers.lua's five invisible buttons) left of the command row's reserved slots.
+function v2.buildSinkHost()
+    local host = sizeBox(96, 96)
+    v2.placeOn(W.panel, host, { L2.sinkX, tonumber(W.geo.cmdY) or 1880 }, 4)
+    show(host, false)
+    W.sinkHost = host
+end
+
+function v2.buildWidgets(root)
+    local th = T()
+    W.panel = newW(CANVAS)
+    local s = root:AddChildToVerticalBox(W.panel)          -- -> VerticalBoxSlot: Size Fill, HAlign / VAlign Fill (§6)
+    if U.ok(s) then
+        pcall(function()
+            s:SetSize({ Value = 1, SizeRule = 1 })         -- FSlateChildSize {Value, SizeRule Fill = 1}
+            s:SetHorizontalAlignment(0)
+            s:SetVerticalAlignment(0)
+            s:SetPadding(pad(0, 0, 0, 0))
+        end)
+    end
+    W.geo = th.pageGeometry(root)                           -- V-FIN-01 (logged by theme)
+    W.shift = { x = 0, y = 0 }
+    W.tctx = { tree = W.tree, pc = W.pc, newW = newW }
+    local ctx, geo = W.tctx, W.geo
+    W.bg = { hub = th.pageBackground(ctx, W.panel, geo, "hub"), map = th.pageBackground(ctx, W.panel, geo, "map") }
+    if W.bg.map then th.set(W.bg.map, { visible = false }) end
+    W.bgKind = "hub"
+    W.title = th.screenTitle(ctx, W.panel, geo, "RACE SETUP")
+    W.steps = th.stepRow(ctx, W.panel, geo)
+    W.cmd = th.commandRow(ctx, W.panel, geo, {
+        { id = "back", label = "BACK", fn = function() M.back() end, ghostId = "setup:back" },
+        { id = "start", label = "START RACE", fn = function() M.finish(true) end, ghostId = "setup:start" },
+        { id = "save", label = "SAVE AND RETURN", fn = function() M.finish(false) end, ghostId = "setup:save" },
+    })
+    if not W.cmd then error("command row not built (theme log: commandRow)") end
+    W.back, W.start, W.save = W.cmd.widget("back"), W.cmd.widget("start"), W.cmd.widget("save")
+    for _, g in ipairs({ W.back, W.start, W.save }) do
+        if U.ok(g) then W.focusables[#W.focusables + 1] = g end
+    end
+    W.cmd.show({ back = true, start = false, save = false })
+    W.pill = th.statusPill(ctx, W.panel, geo)
+    cardsStage("card row", v2.buildCardRow)                -- 0.10.0 RACERS (collapsed until step 5 in the cards flow)
+    cardsStage("sink host", v2.buildSinkHost)
+    if CM then                                             -- 0.9.0 campaign views, placed on the canvas (ctx.place)
+        local okC, why = pcall(CM.build, cmapCtx())
+        if not okC then U.err(TAG, "campaign views not built (%s): PLANET / TRACK use the lists", tostring(why)) end
+    end
+    cardsStage("racers.build", buildRacers)                -- cards.init / cards2.init + the sink, on the complete page
+    U.log(TAG, "UI v2 frame: page %d,%d %dx%d (%s), title %s, step row %s, command row, status pill %s, card row %s "
+        .. "(V-FIN-01/02/03/12/16 in the theme log)", math.floor(geo.x), math.floor(geo.y), math.floor(geo.w),
+        math.floor(geo.h), tostring(geo.src), W.title and "on" or "MISSING", W.steps and "on" or "MISSING",
+        W.pill and "on" or "MISSING", U.ok(W.cardBox) and "on" or "off")
+end
+
+-- A built page whose canvas origin moved since the build (another page geometry now: DPI, a sibling of the switcher):
+-- every part keeps its screen place through the canvas's render translation (V-FIN-01).
+function v2.measure(why)
+    if not (W and W.v2 and U.ok(W.panel) and W.geo) then return end
+    local ok, g = pcall(function() return T().pageGeometry(W.root) end)
+    if not ok or type(g) ~= "table" or not (tonumber(g.x) and tonumber(g.y)) then return end
+    local dx, dy = W.geo.x - g.x, W.geo.y - g.y
+    if math.abs(dx) < 1 and math.abs(dy) < 1 then dx, dy = 0, 0 end
+    if W.shift.x == dx and W.shift.y == dy then return end
+    if pcall(function() W.panel:SetRenderTranslation({ X = dx, Y = dy }) end) then   -- UWidget::SetRenderTranslation
+        W.shift = { x = dx, y = dy }
+        U.log(TAG, "page origin moved since the build (%s): built at %d,%d (%s), now %d,%d (%s): canvas shifted by "
+            .. "%d,%d (V-FIN-01)", tostring(why), math.floor(W.geo.x), math.floor(W.geo.y), tostring(W.geo.src),
+            math.floor(g.x), math.floor(g.y), tostring(g.src), math.floor(dx), math.floor(dy))
+    end
+end
+
+-- A live UiStyle switch (spec §13 session I): the page of the other style is built in place of this one at the next
+-- open (racers' cards, the bays and cmap's views go with the old panel).
+function v2.rebuild(why)
+    local root, pc, page = W.root, W.pc, W.page
+    if not (U.ok(root) and U.ok(page)) then return false end
+    if cardsWanted() then pcall(function() racers().forget() end) end
+    releasePreviews("page rebuilt: " .. tostring(why), false)
+    if CM then pcall(CM.forget) end
+    if U.ok(W.panel) then pcall(function() W.panel:RemoveFromParent() end) end
+    W = nil
+    return buildPage(root, pc, page)
+end
+
+---------------------------------------------------------------------------------------------------- v2 views
+-- The 4 poster ghosts shared by CLASS / CONDITIONS / MODE: re-placed per step, A / a click = M.onPoster(i).
+local function ensurePosterGhosts()
+    if W.posters then return end
+    local list = {}
+    for i = 1, 4 do
+        local idx = i
+        local g = T().ghost(W.tctx, W.panel, posterRect("class", i), "setup:poster" .. i,
+            function() M.onPoster(idx) end, { geo = W.geo, z = 10 })
+        if not U.ok(g) then error("poster ghost " .. i .. " not created") end
+        T().set(g, { visible = false })
+        list[i] = g
+        W.focusables[#W.focusables + 1] = g
+    end
+    W.posters, W.posterMap = list, {}
+end
+
+-- Class / condition posters: the title stack at (44, h - 52) and the "UP TO n RACERS" / planet line + caption at 71.5 %
+-- of the height (setup-class.png / setup-cond.png), wrapping at w - 88.
+local function posterSet(V2, kind, extra)
+    local th, L = T(), L2[kind]
+    for i = 1, 4 do
+        local p = th.poster(W.tctx, W.panel, posterRect(kind, i), { geo = W.geo, titleSize = L.title, z = 1,
+                                                                     ay = (kind == "mode") and 1.0 or 0.5 })
+        if not p then error(kind .. " poster " .. i .. " not built") end
+        p.show(false)
+        V2.posters[i] = p
+        if kind ~= "mode" then
+            th.set(p.stack, { rect = { 44, L.h - 52 } })
+            th.set(p.title, { wrapW = L.w - 88 })
+            V2.line[i] = th.text(W.tctx, p.cv, "planetLine", { size = 30, z = 5, rect = { 44, L.h * 0.715 } })
+            V2.cap[i] = th.text(W.tctx, p.cv, "artCaption", { ls = 200, wrapW = L.w - 88, z = 5,
+                                                              rect = { 44, L.h * 0.715 + 56 } })
+        end
+        if extra then extra(p, i) end
+    end
+end
+
+-- §7.1 info panel (C13): WBP_DarkPanel under a FuseOverlay, content padding 56: WBP_SectionSubLabel (the class name,
+-- SAGE), the first paragraph of VA_<Class>.Description (DT_RichText_Body, WrapTextAt 632), 3 x WBP_VehicleTrait (texts
+-- written, never InitFromTrait). Height from the content.
+local function buildInfoPanel(V2)
+    local x, y, w = L2.class.panel[1], L2.class.panel[2], L2.class.panel[3]
+    local inner = w - 112
+    local sb = sizeBox(w, nil)
+    pcall(function() sb:SetVisibility(C.E.Vis.HitTestInvisible) end)
+    v2.placeOn(W.panel, sb, { x, y }, 3)
+    V2.panel = sb
+    local ov = newW(OVER)
+    sb:AddChild(ov)
+    local function fill(wd, p)
+        local s = ov:AddChildToOverlay(wd)                 -- -> OverlaySlot
+        if U.ok(s) then
+            pcall(function() s:SetHorizontalAlignment(0); s:SetVerticalAlignment(0) end)
+            if p then pcall(function() s:SetPadding(p) end) end
+        end
+    end
+    local okP, dp = pcall(createBP, C.BP.DarkPanel)
+    if okP then
+        -- PreConstruct: tight / gradient / shadow visibility + Img_PanelBacker = MainPanelColor (decoded WBP_DarkPanel)
+        pcall(function() dp.MainPanelColor = { R = 0.0130, G = 0.0369, B = 0.0482, A = 0.9 } end)   -- PANEL @0.9
+        pcall(function() dp.ShowTightPanel = false end)
+        pcall(function() dp.ShowShadow = true end)
+        pcall(function() dp.ShowGradientPanel = false end)
+        pcall(function() dp:SetVisibility(C.E.Vis.HitTestInvisible) end)
+        fill(dp)
+    else
+        local im = newW(IMAGE)
+        pcall(function() im:SetColorAndOpacity({ R = 0.0130, G = 0.0369, B = 0.0482, A = 0.9 }) end)
+        pcall(function() im:SetVisibility(C.E.Vis.HitTestInvisible) end)
+        fill(im)
+        U.warn(TAG, "WBP_DarkPanel unavailable (%s): a plain CLASS info panel", tostring(dp))
+    end
+    local vb = newW(VBOX)
+    fill(vb, pad(56, 56, 56, 56))
+    local okS, sl = pcall(createBP, C.BP.SectionSubLabel)
+    if okS then
+        pcall(function() sl.Label = U.ftext("") end)       -- PreConstruct copies Label + Color into texts and rule
+        pcall(function() sl.Color = { R = 0.3613, G = 0.4564, B = 0.3763, A = 1 } end)   -- SAGE (LinearColor)
+        pcall(function() sl:SetVisibility(C.E.Vis.HitTestInvisible) end)
+        vAdd(vb, sl, pad(0, 0, 0, 20))
+        V2.sub = sl
+    else
+        V2.subText = roleText("subLabel")
+        vAdd(vb, V2.subText, pad(0, 0, 0, 20))
+        U.warn(TAG, "WBP_SectionSubLabel unavailable (%s): a plain sub-label", tostring(sl))
+    end
+    local rt = newW(RICH)
+    local dt = U.obj(DT_RICH_BODY)
+    if U.ok(dt) then pcall(function() rt:SetTextStyleSet(dt) end) end
+    pcall(function() rt.WrapTextAt = inner end)            -- before the add (RC-3)
+    pcall(function() rt:SetVisibility(C.E.Vis.HitTestInvisible) end)
+    vAdd(vb, rt, pad(0, 0, 0, 26))
+    V2.intro = rt
+    -- a trait's text box: the panel content minus the trait's own paddings (border 16 + 16, row 16 + 16, right 16);
+    -- its 620 default would exceed it and the trait's DownOnly scale box would shrink the text (rule 7)
+    V2.traitW = inner - 92
+    V2.traits = {}
+    for i = 1, 3 do
+        local okT, vt = pcall(createBP, C.BP.VehicleTrait)
+        if okT then
+            pcall(function() vt.Txt_Title.WrapTextAt = V2.traitW end)
+            pcall(function() vt.RT_Desc.WrapTextAt = V2.traitW end)
+            pcall(function() vt:SetVisibility(C.E.Vis.HitTestInvisible) end)
+            vAdd(vb, vt, pad(0, (i > 1) and 16 or 0, 0, 0))
+            V2.traits[i] = { w = vt }
+        else
+            U.warn(TAG, "WBP_VehicleTrait %d unavailable (%s): the CLASS panel shows fewer traits", i, tostring(vt))
+        end
+    end
+    U.log(TAG, "CLASS info panel: %s, %s, %d WBP_VehicleTrait, trait glyphs %s (V-FIN-08: the DRIFT text must show "
+        .. "the X button on an AMBER disc; fallback UiTraitGlyph = \"runs\")", okP and "WBP_DarkPanel" or "plain panel",
+        okS and "WBP_SectionSubLabel" or "plain sub-label", #V2.traits, tostring(opt("UiTraitGlyph", "decorator")))
+end
+
+local function buildClassView()
+    local V2 = { kind = "class", posters = {}, line = {}, cap = {}, sil = {} }
+    W.views.class = V2
+    posterSet(V2, "class", function(p, i)
+        local L = L2.class                                 -- class silhouette WHITE @0.9, 90 su, top-right (inset 70)
+        V2.sil[i] = T().image(W.tctx, p.cv, { tint = T().alpha(T().COL.WHITE, 0.9), z = 5,
+                                              rect = { L.w - 115, 25, 90, 90 }, visible = false })
+    end)
+    buildInfoPanel(V2)
+end
+
+-- Two detail columns: §7.4's (x 1700, width 1880) beside two posters, and one right of a third poster (x 2444, the same
+-- right edge 3580): tracks often have three conditions (decoded-tracks.tsv), the spec's layout shows two. Four or more
+-- use the list.
+local function buildCondView()
+    local V2 = { kind = "cond", posters = {}, line = {}, cap = {}, tint = {}, midSig = {}, details = {} }
+    W.views.cond = V2
+    posterSet(V2, "cond")
+    local d = L2.cond.detail
+    local x3 = L2.cond.x + 3 * L2.cond.dx + (d[1] - (L2.cond.x + 2 * L2.cond.dx))
+    for n, col in pairs({ [2] = { d[1], d[3] }, [3] = { x3, d[1] + d[3] - x3 } }) do
+        V2.details[n] = T().detailColumn(W.tctx, W.panel, col[1], d[2], col[2], { geo = W.geo })
+        if not V2.details[n] then error("CONDITIONS detail column not built") end
+        V2.details[n].show(false)
+    end
+    V2.detail = V2.details[2]
+end
+
+local function buildModeView()
+    local th, L = T(), L2.mode
+    local V2 = { kind = "mode", posters = {}, line = {}, cap = {}, icons = {} }
+    W.views.mode = V2
+    posterSet(V2, "mode")
+    local dx, dy, dw = L.detail[1], L.detail[2], L.detail[3]
+    V2.detail = th.detailColumn(W.tctx, W.panel, dx, dy, dw, { geo = W.geo })
+    if not V2.detail then error("MODE detail column not built") end
+    -- the GRID group sits under the foot: the column's height with a one-line description + the foot (§7.5; every mode
+    -- text is one line in 1712 su, so the place is fixed)
+    V2.detail.set({ title = "RACE", body = MODE_V2.race.text(V.CLASSES[1]),
+                    foot = "Up to 12 racers for the landspeeder." })
+    local bottom = tonumber(V2.detail.bottom()) or (dy + 352)
+    local gy = math.floor(bottom + 40)
+    V2.header = th.groupHeader(W.tctx, W.panel, dx, dx + dw, gy, "GRID", { geo = W.geo })
+    local ry = gy + 90
+    V2.rowRect = { dx - 39, ry, dw + 39, 96 }              -- the label at x 2000, the value right-aligned at 3673
+    V2.row = th.settingsRow(W.tctx, W.panel, V2.rowRect, { geo = W.geo, z = 3 })
+    if not V2.row then error("GRID row not built") end
+    -- the old cycler's three buttons are the row's ghosts (middle = the row, left / right = its arrows): the focus trap
+    -- of onFocus works unchanged (EUINavigation Left 0, Right 1, as makeCycler)
+    local cy = { id = "grid", onStep = function(dir) M.stepGrid(dir) end }
+    cy.m = th.ghost(W.tctx, W.panel, V2.rowRect, "setup:grid:m", function() M.cyclerStep("grid", 1, "click") end,
+        { geo = W.geo, z = 10 })
+    cy.l = th.ghost(W.tctx, W.panel, { dx, ry, 64, 96 }, "setup:grid:l",
+        function() M.cyclerStep("grid", -1, "click") end, { geo = W.geo, z = 11 })
+    cy.r = th.ghost(W.tctx, W.panel, { dx, ry, 64, 96 }, "setup:grid:r",
+        function() M.cyclerStep("grid", 1, "click") end, { geo = W.geo, z = 11 })
+    if not (U.ok(cy.m) and U.ok(cy.l) and U.ok(cy.r)) then error("GRID ghosts not created") end
+    pcall(function()
+        cy.m:SetNavigationRuleExplicit(0, cy.l); cy.m:SetNavigationRuleExplicit(1, cy.r)
+        cy.l:SetNavigationRuleExplicit(1, cy.m); cy.r:SetNavigationRuleExplicit(0, cy.m)
+    end)
+    for _, g in ipairs({ cy.m, cy.l, cy.r }) do
+        th.set(g, { visible = false })
+        W.focusables[#W.focusables + 1] = g
+    end
+    W.cyclers.grid = cy
+    -- 0.12.0 (task #31): "Opponents" under "Racers" (same row look and ghost trio): the speeder tier the race launches
+    -- on, i.e. the AI's strength (M.stepAiTier / settings OpponentTier)
+    local ry2 = ry + 102
+    V2.row2Rect = { dx - 39, ry2, dw + 39, 96 }
+    V2.row2 = th.settingsRow(W.tctx, W.panel, V2.row2Rect, { geo = W.geo, z = 3 })
+    if not V2.row2 then error("Opponents row not built") end
+    local cy2 = { id = "aitier", onStep = function(dir) M.stepAiTier(dir) end }
+    cy2.m = th.ghost(W.tctx, W.panel, V2.row2Rect, "setup:aitier:m", function() M.cyclerStep("aitier", 1, "click") end,
+        { geo = W.geo, z = 10 })
+    cy2.l = th.ghost(W.tctx, W.panel, { dx, ry2, 64, 96 }, "setup:aitier:l",
+        function() M.cyclerStep("aitier", -1, "click") end, { geo = W.geo, z = 11 })
+    cy2.r = th.ghost(W.tctx, W.panel, { dx, ry2, 64, 96 }, "setup:aitier:r",
+        function() M.cyclerStep("aitier", 1, "click") end, { geo = W.geo, z = 11 })
+    if not (U.ok(cy2.m) and U.ok(cy2.l) and U.ok(cy2.r)) then error("Opponents ghosts not created") end
+    pcall(function()
+        cy2.m:SetNavigationRuleExplicit(0, cy2.l); cy2.m:SetNavigationRuleExplicit(1, cy2.r)
+        cy2.l:SetNavigationRuleExplicit(1, cy2.m); cy2.r:SetNavigationRuleExplicit(0, cy2.m)
+    end)
+    for _, g in ipairs({ cy2.m, cy2.l, cy2.r }) do
+        th.set(g, { visible = false })
+        W.focusables[#W.focusables + 1] = g
+    end
+    W.cyclers.aitier = cy2
+    -- grid strip, 130 su under the last row: 12 class silhouettes (96 su, pitch 128) + one sentence (helpFoot)
+    V2.stripY = ry2 + 130
+    for i = 1, 12 do
+        V2.icons[i] = th.image(W.tctx, W.panel, { z = 3, visible = false,
+                                                  rect = localRect({ dx + 128 * (i - 1), V2.stripY, 96, 96 }) })
+    end
+    V2.stripText = th.text(W.tctx, W.panel, "helpFoot",
+        { z = 3, wrapW = dw, rect = localRect({ dx, V2.stripY + 120 }) })
+    U.log(TAG, "MODE view: detail column bottom %d, GRID header at y %d, row at %d, strip at %d", math.floor(bottom),
+        gy, ry, V2.stripY)
+end
+
+-- §7 list fallback: 12 C8 settings rows (x 128-2000 from y 560, pitch 102); their ghosts are W.opts (onOption, onFocus
+-- and the click poll keep working); the last row says "More (page n / m)" when the list is paged.
+local function buildListView()
+    local th, L = T(), L2.list
+    local V2 = { kind = "list" }
+    W.views.list = V2
+    W.opts, W.rows = {}, {}
+    for i = 1, L.n do
+        local idx = i
+        local r = th.settingsRow(W.tctx, W.panel, { L.x, L.y + L.pitch * (i - 1), L.w, L.h },
+            { geo = W.geo, id = "setup:opt" .. i, fn = function() M.onOption(idx) end, z = 3 })
+        if not (r and U.ok(r.ghost)) then error("list row " .. i .. " not built") end
+        r.show(false)
+        W.rows[i], W.opts[i] = r, r.ghost
+        W.focusables[#W.focusables + 1] = r.ghost
+    end
+end
+
+local VIEW_BUILD = { class = buildClassView, cond = buildCondView, mode = buildModeView, list = buildListView }
+
+local function hideView(kind)
+    local V2, th = W.views[kind], T()
+    if not V2 then return end
+    if kind == "list" then
+        for _, r in ipairs(W.rows) do r.show(false) end
+        return
+    end
+    for _, p in ipairs(V2.posters or {}) do p.show(false) end
+    if V2.panel then show(V2.panel, false) end
+    if V2.detail then V2.detail.show(false) end
+    for _, d in pairs(V2.details or {}) do d.show(false) end
+    if V2.header then V2.header.show(false) end
+    if V2.row then V2.row.show(false) end
+    if V2.row2 then V2.row2.show(false) end
+    for _, e in ipairs(V2.icons or {}) do th.set(e, { visible = false }) end
+    if V2.stripText then th.set(V2.stripText, { visible = false }) end
+end
+
+-- The view of kind ready (built now if needed). false = it failed (logged once): that step uses the list.
+function v2.ensureView(kind)
+    if W.views[kind] and not W.viewBroken[kind] then return true end
+    if W.viewBroken[kind] then return false end
+    local t0 = St.nowMs()
+    local ok, err = pcall(function()
+        if kind ~= "list" then ensurePosterGhosts() end
+        VIEW_BUILD[kind]()
+    end)
+    if not ok then
+        W.viewBroken[kind] = tostring(err)
+        pcall(hideView, kind)
+        W.views[kind] = nil
+        U.err(TAG, "UI v2 %s view not built (%s): that step uses the list", kind, tostring(err))
+        return false
+    end
+    hideView(kind)
+    W.views[kind].shown = false
+    U.log(TAG, "UI v2 %s view built (%.1f ms)", kind, St.nowMs() - t0)
+    return true
+end
+
+-- Only the view of this step shows (posters of one kind, or the list); the RACERS parts follow the step.
+local function showViews(step, view)
+    local kind = POSTER_KIND[step]
+    for k, V2 in pairs(W.views) do
+        local on = (view == "posters" and k == kind) or (view == "list" and k == "list")
+        if not on and V2.shown ~= false then hideView(k) end
+        V2.shown = on
+        if on and k ~= "list" then                         -- the posters show as renderPosters fills them
+            if V2.panel then show(V2.panel, true) end
+            if V2.detail then V2.detail.show(true) end
+            if V2.header then V2.header.show(true) end
+            if V2.row then V2.row.show(true) end
+            if V2.row2 then V2.row2.show(true) end
+            if V2.stripText then T().set(V2.stripText, { visible = true }) end
+        end
+    end
+    if W.posters and view ~= "posters" then
+        for _, g in ipairs(W.posters) do T().set(g, { visible = false }) end
+    end
+    for _, id in ipairs({ "grid", "aitier" }) do
+        local cy = W.cyclers[id]
+        if cy and not (view == "posters" and step == "mode") then
+            for _, g in ipairs({ cy.l, cy.m, cy.r }) do T().set(g, { visible = false }) end
+        end
+    end
+    local veh = step == "vehicles"
+    show(W.cardBox, veh and S.cards)
+    show(W.sinkHost, veh and S.cards)
+    show(W.vehRow, veh and not S.cards)
+end
+
+-- The classic VEHICLES columns on the v2 canvas: only when the RACERS cards cannot serve this page (V-RC-01).
+function v2.ensureVehRow()
+    if U.ok(W.vehRow) then return true end
+    local ok, err = pcall(function()
+        local row = newW(HBOX)
+        for i = 1, 4 do
+            local col = makeColumn(i)
+            hAdd(row, col.box, 1, pad(i > 1 and 12 or 0, 0, 0, 0))
+        end
+        v2.placeOn(W.panel, row, { L2.cards.x, L2.cards.y, 3584, 1300 }, 2)
+        W.vehRow = row
+    end)
+    if not ok then
+        U.err(TAG, "classic VEHICLES columns not built on the v2 page (%s)", tostring(err))
+        return false
+    end
+    U.log(TAG, "classic VEHICLES columns built on the v2 page (the RACERS cards are unavailable here)")
+    return true
+end
+
+---------------------------------------------------------------------------------------------------- v2 posters
+-- §7.4 V-FIN-07: a CONDITIONS poster after the first through a MID of MI_UI_Squircle_TextureMask on the art image
+-- (TileArt = the tile, Desaturation 1, Color Overlay Amount 1, TileColor; Texture = a plain fill: the window clips).
+-- Applied once the tile is on the image (theme sized it to cover the window). UiCondTint = false: untinted art.
+local tintFailed = nil
+local function applyTint(e, path, colour)
+    if tintFailed then return false end
+    local ok, err = pcall(function()
+        local tex, parent, kml = U.obj(path), U.obj(T().MAT.TextureMask), U.cdo(KML)
+        if not (U.ok(tex) and U.ok(parent) and U.ok(kml)) then
+            error("texture, MI_UI_Squircle_TextureMask or KismetMaterialLibrary not found")
+        end
+        -- CreateDynamicMaterialInstance(WorldContextObject, Parent, OptionalName, CreationFlags) (cards.lua, vpreview)
+        local mid = kml:CreateDynamicMaterialInstance(U.world(), parent, U.fname("None"), MID_TRANSIENT)
+        if not U.ok(mid) then error("CreateDynamicMaterialInstance failed") end
+        local fillTex = U.obj(T().TEX.SolidFill)
+        mid:SetTextureParameterValue(U.fname("TileArt"), tex)                    -- (Name, Texture)
+        if U.ok(fillTex) then mid:SetTextureParameterValue(U.fname("Texture"), fillTex) end
+        mid:SetScalarParameterValue(U.fname("Desaturation"), 1.0)                 -- (Name, Float)
+        mid:SetScalarParameterValue(U.fname("Color Overlay Amount"), 1.0)
+        mid:SetScalarParameterValue(U.fname("ImageScale"), 1.0)
+        mid:SetScalarParameterValue(U.fname("ImageXOffset"), 0.5)
+        mid:SetScalarParameterValue(U.fname("ImageYOffset"), 0.5)
+        local cw, ch = type(e.c) == "table" and e.c.w, type(e.c) == "table" and e.c.h   -- the image's cover size
+        if cw and ch then
+            mid:SetScalarParameterValue(U.fname("In Width Override"), cw)
+            mid:SetScalarParameterValue(U.fname("In Height Override"), ch)
+        end
+        mid:SetVectorParameterValue(U.fname("TileColor"), { R = colour.R, G = colour.G, B = colour.B, A = 1 })
+        e.i:SetBrushFromMaterial(mid)                      -- the MID's only referencer: set in the same tick (GC rule)
+        e.mid = mid
+    end)
+    if ok then
+        U.logOnce("setup.tint", TAG, "condition tint: MI_UI_Squircle_TextureMask MID on the CONDITIONS poster art "
+            .. "(V-FIN-07: the second poster must read as a duotone of the condition's colour; fallback UiCondTint = "
+            .. "false)")
+        return true
+    end
+    tintFailed = tostring(err)
+    U.warn(TAG, "condition tint unavailable (%s): untinted condition art (V-FIN-07 fallback)", tintFailed)
+    return false
+end
+
+-- FAST: the tints wait for their poster's art (theme loads textures within the per-tick budget).
+local function tintTick()
+    local V2 = W.views.cond
+    if not (V2 and V2.shown) then return end
+    for i = 1, 4 do
+        local want, p = V2.tint[i], V2.posters[i]
+        local e = p and p.art
+        if want and e and U.ok(e.i) and type(e.c) == "table" and e.c.tex == want.art then
+            local sig = want.art .. "|" .. tostring(want.colour)
+            if V2.midSig[i] ~= sig then
+                if applyTint(e, want.art, want.colour) then V2.midSig[i] = sig else V2.tint[i] = nil end
+            end
+        end
+    end
+end
+
+function v2.fillPoster(kind, i, it)
+    local th, V2, L = T(), W.views[kind], L2[kind]
+    local p = V2.posters[i]
+    if kind == "class" then
+        local cls = it.cls
+        local art, pl = v2.classArt(cls)
+        p.set({ art = art, title = (cls.label:gsub(" ", "\n")),
+                -- 0.12.0: top-left; bottom-right it covered the end of a one-word name (LANDSPEEDER, live 2026-10-10)
+                check = (S.cls == cls) and { 60, 60, 64 } or false })
+        th.set(V2.sil[i], { tex = cls.icon, visible = true })
+        th.set(V2.line[i], { text = string.format("UP TO %d RACERS", V.maxRacers(cls)),
+                             colour = th.PLANET[pl] or th.COL.BEIGE })
+        th.set(V2.cap[i], { text = v2.classCaption(cls) })
+    elseif kind == "cond" then
+        local tag, e = it.tag, S.track
+        local art = trackArt(e)
+        local tint = (i > 1 and opt("UiCondTint", true) ~= false) and condTint(tag) or nil
+        if not tint and p.art and p.art.mid then              -- a MID from an earlier track: the plain tile again
+            local tex = U.obj(art)
+            if U.ok(tex) and pcall(function() p.art.i:SetBrushFromTexture(tex, false) end) then
+                p.art.mid, V2.midSig[i] = nil, nil
+            end
+        end
+        p.set({ art = art, title = prettyCond(tag), check = (S.cond == tag) and { L.w - 60, 60, 64 } or false })
+        th.set(V2.line[i], { text = S.planet and S.planet.name or "",
+                             colour = tint or (S.planet and th.PLANET[S.planet.key]) or th.COL.BEIGE })
+        th.set(V2.cap[i], { text = trackCaption(e) })
+        V2.tint[i] = tint and { art = art, colour = tint } or nil
+    elseif kind == "mode" then
+        local m = it.mode
+        local mv = MODE_V2[m.key] or {}
+        local art = type(mv.art) == "table" and mv.art[S.cls and S.cls.key or "Car"] or mv.art
+        -- 0.12.0: the light strips get a band of their own colour behind the title (theme.poster scrim): the art's
+        -- dark shapes ran under the DEEP title (FULL GRID RACE / MIXED-CLASS RACE, live 2026-10-10)
+        p.set({ art = art and tp("MainMenu", art) or false, title = m.label, titleCol = th.COL[mv.ink or "BEIGE"],
+                scrim = mv.scrim and th.hex(mv.scrim) or false, check = S.mode == m })
+    end
+end
+
+-- Posters for this step's items (up to 4) + their ghosts; -> the ghost to focus.
+local function renderPosters(step, sel)
+    local kind = POSTER_KIND[step]
+    local V2, th = W.views[kind], T()
+    local n = math.min(#S.items, 4)
+    W.posterMap = {}
+    if V2.details then                                     -- CONDITIONS: the detail column beside the last poster
+        local want = V2.details[(n >= 3) and 3 or 2]
+        if want ~= V2.detail then V2.detail.show(false); V2.detail = want end
+        V2.detail.show(true)
+    end
+    for i = 1, 4 do
+        local p, g = V2.posters[i], W.posters[i]
+        if i <= n then
+            U.try(TAG, v2.fillPoster, kind, i, S.items[i])
+            p.show(true)
+            th.set(g, { rect = localRect(posterRect(kind, i)), visible = true })
+            W.posterMap[i] = i
+        else
+            p.show(false)
+            th.set(g, { visible = false })
+        end
+        p.focus(false)
+    end
+    V2.painted = nil
+    return W.posters[math.max(1, math.min(n, tonumber(sel) or 1))]
+end
+
+-- FAST: the painted poster = the hovered ghost, else the focused one (one focus look, §2.6).
+local function paintPosters()
+    local V2 = W.views[POSTER_KIND[S.step] or ""]
+    if not (V2 and W.posters) then return end
+    local hov = ui().hovered
+    local painted
+    if type(hov) == "function" then
+        for i, g in ipairs(W.posters) do
+            if W.posterMap[i] and hov(g) then painted = i; break end
+        end
+    end
+    if not painted then
+        for i, g in ipairs(W.posters) do
+            if W.posterMap[i] and U.same(S.lastFocus, g) then painted = i; break end
+        end
+    end
+    if V2.painted == painted then return end
+    V2.painted = painted
+    for i, p in ipairs(V2.posters) do p.focus(i == painted) end
+    if painted and not W.ghostLogged then
+        W.ghostLogged = true
+        U.log(TAG, "poster ghost %d holds P1's focus / hover: painted look on its poster (V-FIN-04)", painted)
+    end
+end
+
+---------------------------------------------------------------------------------------------------- v2 previews
+-- §7.1: the info panel follows the focused class.
+function v2.previewClass(cls)
+    local V2 = W.views.class
+    if not V2 or V2.shownClass == cls.key then return end
+    V2.shownClass = cls.key
+    local info = V.classInfo(cls)
+    if V2.sub then pcall(function() V2.sub:SetLabel(U.ftext(info.name)) end)   -- SetLabel(Text): Label + both texts
+    elseif V2.subText then pcall(function() V2.subText:SetText(U.ftext(info.name)) end) end
+    local intro = (info.introRich ~= nil and info.introRich ~= "") and info.introRich or (info.intro or info.desc or "")
+    pcall(function() V2.intro:SetText(U.ftext(intro)) end)
+    local runs = opt("UiTraitGlyph", "decorator") == "runs"
+    for i = 1, 3 do
+        local t, tr = V2.traits[i], (info.traitList or {})[i]
+        if t then
+            if tr then
+                pcall(function() t.w.Txt_Title:SetText(U.ftext(tr.name)) end)
+                if runs and tr.action then
+                    pcall(function() t.w.RT_Desc:SetVisibility(C.E.Vis.Collapsed) end)
+                    U.try(TAG, v2.fillRuns, t, tr, V2.traitW)
+                else
+                    if t.box then pcall(function() t.box:SetVisibility(C.E.Vis.Collapsed) end) end
+                    pcall(function() t.w.RT_Desc:SetVisibility(C.E.Vis.HitTestInvisible) end)
+                    pcall(function() t.w.RT_Desc:SetText(U.ftext(tr.rich ~= "" and tr.rich or tr.plain)) end)
+                end
+                pcall(function() t.w:SetVisibility(C.E.Vis.HitTestInvisible) end)
+            else
+                pcall(function() t.w:SetVisibility(C.E.Vis.Collapsed) end)
+            end
+        end
+    end
+end
+
+-- V-FIN-08 fallback (UiTraitGlyph = "runs"): the trait text as the mod's own run in the trait's VB_DescLayout, "Use"
+-- + the X glyph on an AMBER disc + "to drift sharply", the rest of the sentence on the lines below (one line of runs,
+-- cut at a word that would pass the box).
+function v2.fillRuns(t, tr, width)
+    if not t.box then
+        local box = newW(VBOX)
+        local okB = pcall(function() t.w.VB_DescLayout:AddChildToVerticalBox(box) end)
+        if not okB then error("VB_DescLayout not reachable") end
+        t.box = box
+    end
+    pcall(function() t.box:ClearChildren() end)
+    pcall(function() t.box:SetVisibility(C.E.Vis.HitTestInvisible) end)
+    local th = T()
+    local line = newW(HBOX)
+    vAdd(t.box, line, pad(0, 4, 0, 0), C.E.HAlign.Left)
+    local used, rest = 0, nil
+    for _, r in ipairs(tr.runs or {}) do
+        if rest then
+            rest = rest .. (r.text or (r.key and r.key) or "")
+        elseif r.text then
+            local cur = ""
+            for sp, word in r.text:gmatch("(%s*)(%S+)") do
+                if rest then rest = rest .. sp .. word
+                elseif used + th.textWidth(cur .. sp .. word, th.ROLE.body) > width then rest = word
+                else cur = cur .. sp .. word end
+            end
+            if not rest and r.text:match("%s$") then cur = cur .. " " end
+            if cur ~= "" then
+                local tb = roleText("body")
+                pcall(function() tb:SetText(U.ftext(cur)) end)
+                hAdd(line, tb)
+                used = used + th.textWidth(cur, th.ROLE.body)
+            end
+        elseif r.glyph then
+            local sb, ov = sizeBox(40, 40), newW(OVER)
+            sb:AddChild(ov)
+            local disc, gl = newW(IMAGE), newW(IMAGE)
+            local dt, gt = V.texture(th.TEX.CircleFill), V.texture(th.glyph(r.glyph))
+            if dt then pcall(function() disc:SetBrushFromTexture(dt, false) end) end
+            pcall(function() disc:SetColorAndOpacity({ R = 0.7454, G = 0.4125, B = 0.0802, A = 1 }) end)   -- AMBER
+            if gt then pcall(function() gl:SetBrushFromTexture(gt, false) end) end
+            pcall(function() gl:SetColorAndOpacity({ R = 0.0160, G = 0.0160, B = 0.0152, A = 1 }) end)     -- INK
+            for _, im in ipairs({ disc, gl }) do
+                local s = ov:AddChildToOverlay(im)
+                if U.ok(s) then pcall(function() s:SetHorizontalAlignment(0); s:SetVerticalAlignment(0) end) end
+                if im == gl and U.ok(s) then pcall(function() s:SetPadding(pad(6, 6, 6, 6)) end) end
+            end
+            hAdd(line, sb, nil, pad(6, 4, 6, 0))
+            used = used + 52
+        end
+    end
+    if rest and rest ~= "" then
+        local tb = roleText("body", { wrap = width })
+        pcall(function() tb:SetText(U.ftext(rest)) end)
+        vAdd(t.box, tb)
+    end
+end
+
+function v2.previewCond(tag)
+    local V2 = W.views.cond
+    if not (V2 and V2.detail and S.track) then return end
+    V2.detail.set({ title = prettyCond(tag), body = condFacts(S.track, tag), foot = condFoot(S.track, tag),
+                    rich = false })
+end
+
+function v2.previewMode(m)
+    local V2 = W.views.mode
+    if not V2 then return end
+    local mv = MODE_V2[m.key] or {}
+    local text = mv.text
+    if type(text) == "function" then text = text(S.cls) end
+    local foot = (m.grid == "max" and S.cls) and string.format("Up to %d racers for the %s.", V.maxRacers(S.cls),
+        string.lower(S.cls.label)) or ""
+    V2.detail.set({ title = m.label, body = text or m.desc, foot = foot })
+    v2.renderGrid(m)
+end
+
+-- The strips' Right rule reaches the first GRID row that takes focus (Racers: "max" grids only; Opponents: speeders).
+-- Racers Down -> Opponents -> BACK; Up the other way, the top row up to the first strip.
+local function gridNav(on, on2)
+    local cy, cy2 = W.cyclers.grid, W.cyclers.aitier
+    if not (cy and W.posters) then return end
+    local th = T()
+    local first = (on and cy.m) or (on2 and cy2 and cy2.m) or nil
+    for i = 1, 4 do
+        navReset(W.posters[i], { 1 })
+        if first and W.posterMap[i] then th.nav(W.posters[i], "right", first) end
+    end
+    navReset(cy.m, { 2, 3 })
+    if cy2 then navReset(cy2.m, { 2, 3 }) end
+    if on then
+        th.nav(cy.m, "down", (on2 and cy2) and cy2.m or W.back)
+        th.nav(cy.m, "up", W.posters[1])
+    end
+    if on2 and cy2 then
+        th.nav(cy2.m, "down", W.back)
+        th.nav(cy2.m, "up", on and cy.m or W.posters[1])
+    end
+end
+
+-- §7.5 GRID row + grid strip for the focused mode (range humans .. class limit, unchanged stepGrid).
+function v2.renderGrid(m)
+    local V2 = W.views.mode
+    if not V2 then return end
+    m = m or S.focusMode or S.mode
+    local th = T()
+    local maxGrid = m ~= nil and m.grid == "max"
+    local h = humansCount()
+    local cls = S.cls or V.CLASSES[1]
+    local value = maxGrid and string.format("%d  (%d AI)", S.grid, math.max(0, S.grid - h)) or "Set by the game"
+    V2.row.set({ label = "Racers", value = value, kind = maxGrid and "cycle" or "value", enabled = maxGrid,
+                 arrows = "always" })
+    local on = maxGrid and S.step == "mode" and S.view == "posters"
+    local cy = W.cyclers.grid
+    if cy then
+        th.set(cy.m, { visible = on })
+        th.set(cy.l, { visible = on })
+        th.set(cy.r, { visible = on })
+        if on then                                         -- the arrow ghosts over the painted arrows (mouse clicks)
+            local r = V2.rowRect
+            local right = r[1] + r[3] - 39
+            local vw = th.textWidth(value, th.ROLE.rowValue)
+            th.set(cy.r, { rect = localRect({ right - 27 - 18, r[2], 64, r[4] }) })
+            th.set(cy.l, { rect = localRect({ right - 27 - 18 - vw - 18 - 27 - 18, r[2], 64, r[4] }) })
+        end
+    end
+    -- 0.12.0 (task #31): the Opponents row (speeders: the tier list; pods: "Standard", not focusable)
+    local tierI, tiers = M.aiTierIndex()
+    local speeder = tierI ~= nil and #tiers > 1
+    local tierText = M.aiTierText()
+    if V2.row2 then
+        V2.row2.set({ label = "Opponents", value = tierText, kind = speeder and "cycle" or "value", enabled = speeder,
+                      arrows = "always" })
+    end
+    local on2 = speeder and S.step == "mode" and S.view == "posters"
+    local cy2 = W.cyclers.aitier
+    if cy2 then
+        th.set(cy2.m, { visible = on2 })
+        th.set(cy2.l, { visible = on2 })
+        th.set(cy2.r, { visible = on2 })
+        if on2 then
+            local r = V2.row2Rect
+            local right = r[1] + r[3] - 39
+            local vw = th.textWidth(tierText, th.ROLE.rowValue)
+            th.set(cy2.r, { rect = localRect({ right - 27 - 18, r[2], 64, r[4] }) })
+            th.set(cy2.l, { rect = localRect({ right - 27 - 18 - vw - 18 - 27 - 18, r[2], 64, r[4] }) })
+        end
+    end
+    if V2.gridOn ~= on or V2.tierOn ~= on2 then
+        V2.gridOn, V2.tierOn = on, on2
+        gridNav(on, on2)
+        if not on then V2.rowFocus = nil; V2.row.set({ focused = false }) end
+        if not on2 and V2.row2 then V2.row2Focus = nil; V2.row2.set({ focused = false }) end
+    end
+    -- the strip: humans INK, AI INK @0.32 (MIXED 4 + 4 + 4, ELIMINATOR 12 mixed); then one sentence
+    local list, key = {}, m and m.key or "race"
+    local trio = { V.classByKey("Car"), V.classByKey("Bike"), V.classByKey("Skimmer") }
+    if key == "mixed" then
+        for _, c in ipairs(trio) do for _ = 1, 4 do list[#list + 1] = c end end
+    elseif key == "eliminator" then
+        for _ = 1, 4 do for _, c in ipairs(trio) do list[#list + 1] = c end end
+    else
+        local n = maxGrid and S.grid or V.maxRacers(cls)
+        for _ = 1, math.min(12, n) do list[#list + 1] = cls end
+    end
+    local humansLeft = h
+    local ink, ai = th.COL.INK, th.alpha(th.COL.INK, 0.32)
+    for i = 1, 12 do
+        local c = list[i]
+        if c then
+            local human = humansLeft > 0 and c == cls
+            if human then humansLeft = humansLeft - 1 end
+            th.set(V2.icons[i], { tex = c.icon, colour = human and ink or ai, visible = true })
+        else
+            th.set(V2.icons[i], { visible = false })
+        end
+    end
+    local players = string.format("%d player%s", h, h == 1 and "" or "s")
+    local text
+    if key == "fullgrid" then
+        text = players .. "; the game fills the rest of the grid."
+    elseif key == "mixed" or key == "eliminator" then
+        text = string.format("%s and %d AI in mixed classes.", players, math.max(0, #list - h))
+    else
+        local nAi = math.max(0, #list - h)
+        text = (nAi > 0) and string.format("%s and %d AI, all in %s.", players, nAi, PLURAL[cls.key] or "the class")
+            or string.format("%s, all in %s.", players, PLURAL[cls.key] or "the class")
+    end
+    th.set(V2.stripText, { text = text, visible = S.step == "mode" })
+end
+
+-- FAST: the GRID row's RUST pill follows its three ghosts (focus or hover).
+local function paintGrid()
+    local V2 = W.views.mode
+    if not (V2 and V2.row and W.cyclers.grid) then return end
+    local hov = ui().hovered
+    local function lit(cy, active)
+        if not (cy and active) then return false end
+        for _, g in ipairs({ cy.m, cy.l, cy.r }) do
+            if U.same(S.lastFocus, g) or (type(hov) == "function" and hov(g)) then return true end
+        end
+        return false
+    end
+    local on = lit(W.cyclers.grid, V2.gridOn)
+    if V2.rowFocus ~= on then
+        V2.rowFocus = on
+        V2.row.set({ focused = on })
+    end
+    if V2.row2 then                                        -- 0.12.0: the Opponents row
+        local on2 = lit(W.cyclers.aitier, V2.tierOn)
+        if V2.row2Focus ~= on2 then
+            V2.row2Focus = on2
+            V2.row2.set({ focused = on2 })
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------------------- v2 list
+function v2.fillRows()
+    local n, total = #W.opts, #S.items
+    if n == 0 then return end
+    local per = total > n and (n - 1) or n
+    local pages = math.max(1, math.ceil(total / per))
+    if S.page >= pages or S.page < 0 then S.page = 0 end
+    local first = S.page * per
+    W.optMap = {}
+    for i = 1, n do
+        local r, idx = W.rows[i], first + i
+        if i <= per and idx <= total then
+            local it = S.items[idx]
+            local row = it.row or { titleCase(it.label), "" }
+            r.set({ label = row[1], value = row[2] or "", kind = "value", enabled = true, focused = false })
+            r.show(true)
+            W.optMap[i] = idx
+        elseif i == n and total > n then
+            r.set({ label = string.format("More (page %d / %d)", S.page + 1, pages), value = "", kind = "action",
+                    enabled = true, focused = false })
+            r.show(true)
+            W.optMap[i] = "more"
+        else
+            r.show(false)
+        end
+    end
+end
+
+-- FAST: a row's RUST pill follows its ghost (P1's focus, from the focus scan, or the mouse).
+local function paintRows()
+    local hov = ui().hovered
+    for i, r in ipairs(W.rows) do
+        if W.optMap and W.optMap[i] ~= nil then
+            local on = U.same(S.lastFocus, r.ghost) or (type(hov) == "function" and hov(r.ghost))
+            if r.st.focused ~= on then r.set({ focused = on }) end
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------------------- v2 frame state
+-- §6.3: done = tick + value, current = RUST pill, upcoming = GREY; CONDITIONS only when the chosen track asks for it.
+function v2.renderSteps()
+    if not W.steps then return end
+    local cur = (S.step == "vehicles") and "racers" or S.step
+    local list = {}
+    local function add(id, name, done) list[#list + 1] = { id = id, name = name, done = done } end
+    add("class", "CLASS", S.cls and S.cls.label)
+    add("planet", "PLANET", S.planet and S.planet.name)
+    add("track", "TRACK", S.track and (S.track.name .. (S.track.rev and " · REV" or "")))
+    if S.track and #(S.track.conds or {}) > 1 and opt("SetupAskCondition", true) ~= false then
+        add("cond", "CONDITIONS", (S.cond ~= nil and S.cond ~= "") and prettyCond(S.cond) or nil)
+    end
+    add("mode", "MODE", S.mode and S.mode.label)
+    add("racers", "RACERS", nil)
+    local ci = 1
+    for i, it in ipairs(list) do if it.id == cur then ci = i end end
+    local items = {}
+    for i, it in ipairs(list) do
+        local st = (i < ci) and "done" or ((i == ci) and "current" or "next")
+        items[#items + 1] = { label = (st == "done" and it.done) or it.name, state = st }
+    end
+    W.steps.render(items)
+end
+
+-- §6.4: BACK always; SAVE AND RETURN / START RACE on RACERS only with P1 in mouse + keyboard mode (pad: P1's READY rows
+-- on the card) or when the classic columns serve the step (no READY rows there).
+function v2.renderCommands()
+    local c = W.cmd
+    if not c then return end
+    local mode = T().inputMode()                           -- debounced by theme with its own clock (V-FIN-11)
+    local veh = S.active and S.step == "vehicles"
+    local ss = veh and (mode == "mouse" or not S.cards)
+    if W.cmdSS ~= ss and not ss and W.cmdForced then c.look(W.cmdForced, nil); W.cmdForced = nil end
+    W.cmdSS = ss
+    local sig = veh and (tostring(ss) .. tostring(mode) .. tostring(S.cards)) or nil
+    if W.cmdSig ~= sig then
+        W.cmdSig = sig
+        if veh then
+            U.log(TAG, "command row: %s (P1 input %s%s) (V-FIN-11: START RACE is never shown twice)",
+                ss and "SAVE AND RETURN, START RACE, BACK" or "BACK only", tostring(mode),
+                S.cards and "" or ", classic columns")
+        end
+    end
+    c.show({ back = true, start = ss, save = ss })
+    if W.pillReady and W.pillReadyMode ~= mode then v2.postAllReady(mode) end
+end
+
+-- §6.5 "ALL READY · P1: (A) TO START" (pad) / "ALL READY · P1: START RACE" (mouse), sticky, one AMBER pip per player.
+function v2.postAllReady(mode)
+    if not W.pill then return end
+    mode = mode or T().inputMode()
+    local text = (mode == "mouse") and "ALL READY · P1: START RACE" or "ALL READY · P1: (A) TO START"
+    local pips = {}
+    for i = 1, math.min(4, #localPlayers()) do pips[i] = true end
+    W.pillReady, W.pillReadyMode = text, mode
+    W.pill.post(text, { sticky = true, prio = 2, key = "allready", pips = pips })
+end
+
+-- The status pill's variant by the text (§6.5: refusals and errors warn), for messages without opts.
+local WARN_WORDS = { "FAILED", "ERROR", "REFUSED", "TIMED OUT", "UNAVAILABLE", "NOT AVAILABLE", "NOT FOUND", "CANNOT",
+                     "ONLY WORKS", "ONLY IN THE", "ONLY FROM", " FIRST", "DISCONNECT TO", "NO FREE", "NO TRACK",
+                     "NO PLANET", "NOT JOINED", "NOT READY", "GAVE UP", "DROPPED", "NO MENU", "NOT ACTIVE", "MUST BE",
+                     "HAS NO CONTROLLER", "CONTROLLER DISCONNECTED", "NO GUEST", "INCOMPLETE", "CHOOSE CLASS",
+                     "NOT LISTENING", "GRID HAS" }
+local function warnText(u)
+    for _, w in ipairs(WARN_WORDS) do if u:find(w, 1, true) then return true end end
+    return false
+end
+
+-- "P1 PILOT · P2 PERKS": the 0.11.0 RACERS progress line, dropped on the v2 page (§6.5: every card's rail shows it).
+local function progressText(u)
+    local any = false
+    for part in (u .. " · "):gmatch("(.-) · ") do
+        if not part:match("^P%d [A-Z]+$") then return false end
+        any = true
+    end
+    return any
+end
+
+-- The page's status pill (§6.5). opts given (this file's gate / class-reset texts, racers' keyed entries): posted as
+-- given (text "" + key = that entry cleared). Without opts (St.emit("status") through lobby.setStatus, racers' 0.11.0
+-- line): one entry per "   ·   " part, the RACERS progress summary dropped, "ALL READY" sticky with pips, the join hint
+-- posted once per change, LAUNCHING sticky, refusals and errors warn, the rest 5 s. The echo of a text this page just
+-- posted (St.emit -> lobby.setStatus -> setup.setStatus) is dropped.
+pillFeed = function(text, o)
+    if not (W and W.v2 and W.pill and S.active) then return end
+    text = tostring(text or "")
+    local now, p = M.realMs(), W.pill
+    local echo = text == W.pillLast and now - (W.pillLastAt or -1e9) < 300
+    W.pillLast, W.pillLastAt = text, now
+    if type(o) == "table" then
+        if text == "" then p.clear(o.key) else p.post(text, o) end
+        return
+    end
+    if echo or text == "" then return end
+    local parts, racersLine, ready, join = {}, false, false, false
+    for part in (text .. "   ·   "):gmatch("(.-)   ·   ") do parts[#parts + 1] = part end
+    for _, part in ipairs(parts) do
+        local u = string.upper(part)
+        if u:find("^ALL READY") then
+            racersLine, ready = true, true
+            if not W.pillReady then v2.postAllReady() end
+        elseif progressText(u) then
+            racersLine = true
+        elseif u:find("PRESS", 1, true) and u:find("TO JOIN", 1, true) then
+            join = true
+            local t = part:gsub("PRESS A TO JOIN", "PRESS (A) TO JOIN")
+            if t ~= W.pillJoin then W.pillJoin = t; p.post(t, { key = "join" }) end
+        elseif u:find("^LAUNCHING") then
+            p.post(part, { sticky = true, prio = 1, key = "launch" })
+        else
+            p.post(part, { warn = warnText(u) })
+        end
+    end
+    if racersLine and not ready and W.pillReady then W.pillReady = nil; p.clear("allready") end
+    if racersLine and not join then W.pillJoin = nil end
+end
+
+-- The RACERS-only entries go when the step is left.
+local function clearRacersPill()
+    if not W.pill then return end
+    W.pillReady, W.pillJoin = nil, nil
+    W.pill.clear("allready")
+    W.pill.clear("join")
+    W.pill.clear("gate")
+end
+
+---------------------------------------------------------------------------------------------------- v2 navigation
+-- P1 reaches BACK with Down from the lowest focus targets (§6.4: an explicit rule from those ghosts to BACK's).
+local function navRules(step, view)
+    local back, th = W.back, T()
+    if not U.ok(back) then return end
+    if view == "posters" and W.posters then
+        local n = math.min(#S.items, 4)
+        for i = 1, 4 do navReset(W.posters[i]) end
+        if step == "mode" then
+            if n > 0 then th.nav(W.posters[n], "down", back) end
+            local V2 = W.views.mode
+            gridNav(V2 ~= nil and V2.gridOn == true)
+        else
+            for i = 1, n do th.nav(W.posters[i], "down", back) end
+        end
+    elseif view == "list" then
+        local last
+        for i, g in ipairs(W.opts) do
+            navReset(g, { 3 })
+            if W.optMap and W.optMap[i] ~= nil then last = g end
+        end
+        if last then th.nav(last, "down", back) end
+    elseif view == "cmap" and CM and type(CM.navDown) == "function" then
+        pcall(CM.navDown, back)
+    end
+end
+
+---------------------------------------------------------------------------------------------------- v2 step
+function v2.showStep(step)
+    if step ~= "vehicles" then
+        racersLeave("step " .. step)                       -- 0.10.0: the cards' images first, then their bays
+        releasePreviews("step " .. step)
+    end
+    S.step, S.page, S.lastFocus, S.previewed, S.focusMode = step, 0, nil, nil, nil
+    local veh = step == "vehicles"
+    S.cards = veh and cardsWanted() and cardsReady()
+    local sel, view = 1, nil
+    if veh then
+        view = S.cards and "cards" or "columns"
+    else
+        sel = STEPS[step]() or 1
+        if step == "planet" or step == "track" then
+            view = (CM and CM.usable(step) and #S.items > 0) and "cmap" or "list"
+        else
+            local most = (step == "cond") and 3 or 4         -- CONDITIONS: up to 3 posters beside the detail column
+            view = (#S.items <= most and v2.ensureView(POSTER_KIND[step])) and "posters" or "list"
+        end
+        if view == "list" and not v2.ensureView("list") then
+            U.err(TAG, "%s step: no view could be built (see the log above)", tostring(step))
+        end
+    end
+    S.view = view
+    if CM then pcall(CM.setView, view == "cmap" and step or nil) end
+    if view == "cmap" and step == "track" then M.stopVideo("run map") end   -- the run map has no video area
+    setBackground((step == "planet" and view == "cmap") and "map" or "hub")
+    showViews(step, view)
+    local target
+    if veh then
+        M.stopVideo("vehicles step")
+        S.builds = V.builds(S.cls.arch)
+        S.startConfirmUntil, S.startDormant = 0, nil
+        W.pillJoin = nil
+        if S.cards then target = enterCards() end
+        if not S.cards then                                -- classic columns (the cards failed just now or before)
+            S.view = "columns"
+            show(W.cardBox, false)
+            show(W.sinkHost, false)
+            if v2.ensureVehRow() then
+                show(W.vehRow, true)
+                renderColumns()
+                target = W.cols[1] and W.cols[1].vehCy and W.cols[1].vehCy.m or nil
+            end
+        end
+    else
+        clearRacersPill()
+        if view == "cmap" then
+            local okC, t = pcall(function()
+                if step == "planet" then return CM.showPlanets(S.planets, sel) end
+                return CM.showTracks({ planet = S.planet, tracks = S.tracks, sel = sel, isPod = S.cls.arch == 1 })
+            end)
+            if okC and U.ok(t) then
+                target = t
+            else
+                pcall(CM.markBroken, step, okC and "no focus target" or t)
+                view = "list"
+                S.view = "list"
+                pcall(CM.setView, nil)
+                setBackground("hub")
+                if v2.ensureView("list") then showViews(step, view) end
+            end
+        end
+        if view == "posters" then target = renderPosters(step, sel) end
+        if view == "list" then
+            fillOptions()
+            target = optionFor(sel) or W.back
+        end
+        if S.items[sel] then
+            U.try(TAG, S.items[sel].preview)
+            S.previewed = sel
+        end
+        navRules(step, view)
+        if step == "class" and (S.planet or S.track) then  -- §6.5 (normal, 5 s)
+            pillFeed("CHANGING THE CLASS RESETS PLANET AND TRACK", { key = "classreset" })
+        end
+    end
+    v2.renderSteps()
+    v2.renderCommands()
+    M.focus(target)
+    if U.ok(target) then v2.noteFocus(target) end
+    U.dbg(TAG, "step %s (%d items, %s, UI v2)", step, #S.items, tostring(S.view))
+end
+
+-- FAST (pollNav, every step): the command row's slots by P1's input mode and its painted focus, the status pill's
+-- timers, the painted focus of the posters / rows / GRID row, the condition tints.
+function v2.poll(p1)
+    if not (W and W.v2 and S.active) then return end
+    v2.renderCommands()
+    if W.cmd then W.cmd.poll(p1) end
+    if W.pill then W.pill.tick() end
+    if S.view == "posters" then
+        paintPosters()
+        if S.step == "mode" then paintGrid() end
+        if S.step == "cond" then tintTick() end
+    elseif S.view == "list" then
+        paintRows()
+    end
+end
+
+-- theme.forget (a phase other than FRONTEND / LAUNCHING / TRANSIT) kills every element of the page even when menu_tab
+-- keeps that page: T.set on a dead element returns nil. M.open rebuilds such a page.
+function v2.alive()
+    if not (W and W.v2) then return true end
+    local probe = (W.bg and (W.bg.hub or W.bg.map)) or (W.title and W.title.e)
+    if not probe then return true end
+    return T().set(probe, {}) ~= nil
+end
+
+function v2.onOpen()
+    v2.measure("open")
+    W.cmdForced, W.cmdSS, W.cmdSig, W.pillReady, W.pillJoin, W.bgKind = nil, nil, nil, nil, nil, nil
+    if W.pill then W.pill.clear() end
+end
+
+function v2.onClose()
+    if W.cmdForced and W.cmd then W.cmd.look(W.cmdForced, nil) end
+    W.cmdForced, W.cmdSS, W.cmdSig, W.pillReady, W.pillJoin = nil, nil, nil, nil, nil
+    if W.pill then W.pill.clear() end
+end
+end   -- of the UI v2 block (v2.* and pillFeed are what the rest of the file uses)
+
 function M.showStep(step)
     if not W or not STEPS[step] and step ~= "vehicles" then return end
+    if W.v2 then return v2.showStep(step) end              -- 0.12.0 UI v2 page
     if step ~= "vehicles" then
         racersLeave("step " .. step)                       -- 0.10.0: the cards' images first, then their bays
         releasePreviews("step " .. step)                   -- the bays exist only in the VEHICLES step
@@ -1704,7 +3263,7 @@ function M.makeChoice()
         players = (okP and type(r) == "table") and r or {}
         local p1 = players[1]
         local okB, base = U.try(TAG, function()
-            return U.mod("perkapply").launchBase(S.cls.arch, p1 and p1.pilotId or nil)
+            return U.mod("perkapply").launchBase(S.cls.arch, p1 and p1.pilotId or nil, M.aiTierPath())
         end)
         if okB and U.ok(base) then
             build = base
@@ -1719,7 +3278,8 @@ function M.makeChoice()
     local builder = U.mod("builder")
     if not builder.isValid(c) then return nil, "RACE INCOMPLETE (CLASS, MODE, TRACK OR BUILD NOT FOUND)" end
     c.setup = { classKey = S.cls.key, arch = S.cls.arch, modeKey = S.mode.key, single = S.mode.single,
-                grid = S.mode.grid, maxRacers = S.grid, flow = S.cards and "cards" or "classic", players = {} }
+                grid = S.mode.grid, maxRacers = S.grid, flow = S.cards and "cards" or "classic", players = {},
+                aiTierPath = S.cards and M.aiTierPath() or nil }   -- 0.12.0 "Opponents" (cards flow; classic: own builds)
     if S.cards then
         c.setup.players = players
     else
@@ -1760,6 +3320,13 @@ local function cardsBase(build, arch)
     if path == "" then return false end
     local okB, base = pcall(function() return U.mod("perkapply").basePath(arch) end)
     if okB and path == base then return true end
+    -- 0.12.0: an opponents' tier build (RACE SETUP > MODE "Opponents") is a cards base too
+    if tonumber(arch) ~= 1 then
+        local okL, list = pcall(V.builds, arch)
+        if okL and type(list) == "table" then
+            for _, b in ipairs(list) do if b.path == path then return true end end
+        end
+    end
     if opt("PerkLaunchBase", "zero") == "pilot" then
         local okD, D = pcall(U.mod, "perkdata")
         if okD and type(D) == "table" and type(D.STYLES) == "table" then
@@ -1794,6 +3361,7 @@ local function racersFromSettings(s, c, cls)
         end
     end
     s.flow, s.players = "cards", players
+    s.aiTierPath = M.aiTierPathFor(cls.arch)               -- 0.12.0: the Opponents setting (nil = TIER 1 / pods)
 end
 
 -- c.setup for a choice made elsewhere (dev panel, settings.txt): mode/class from the objects, grid = class limit,
@@ -1879,6 +3447,15 @@ function M.focusTarget()
 end
 
 function M.open()
+    -- 0.12.0: cfg.UiStyle switched live since this page was built (spec §13 session I): the other page is built first
+    if W and not W.broken and not S.active and W.v2 ~= wantV2() and W.root ~= nil then
+        U.log(TAG, "UiStyle is \"%s\" now: the race setup page is rebuilt in that style",
+            tostring(opt("UiStyle", "v2")))
+        U.try(TAG, v2.rebuild, "UiStyle")
+    elseif W and W.v2 and not W.broken and not S.active and not v2.alive() then
+        U.warn(TAG, "the v2 page's theme elements were dropped (theme.forget on a phase change): the page is rebuilt")
+        U.try(TAG, v2.rebuild, "theme elements dropped")
+    end
     if not M.available() then return false end
     if St.phase ~= "FRONTEND" then status("RACE SETUP ONLY WORKS IN THE MAIN MENU"); return false end
     if St.launch.pending then status("LAUNCHING…"); return false end
@@ -1887,6 +3464,7 @@ function M.open()
     S.players = {}
     local lobby = U.mod("lobby")
     if type(lobby.setSetupMode) == "function" then lobby.setSetupMode(true) end
+    if W.v2 then U.try(TAG, v2.onOpen) end                 -- 0.12.0: page moved? pill and command focus reset
     show(W.panel, true)
     setText(W.status, "")
     M.showStep("class")
@@ -1901,6 +3479,7 @@ function M.close(why)
     racersLeave(why)                                         -- 0.10.0: the visit ends (cards' images, then their bays)
     releasePreviews(why)                                     -- SAVE / START RACE / BACK / tab left / phase change
     if CM then pcall(CM.setView, nil) end
+    if W and W.v2 then U.try(TAG, v2.onClose) end            -- 0.12.0: the pill's entries and the command focus go
     if W then show(W.panel, false) end
     local lobby = U.mod("lobby")
     if type(lobby.setSetupMode) == "function" then U.try(TAG, lobby.setSetupMode, false) end
@@ -1943,7 +3522,8 @@ function M.finish(start)
         local again = now <= S.startConfirmUntil and (dormant == nil or dormant == S.startDormant)
         if (#waiting > 0 or dormant) and not again then
             S.startConfirmUntil, S.startDormant = now + 5000, dormant
-            status(gateText(waiting, dormant))
+            -- 0.12.0 v2: the warn pill, over every other entry for the gate's 5-s window (§6.5, §6.6)
+            status(gateText(waiting, dormant), { warn = true, prio = 3, key = "gate", ms = 5000 })
             return
         end
         acceptDormant = dormant ~= nil
@@ -1968,8 +3548,16 @@ function M.finish(start)
     if start then U.mod("launch").start({ acceptDormant = acceptDormant }) end
 end
 
-function M.setStatus(text)
-    if W and S.active then setText(W.status, text or "") end
+-- lobby.setStatus (every St.emit("status")) and racers. 0.12.0 v2 page: the status pill (§6.5); opts = {warn, sticky,
+-- prio, key, ms, pips} as theme's statusPill post (text "" + key: that entry cleared), nil = classified by the text.
+function M.setStatus(text, opts)
+    if not (W and S.active) then return end
+    if W.v2 then pillFeed(text, opts) else setText(W.status, text or "") end
+end
+
+-- 0.12.0 v2: one keyed status-pill entry removed (nil = every entry).
+function M.clearStatus(key)
+    if W and W.v2 and W.pill and S.active then W.pill.clear(key) end
 end
 
 ---------------------------------------------------------------------------------------------------- input
@@ -2026,7 +3614,12 @@ local function gamepadInput()
 end
 
 -- 0.10.0 (racers.lua): P1 uses a pad (true also when unknown); a move of P1's sink focus is a direction only then.
-function M.p1Gamepad() return gamepadInput() end
+-- 0.12.0: undebounced as before; setup.debugInputMode pins it (tests) like theme.inputMode.
+local forcedMode = nil
+function M.p1Gamepad()
+    if forcedMode then return forcedMode == "pad" end
+    return gamepadInput()
+end
 
 local function cyclerOf(w)
     for id, cy in pairs(W.cyclers) do
@@ -2040,6 +3633,21 @@ end
 local function onFocus(f)
     S.lastFocus = f
     if not f then return end
+    if W.v2 then
+        v2.noteFocus(f)                                      -- 0.12.0: BACK's Up rule follows the content focus
+        if S.view == "posters" and W.posters then            -- a poster ghost: preview its item (painted by v2.poll)
+            for i, g in ipairs(W.posters) do
+                if U.same(g, f) then
+                    local idx = W.posterMap and W.posterMap[i]
+                    if idx and idx ~= S.previewed and S.items[idx] then
+                        S.previewed = idx
+                        U.try(TAG, S.items[idx].preview)
+                    end
+                    return
+                end
+            end
+        end
+    end
     if S.view == "cmap" and CM then                          -- 0.9.0: a planet chip / circuit node took the focus
         local idx = CM.itemFor(f)
         if idx then
@@ -2138,13 +3746,25 @@ end
 -- KeyboardIsP1: pad 0's B then belongs to a guest (it arrives on P1's PC); P1 uses Backspace (onKey "back2").
 -- 0.10.0 RACERS: P1's back on the card (racers.onP1Back: the stage before; at the first stage the double-back rule).
 local p1BPrev = false
+local p1BackMs = -1e12
+-- P1's back step itself: the card's stage before (RACERS), else one setup step back. Also called by backprompt.lua
+-- when P1's B only reached the game (its QuitGame prompt), so it is exported as M.p1Back.
+local function p1Back(why)
+    p1BackMs = St.nowMs()
+    if cardsStep() then racers().onP1Back() else M.back() end
+    U.dbg(TAG, "P1 back (%s)", tostring(why or "pad B"))
+end
+function M.p1Back(why) if M.isActive() then p1Back(why) end end
+-- backprompt.lua: when the last P1 back step ran (St.nowMs), so a B both polls saw is never stepped back twice
+function M.lastP1BackMs() return p1BackMs end
+
 local function pollP1Back(p1)
     local down = ui().keyDown(p1, C.KEY.B)
     local kbp1 = false
     pcall(function() kbp1 = require("settings").get("KeyboardIsP1") == true end)
     if down and not p1BPrev and not kbp1 then
         pcall(function() U.mod("lobby").armBackGuard() end)   -- the game may also open its Back prompt
-        if cardsStep() then racers().onP1Back() else M.back() end
+        p1Back("pad B")
     end
     p1BPrev = down
 end
@@ -2166,6 +3786,7 @@ function M.pollNav()
         -- edge state is current on every tick of the step
         if U.ok(p1) then U.try(TAG, pollP1Back, p1) end
         if cardsStep() then U.tryEvery("setup.racers", nil, TAG, function() racers().poll(p1) end) end
+        if M.isActive() and W.v2 then U.tryEvery("setup.v2", nil, TAG, v2.poll, p1) end   -- 0.12.0: command row, pill
         return
     end
     if U.ok(p1) then
@@ -2173,6 +3794,7 @@ function M.pollNav()
         if f ~= S.lastFocus then onFocus(f) end
         U.try(TAG, pollP1Back, p1)
     end
+    if M.isActive() and W.v2 then U.tryEvery("setup.v2", nil, TAG, v2.poll, p1) end   -- 0.12.0: painted focus looks
     if M.isActive() and S.step == "vehicles" then
         U.try(TAG, pollGuests)
         -- 3D previews: debounced builds, readiness, turntable, captures; a column re-renders when its state changed
@@ -2221,6 +3843,7 @@ end
 -- previews, the focus on the sink.
 function M.onPageShown()
     if not M.isActive() then return end
+    if W.v2 then U.try(TAG, v2.measure, "page shown") end   -- 0.12.0: the page may sit elsewhere now (V-FIN-01)
     if cardsStep() then
         local ok, t = U.try(TAG, function() return racers().onPageShown() end)
         if ok and U.ok(t) then M.focus(t) end
@@ -2234,6 +3857,77 @@ end
 function M.onPlayers()
     if not (M.isActive() and S.step == "vehicles") then return end
     if cardsStep() then U.try(TAG, function() racers().onPlayers() end) else U.try(TAG, renderColumns) end
+end
+
+---------------------------------------------------------------------------------------------------- 0.12.0 API
+-- A / a click on poster ghost i (CLASS / CONDITIONS / MODE on the v2 page): the same as a list row's click.
+function M.onPoster(i)
+    if not M.isActive() or not W.posterMap then return end
+    local idx = W.posterMap[i]
+    local it = idx and S.items[idx]
+    if it then
+        S.previewed = idx
+        U.try(TAG, it.preview)
+        U.try(TAG, it.choose)
+    end
+end
+
+-- racers.lua (§6.4): P1's READY cursor with mouse + keyboard ("start" | "save") paints that command-row pill as
+-- focused (keyboard Up / Down; Enter runs it through racers -> setup.finish); nil releases it. -> true on a v2 page.
+function M.commandFocus(id)
+    if not (W and W.v2 and W.cmd) then return false end
+    if id ~= "start" and id ~= "save" then id = nil end
+    if W.cmdForced == id then return true end
+    if W.cmdForced then W.cmd.look(W.cmdForced, nil) end
+    W.cmdForced = id
+    if id then W.cmd.look(id, "focus") end
+    return true
+end
+
+-- Test helper (§13): P1's input mode pinned to "pad" or "mouse" (nil = live) for the command row, P1's READY card
+-- (theme.forceInputMode, which racers reads) and setup.p1Gamepad. -> summary text.
+-- Example: lua return require("setup").debugInputMode("mouse")
+function M.debugInputMode(mode)
+    if mode ~= "pad" and mode ~= "mouse" then mode = nil end
+    forcedMode = mode
+    local ok, r = pcall(function() return T().forceInputMode(mode) end)
+    if W and W.v2 and S.active then U.try(TAG, v2.renderCommands) end
+    U.log(TAG, "input mode %s (test helper, V-FIN-11)", mode and ("forced: " .. mode) or "live")
+    return string.format("debugInputMode: %s (theme: %s)", tostring(mode or "live"), ok and tostring(r)
+        or ("error: " .. tostring(r)))
+end
+
+-- lobby.lua (§4.2 RACE card): the art of a race choice (St.race.choice): the chosen track's Arcade tile (TRACK_TILE,
+-- also through a folded twin), else the planet x class tile (setup.arcadeTile); nil without a choice / planet.
+-- Memoised per choice table (the lobby asks on every refresh); game thread (reads the choice's assets).
+local raceArtMemo = { choice = nil, path = nil }
+function M.raceArt(choice)
+    if type(choice) ~= "table" then return nil end
+    if raceArtMemo.choice == choice and raceArtMemo.path then return raceArtMemo.path end
+    local path
+    local ok, err = pcall(function()
+        local cls
+        if type(choice.setup) == "table" and choice.setup.arch ~= nil then cls = V.classByArch(choice.setup.arch) end
+        if not cls and U.ok(choice.archetype) then cls = V.classByArch(tonumber(choice.archetype.Archetype)) end
+        local planet = M.planetFor(choice.planet)
+        local key = U.ok(choice.track) and trackKey(choice.track) or ""
+        local tile = TRACK_TILE[key]
+        if not tile and key ~= "" and cls and planet then
+            for _, e in ipairs(queryTracks(cls, planet) or {}) do
+                local hit = e.key == key
+                for _, a in ipairs(e.alts or {}) do hit = hit or a.key == key end
+                if hit then
+                    tile = TRACK_TILE[e.key]
+                    for _, a in ipairs(e.alts or {}) do tile = tile or TRACK_TILE[a.key] end
+                end
+            end
+        end
+        if tile then path = tp("Arcade", "T_UI_Arcade_" .. tile .. "_Tile")
+        elseif planet then path = M.arcadeTile(planet, cls) end
+    end)
+    if not ok then U.logOnce("setup.raceArt!", TAG, "raceArt failed (%s)", tostring(err)) end
+    if path then raceArtMemo = { choice = choice, path = path } end
+    return path
 end
 
 -- Test helper (test.cmd lua, only with cfg.TestCommands; vehicle-step-v2.md §10): a fresh setup visit straight to a
@@ -2291,5 +3985,9 @@ function M.debugJump(spec)
         S.cond ~= "" and (" [" .. S.cond .. "]") or "", mode.key, tostring(S.step),
         S.step == "vehicles" and (S.cards and " RACERS" or " classic") or "", tostring(St.menu.visible))
 end
+
+-- 0.12.0 v2: every St.emit("status") reaches the open page's status pill even when lobby.setStatus does not forward
+-- it (when it does, the pill's echo filter drops the second copy). A classic page or a closed setup: nothing.
+St.on("status", TAG, function(text) pillFeed(text, nil) end)
 
 return M

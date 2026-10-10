@@ -14,6 +14,7 @@
 -- functions there. Bind only from main.lua's load (lobby.init / keys.init): RegisterKeyBind binds the callback to the
 -- calling lua_State, which is the hook thread when called from a game-thread callback.
 local U = require("util")
+local St = require("state")
 
 local M = {}
 local seq, done, run, order = {}, {}, {}, {}
@@ -37,6 +38,9 @@ end
 
 --- Game thread (FAST loop, every phase): each bound function once per press, at most MAX_PER_TICK per tick.
 function M.drain()
+    -- 0.12.0 launch hold (state.lua St.launchHold): presses during the front end's teardown are dropped (counted as
+    -- done): their handlers would act on a page that is being freed
+    local held = St.launchHold()
     for i = 1, #order do
         local label = order[i]
         local n = seq[label]
@@ -45,7 +49,7 @@ function M.drain()
             done[label] = n                      -- single writer per field: no lost press, no read-modify-write race
             if d > MAX_PER_TICK then d = MAX_PER_TICK end
             local fn = run[label]
-            for _ = 1, d do U.try("key:" .. label, fn) end
+            if not held then for _ = 1, d do U.try("key:" .. label, fn) end end
         end
     end
 end

@@ -9,7 +9,8 @@
 local cfg = {}
 
 ---------------------------------------------------------------------------------------------------- Core
-cfg.Debug               = true      -- U.dbg output + debug-only hooks in diag
+cfg.Debug               = false     -- U.dbg output + debug-only hooks in diag. 0.12.0: off by default (review hyg-6);
+                                    --   set Debug = true in config_user.lua for a bug report
 cfg.SkipRaceIntro       = false     -- true: Race.SpeedyFlow.Intro/.Movies = 1 (race intro cinematics and movies skipped;
                                     --   the game's own dev shortcut, set once per boot by testcmd.lua)
 cfg.ViewGuard           = true      -- viewguard.lua: a still-racing local player whose view is another player's DNF
@@ -23,6 +24,16 @@ cfg.MenuBridgeWaitMs    = 150       -- the game's own reaction window before the
 cfg.MenuBridgeGuestNative = "skip"  -- "skip": a guest's presses on its OWN screen are not bridged while pause.lua boosts
                                     --   its IMC_UI (run I: native input works then; bridging as well toggled a Settings
                                     --   row twice) | "bridge" (the 0.7.1 behaviour)                  VERIFY(V-MB-04)
+cfg.UiMokiWidthScale      = 1.0     -- 0.12.0: the Moki (display font) width estimate x this (the table matched Slate at
+                                    --   size 100; small text at 720p runs a few % wider: cards2 keeps a margin)
+cfg.BackPromptAsBack      = true    -- 0.12.0: P1's pad B on OPTIONS / RACE SETUP (which before the first race only reaches the
+                                    --   game: its "QUIT GAME?" prompt, ACCEPT focused) answers that prompt No and goes
+                                    --   back instead (backprompt.lua) | false = the game's prompt stays     VERIFY(V-BP-01)
+cfg.MenuBridgeGuestPauseMenu = true -- 0.11.0: a guest's A / B on its OWN pause menu, and its B on the screens opened from
+                                    --   it (Settings, Logbook), are bridged even while its UI input counts as native
+                                    --   (hotfix build: the guest's A / B never acted natively; each of those presses closes
+                                    --   or covers the screen, so the re-check never acts twice); A clicks the row the
+                                    --   owner has focused | false = the 0.10 behaviour                   VERIFY(V-MB-10)
 cfg.MenuBridgeDialogs     = true    -- the pause controller answers the P1-owned confirm dialogs (EXIT TO MAIN MENU,
                                     --   ABANDON TOUR...): A = focused / default button (else Accept), B = the last
                                     --   button (Cancel), D-pad moves the dialog owner's focus; post-race any player  V-MB-05
@@ -178,6 +189,9 @@ cfg.HotplugPadToP1  = "front"       -- 0.8.1: a pad that CONNECTS while the game
                                     --   connection, often behind other pads). "front" (in the front end; a pad that
                                     --   connects mid-race takes P1 at the next front end) | "always" (at once, mid-race
                                     --   too) | "off". Never with couch pads enabled (ADD PLAYERS: it joins as a guest)
+                                    --   0.12.0 (review hyg-3): a new pad takes P1 only while P1's own pad is gone (its
+                                    --   disconnect was seen), never with KeyboardIsP1; a pad switched on next to a
+                                    --   working P1 pad stays free for ADD PLAYERS
                                     --                                                       VERIFY(V-JOIN-20)
 
 ---------------------------------------------------------------------------------------------------- Launch
@@ -194,8 +208,26 @@ cfg.P1HudMode             = "clone"    -- "clone" (0.4.0 default: P1 gets its ow
 cfg.P1CloneInput          = false      -- "clone": keep the P1 clone's own input bindings (default off: the game's
                                        --   hidden HUD keeps P1's pause; on = if P1's pause stops working)  VERIFY(V-HUD-02d)
 cfg.GuestHudZOrder        = 10
-cfg.HudFitInterior        = true       -- 0.8.2: the race HUD's top bar (timer / lap / POS, 3620 px wide) scales down to
-                                       --   fit a quarter view (3P bottom, 4P) instead of losing both ends  VERIFY(V-HUD-15)
+cfg.HudFitInterior        = true       -- 0.8.2: the race HUD's interior (top bar, centre, engine row: 3620 units wide)
+                                       --   scales down to fit the player's view instead of losing both ends of the top bar
+                                       --   (0.11.0: by the view WIDTH, ScaleToFitX); false = no HUD layout work at all
+                                       --                                                      VERIFY(V-HUD-15)
+cfg.HudNarrowViews        = "fit"      -- 0.11.0 ("HUD is bad on screen where width is 1/2"; later "not sure it is needed": off
+                                       --   by default). "readable": a view narrower than
+                                       --   HudNarrowBelow (2P side by side, 3P bottom, 4P) gets a narrower interior (~2000
+                                       --   instead of 3620) so timer / LAP / POS show at ~0.96 of their full-width size
+                                       --   instead of 0.53, with a compact top bar and the engine row shrunk to fit |
+                                       --   "fit" (0.8.2: the whole HUD scaled to the view, 0.53 in a half-width view)
+                                       --                                                VERIFY(V-HUD-17/18/19)
+cfg.HudNarrowBelow        = 3000       -- view width in UI units (a full 16:9 width is 3840) below which a view is narrow
+cfg.HudNarrowScale        = 1.0        -- HUD size in a narrow view relative to a full-width view (values above 1 count as
+                                       --   1); capped so the top bar keeps clear of the view edges: 0.96 in a 16:9 half
+                                       --   or quarter. 0.85 = smaller HUD, engine row less shrunk           VERIFY(V-HUD-17)
+cfg.HudNarrowTopBar       = "compact"  -- narrow views: "compact" (timer / LAP / POS 197 units further in, brackets and
+                                       --   shadow 394 shorter, P1's 1D map at 0.6) | "native" (the designer bar: the HUD
+                                       --   is then capped at view width / 2340, 0.82 in a 16:9 half)
+cfg.HudNarrowHolo         = "hide"     -- the radio-chatter portrait in narrow views: "hide" (collapsed: engine row at 0.76
+                                       --   in 16:9) | "keep" (engine row at 0.66). Guest HUDs follow UxSplitGuestHolo first
 cfg.LapPatch              = true       --                                                   VERIFY(V-HUD-04)
 cfg.MemoryLapMode         = "collapse" -- Memory HUD guest lap counters: "collapse" (default: always collapsed - what
                                        --   happens in this build anyway, BP hooks never fire; the Memory HUD only
@@ -264,7 +296,8 @@ cfg.UxSplitGameHud        = true       -- P1HudMode "clone": the game's own hidd
                                        --   beep) and its BotEngineInfo bindings on P1's car are removed  VERIFY(V-UX-10)
 cfg.UxSplitGuestHolo      = "hide"     -- the radio-chatter portrait (WBP_Hud_CharacterHolo: ONE dialogue line for
                                        --   everybody) in guest HUDs: "hide" | "keep"                 VERIFY(V-UX-12)
-cfg.UxSplitProbeMs        = 5000       -- > 0: one "[uxsplit] probe" line at this period while armed (0 = off)  V-UX-11
+cfg.UxSplitProbeMs        = 0          -- > 0: one "[uxsplit] probe" line at this period while armed (0 = off)  V-UX-11
+                                       --   0.12.0: off by default (research probe; 5000 for a test session)
                                        --   (0.8.0: also the period of the "[subsplit] probe" line, V-SUB-07)
 
 ---------------------------------------------------------------------------------------------------- UX split: subtitles (subsplit.lua, 0.8.0)
@@ -385,6 +418,58 @@ cfg.InputFixGuestEnhanced = "add"     -- 0.6.0 (run G F1, ROOT CAUSE of dead gue
 cfg.InputFixGuestEnhancedPriority = 1  -- priority when P1's own priority cannot be read
 cfg.InputFixGuestEnhancedRemove = true -- front end: the contexts the mod added are removed again
 
+---------------------------------------------------------------------------------------------------- UI v2 (theme.lua, 0.12.0)
+-- Workflow ui-v2 (2026-10-10, the user: screens that "look like they belong to the game"); binding spec
+-- notes/design/ui-v2/ui-redesign-final.md (§12.3 keys, §14 V-FIN checks). The FREE MODE lobby, OPTIONS, RACE SETUP and
+-- the RACERS cards drawn with the game's own parts (theme.lua tokens + builders, cards2.lua). The keys whose default
+-- changed with v2 (CardW / CardGap / CardH / CardRowW, SetupCMapVideoW / Background / MapW / MapH) still read their
+-- 0.11.0 values while UiStyle = "classic" (cfg.UiClassic, resolved at the end of this file).
+cfg.UiStyle               = "v2"       -- "v2" | "classic" (the 0.11.0 lobby rows, setup header / crumb / footer and
+                                       --   cards.lua); read at page build: a live switch shows when the page is re-opened
+cfg.InputModeDebounceMs   = 500        -- P1's input type (pad | mouse + keyboard; KeyboardIsP1 = mouse) must be stable
+                                       --   this long before the command row and P1's READY card switch (> 0)  V-FIN-11
+cfg.StatusPillMs          = 5000       -- a transient status-pill message shows this long (> 0); the START gate, "all
+                                       --   ready" and LAUNCHING are sticky until cleared                     VERIFY(V-FIN-12)
+cfg.PreviewBackdrop       = "studio"   -- photo-bay backdrop inside the capture (vpreview.lua, §10): "studio" (STUDIO back
+                                       --   plane + lit floor; SetupPreviewExposure forced "fixed") | "scenario"
+                                       --   (T_UI_Scenario_Bg plane, inherited exposure) | "cutout" (no live render: the
+                                       --   class cut-out on a STUDIO fill)                                   VERIFY(V-FIN-05)
+cfg.UiPageOrigin          = nil        -- unset = measured. {x, y, w, h} (or {x = , y = , w = , h = }) in screen su:
+                                       --   overrides theme.pageGeometry (measured from the main menu's layout, fallback
+                                       --   128, 240, 3584, 1756)                                             VERIFY(V-FIN-01)
+-- theme.lua fallback selectors: one per V-FIN check whose fallback is a different build (not §12.3 keys)
+cfg.UiTitleWidget         = "game"     -- page title: "game" (WBP_Screen_Title) | "text" (Moki 103.5 + RUST slash + RUST
+                                       --   tag box)                                                          VERIFY(V-FIN-03)
+cfg.UiTitleBoxH           = 150        -- SizeBox height around WBP_Screen_Title (> 0; 256 when the title is clipped) V-FIN-03
+cfg.UiHeroPill            = "backer"   -- command-row pills: "backer" (WBP_CommonButtonBacker_Pill) | "painted"
+                                       --   (MI_UI_Pill_Generic + MI_UI_Pill_Btn_Hero(_Thick) images)         VERIFY(V-FIN-16)
+cfg.StatusPillPlace       = "screen"   -- status pill: "screen" (the game's toast place: from the screen's left edge,
+                                       --   centre y 2079) | "page" (inside the page at x 128, left of the command row)
+                                       --                                                                     VERIFY(V-FIN-12)
+cfg.UiFontMaterials       = true       -- SDF print materials on titles and pills (MI_UI_SDF_Font_*); false = plain fonts
+                                       --                                                                   VERIFY(V-PARTS-02)
+-- the other v2 modules' fallback selectors and knobs (integration 0.12.0: every key a v2 module reads is defined here)
+cfg.UiTraitGlyph          = "decorator" -- CLASS info panel traits (setup.lua): "decorator" (WBP_VehicleTrait.RT_Desc draws
+                                       --   the <action/> pad glyph itself) | "runs" (the mod's own "Use" + X glyph on an
+                                       --   AMBER disc + text run in VB_DescLayout)                         VERIFY(V-FIN-08)
+cfg.UiCondTint            = true       -- CONDITIONS posters after the first tinted by a MI_UI_Squircle_TextureMask MID
+                                       --   (setup.lua); false = the untinted art (the title still names it) VERIFY(V-FIN-07)
+cfg.CardFigureTint        = "mid"      -- pod pilots' body on the empty poster (cards2.lua): "mid" (MI_UI_Squircle_TextureMask
+                                       --   MID) | "plain" (a plain image tint #C9B98A; also taken by itself when the MID
+                                       --   fails)                                                          VERIFY(V-FIN-07)
+cfg.CardStripe            = true       -- the rotated player stripe on the scenario art (cards2.lua); false = the straight
+                                       --   6-su hue rule alone                                             VERIFY(V-FIN-06)
+cfg.CardStripeAngle       = 34         -- the stripe's SetRenderTransformAngle in degrees (positive = clockwise: it leans
+                                       --   like the poster's own stripes; -34 if it leans the other way)   VERIFY(V-FIN-06)
+cfg.PreviewStudioGain     = 1          -- studio back plane = STUDIO x this (vpreview.lua): a number > 0 or {r, g, b}, each
+                                       --   > 0; the calibration line suggests a value (vpreview.calibrate()) VERIFY(V-FIN-05)
+cfg.PreviewCalibrate      = false      -- 0.12.0 (review hyg-8): true = each bay reads its backdrop corner once (up to
+                                       --   two GPU readbacks) and logs "PASS" or a PreviewStudioGain value (V-FIN-05);
+                                       --   a test session switch: vpreview.calibrate() re-arms the read, which runs
+                                       --   only while this is true
+cfg.PreviewStudioFloor    = true       -- studio rung: the lit floor plane under the model (contact shadow); false drops it
+                                       --   (frame cost)                                                    VERIFY(V-FIN-14)
+
 ---------------------------------------------------------------------------------------------------- Race setup (setup.lua, vehicles.lua)
 -- Feedback 2026-10-07: class first, planet list with video, per-player vehicle choice, max AI.
 -- notes/research/race-setup.md.
@@ -422,19 +507,23 @@ cfg.SetupTrackPoolConds   = true       -- 0.10.0 offer only the conditions the g
 cfg.SetupTrackDedupe      = true       -- one row per track (run E: "MOS ESPA SPEEDWAY (BGL_PLANE_FWD)" several times):
                                        --   display names, reverse/variants marked; false = every TrackDef the game
                                        --   returns (duplicates marked with their key)              VERIFY(V-SET-12)
+cfg.VehicleNameSource     = "load"     -- 0.12.0 the game's model names (vehicles.modelName = TH_<Model>.ItemName, read
+                                       --   once per class): "load" (resident themes at once, the others LoadAsset one per
+                                       --   250 ms) | "find" (resident themes only) | "table" (the decoded English names)
+                                       --                                                                    VERIFY(V-FIN-10)
 cfg.SetupDebugBuilds      = false      -- also list the DEBUG build tiers
 cfg.SetupAllBuilds        = false      -- list every quick-race build (ability tests, trailer builds)
 cfg.SetupListMax          = 16         -- option rows in the list (longer lists are paged with a MORE row)
-cfg.SetupListMaxH         = 520        -- max height of the option list (it scrolls to the focused row)
-cfg.SetupMediaW           = 640        -- media area (planet video / art)
+cfg.SetupListMaxH         = 520        -- max height of the option list (it scrolls to the focused row); "classic" only
+cfg.SetupMediaW           = 640        -- media area (planet video / art); unused in v2 (kept for "classic")
 cfg.SetupMediaH           = 360
-cfg.SetupInsetW           = 256        -- inset art (planet select image / track tile)
+cfg.SetupInsetW           = 256        -- inset art (planet select image / track tile); unused in v2 (kept for "classic")
 cfg.SetupInsetH           = 144
 cfg.SetupCardPortraits    = true       -- vehicle cards show the livery owner's portrait for pilot-livery presets
 cfg.SetupCardW            = 360        -- vehicle card image per player column (initial width; 0.8.0: the 2D art keeps its
                                        --   own aspect, a 3D card is 16:9)
 cfg.SetupCardH            = 200        -- card height (0.8.0: lowered when n 16:9 cards would not fit SetupCardRowW)
-cfg.SetupLeftWeight       = 0.45       -- width share of the media column
+cfg.SetupLeftWeight       = 0.45       -- width share of the media column; unused in v2 (kept for "classic")
 -- 3D vehicle preview (vpreview.lua, 0.8.0; notes/research/vehicle-preview.md): each VEHICLES card shows a live render of
 -- its pick, made by a "photo bay" per column (a BP_StaticVehicleBase model + SceneCapture2D + fill light) in the sky
 -- above the front-end sets. Front end only; released when the step is left, the setup closes or a player leaves. A
@@ -465,6 +554,7 @@ cfg.SetupPreviewFillLux   = 60         -- fill PointLight above the camera: illu
                                        --   lux * m^2 candelas); 0 = no fill light                     VERIFY(V-VP-04)
 cfg.SetupPreviewExposure  = "inherit"  -- capture exposure: "inherit" (the front end's own post-process) | "fixed" (eye
                                        --   adaptation clamped to SetupPreviewEV)                      VERIFY(V-VP-04)
+                                       --   0.12.0: vpreview forces "fixed" while PreviewBackdrop = "studio" (V-FIN-05)
 cfg.SetupPreviewEV        = 8          -- EV100 of the "fixed" exposure
 cfg.SetupPreviewShowOnly  = true       -- capture only the bay's model (false = every primitive in view)
 cfg.SetupPreviewCaptureOnly = false    -- the bay model drawn by scene captures only, casting no shadow (use it if the model
@@ -508,6 +598,7 @@ cfg.SetupPreviewPrebuildMs = 600       -- RACERS PILOT stage: the pilot's signat
 -- Any failure falls back to the 0.8.0 lists for that step. Sizes are Slate units (1 su = 1 px at 3840x2160).
 cfg.SetupCampaignMap      = true       -- false: the 0.8.0 lists for PLANET and TRACK (no cmap widget is built)  V-CMAP-12
 cfg.SetupCMapPlanetNav    = "chips"    -- "chips" (planet chips under the arc) | "list" (the 0.8.0 planet list)  V-CMAP-05
+                                       --   0.12.0: on the UI v2 page "chips" is the planet disc pager (no name chips)
 cfg.SetupCMapTrackView    = "map"      -- "map" (run map, d-pad between nodes) | "list" (the 0.8.0 track list)   V-CMAP-08
 cfg.SetupCMapAreaW        = 3500       -- planet view area (su, > 0), clipped                                   V-CMAP-06
 cfg.SetupCMapAreaH        = 1080
@@ -516,13 +607,16 @@ cfg.SetupCMapArcAngle     = 35         -- ArcAngleDeg (campaign 35; used as max(
 cfg.SetupCMapArcPad       = 2          -- SelectionPadAngle around the selected planet (deg, >= 0)
 cfg.SetupCMapPlanetY      = 330        -- selected planet centre below the area top (su)
 cfg.SetupCMapInfoW        = 820        -- planet info block width (su, > 0)
-cfg.SetupCMapVideoW       = 768        -- planet video frame width (su, 16:9; 0 = no video in the planet view)
-cfg.SetupCMapBackground   = true       -- campaign map paper (T_UI_Map_Bg) behind the arc
+cfg.SetupCMapVideoW       = 0          -- planet video frame width (su, 16:9, >= 0; 0 = no video in the planet view).
+                                       --   0.12.0: was 768 (UI v2: no movie box by default; "classic" keeps 768)
+cfg.SetupCMapBackground   = false      -- campaign map paper (T_UI_Map_Bg) behind the arc. 0.12.0: was true (UI v2: the
+                                       --   full T_UI_Map_Bg is the page background, theme C1 "map"; "classic" keeps true)
 cfg.SetupCMapManualTick   = "auto"     -- "auto" (UpdateButtonPos from the FAST loop only if the arc does not tick) |
                                        --   "always" | "off"                                                     V-CMAP-04
 cfg.SetupCMapSounds       = true       -- the campaign map's UI sounds (open, planet accept)
-cfg.SetupCMapMapW         = 3500       -- run map box (su, > 0); the 3840x1500 map scales to fit it             V-CMAP-08
-cfg.SetupCMapMapH         = 1200
+cfg.SetupCMapMapW         = 3584       -- run map box (su, > 0); the 3840x1500 map scales to fit it             V-CMAP-08
+cfg.SetupCMapMapH         = 1316       --   0.12.0: were 3500 x 1200 (UI v2: the virtual map = the 3584 x 1316 frame,
+                                       --   scale 1.0, §7.3; "classic" keeps 3500 x 1200)
 cfg.SetupCMapPlanetX      = 1180       -- big planet centre x in the 3840-wide map
 cfg.SetupCMapPlanetScale  = 0.62       -- big planet render scale (> 0; disc 2336 su at 1)
 cfg.SetupCMapPlanetName   = false      -- also show the big planet's own 84-pt name
@@ -554,23 +648,34 @@ cfg.CardGuestClickGuardMs = 150        -- P1's sink accept is dropped while a gu
 cfg.CardBackTapMaxMs      = 600        -- a guest's B is "back" on release when held shorter (held 1 s = leave, join.lua;
                                        --   > 0)                                                               V-RC-04
 cfg.CardP1BackConfirmMs   = 3000       -- P1 at PILOT: a second back within this window goes to MODE (> 0)    V-RC-08
--- layout (vehicle-step-v2.md §3)
-cfg.CardRowW              = 3500       -- card row width (su, > 0)                                            V-RC-15
-cfg.CardH                 = 1320       -- card height (su, > 0); lower it if the page is shorter than measured (the row
-                                       --   cannot shrink against the page, RC-15)                            V-RC-15
-cfg.CardPad               = 32         -- inner padding of a card (su, > 0)
-cfg.CardW                 = { 1720, 1720, 1140, 845 }   -- card width (su) for 1, 2, 3, 4 players (4 numbers >= 1)
-cfg.CardGap               = { 0, 60, 40, 40 }           -- gap between the cards (su) for 1, 2, 3, 4 players (>= 0)
+-- layout (vehicle-step-v2.md §3; 0.12.0 UI v2: ui-redesign-final.md §8 / §2.5, the row fills 3584 su). The v2 values
+-- below; while UiStyle = "classic" these four keys read the 0.11.0 values (cfg.UiClassic: 3500 / 1320 /
+-- { 1720, 1720, 1140, 845 } / { 0, 60, 40, 40 }), unless config_user.lua overrides them (then in both styles).
+cfg.CardRowW              = 3584       -- card row width (su, > 0). 0.12.0: was 3500                          V-RC-15
+cfg.CardH                 = 1300       -- card height (su, > 0); lower it if the page is shorter than measured (the row
+                                       --   cannot shrink against the page, RC-15; v2 derives min(1300, cmdY - 580) from
+                                       --   the measured page, §2.5). 0.12.0: was 1320                        V-RC-15
+cfg.CardPad               = 32         -- inner padding of a card (su, > 0); "classic" (cards.lua) only
+cfg.CardW                 = { 1762, 1762, 1162, 860 }   -- card width (su) for 1, 2, 3, 4 players (4 numbers >= 1).
+                                                        --   0.12.0: was { 1720, 1720, 1140, 845 }
+cfg.CardGap               = { 0, 60, 49, 48 }           -- gap between the cards (su) for 1, 2, 3, 4 players (>= 0).
+                                                        --   0.12.0: was { 0, 60, 40, 40 }
 -- look: every game widget has a plain fallback, the same for every card                           VERIFY(V-RC-06)
-cfg.CardFrame             = "darkpanel" -- "darkpanel" (WBP_DarkPanel as the card's bottom layer) | "solid" (a FuseImage)
+--   0.12.0: the keys marked "classic" only are read by cards.lua alone (UiStyle = "classic"); the v2 cards
+--   (cards2.lua) put no game widget inside a card and paint those parts themselves
+cfg.CardFrame             = "darkpanel" -- "darkpanel" (WBP_DarkPanel as the card's bottom layer) | "solid" (a FuseImage);
+                                       --   "classic" (cards.lua) only
 cfg.CardPanelColour       = { R = 0.012983, G = 0.036889, B = 0.048172, A = 0.90 }   -- #1E363E @0.9, the game's panel
-cfg.CardHighlight         = "pill"     -- "pill" (WBP_ButtonBacker pills) | "solid" (solid images)
+                                       --   "classic" (cards.lua) only
+cfg.CardHighlight         = "pill"     -- "pill" (WBP_ButtonBacker pills) | "solid" (solid images); "classic" only
 cfg.CardDetail            = "game"     -- detail panel: "game" (WBP_Character_Ability: title + rich text, fed through its
-                                       --   vars + Refresh()) | "plain" (two text blocks, markup stripped)
+                                       --   vars + Refresh()) | "plain" (two text blocks, markup stripped);
+                                       --   "classic" (cards.lua) only
 cfg.CardThumbMask         = "mid"      -- head shots: "mid" (squircle MID of M_UI_CharacterProfilePicture) | "plain" (the
                                        --   transparent head shot on a squircle backer)
-cfg.CardDiamond           = "disc"     -- ability diamond: "disc" (our discs) | "hud" (MI_HUD_Abilities_BG behind it)
-cfg.CardBackdrop          = true       -- racer-style art behind the pilots
+cfg.CardDiamond           = "disc"     -- ability diamond: "disc" (our discs) | "hud" (MI_HUD_Abilities_BG behind it);
+                                       --   "classic" (cards.lua) only
+cfg.CardBackdrop          = true       -- racer-style art behind the pilots; "classic" (cards.lua) only
 cfg.CardGlyphs            = "xbox"     -- hint glyphs: "xbox" (the game's Xbox pad images) | "text"     V-RC-01 (no tofu)
 cfg.CardSounds            = "match"    -- "match" (guests' navigation ticks + everybody's accept sounds, the cmap pattern) |
                                        --   "accept" (accept sounds only) | "off"                      VERIFY(V-RC-30)
@@ -705,6 +810,33 @@ cfg.PauseSubScreenHook    = false      -- B2: native pre-hook on CosmeticStateMa
 cfg.PauseDialogGuestUi    = "lower"    -- D2: "lower": guests' IMC_UI back to default while a confirm dialog is up (the pause
                                        --   controller answers it through menubridge; its presses must not also hit its own
                                        --   pause screen under the dialog) | "keep"                    VERIFY(V-PAU-21)
+-- 0.11.0 RESTART RACE (restart.lua, notes/research/restart-race.md): the game's own RETRY row of WBP_Pause, put back
+-- right below RESUME in the pause menu of an offline custom race SWGRCouch launched (RACING only; never online, campaign,
+-- arcade or on a network client), confirmed by the game's RetryRace dialog, then RacingGameMode:RequestResetRace (the
+-- same map, seamless). Not PauseRestartCsm above (G: the pause state machine after P1's wreck).
+cfg.PauseRestart          = true       -- the RESTART RACE entry; false = the pause menu stays the game's   VERIFY(V-RST-01)
+cfg.PauseRestartConfirm   = "dialog"   -- "dialog": the game's Btn_RetryRace + its RetryRace confirm dialog; Accept is seen
+                                       --   by a native pre-hook on ArcadeSubsystem:RequestRestartEvent (registered while
+                                       --   such a race is RACING) | "twice": an own row, confirmed by a second press
+                                       --   within PauseRestartConfirmMs (no hook, no dialog: if V-RST-03 fails)  V-RST-03/12
+cfg.PauseRestartConfirmMs = 3000       -- "twice": the second press must come within this time (> 0)  VERIFY(V-RST-12)
+cfg.PauseRestartSequence  = "direct"   -- "direct": RequestResetRace in the FAST tick after the confirm, from the pause (the
+                                       --   live-proven state: the 2026-10-10 restart test ran from P1's auto-pause) |
+                                       --   "resume": RESUME first, the call PauseRestartAfterResumeMs after the pause ended
+                                       --                                                          VERIFY(V-RST-06)
+cfg.PauseRestartLabel     = "game"     -- "game": MenuText.Pause_Button_Restart ("Restart Race", localised) | "retry": the
+                                       --   row's own label ("Retry") | any other text: that text     VERIFY(V-RST-02)
+cfg.PauseRestartPosition  = "below_resume" -- "below_resume" (the rows under RESUME move down one) | "end" (appended
+                                       --   under ABANDON TOUR, nothing moved)                          VERIFY(V-RST-02)
+cfg.PauseRestartRemote    = false      -- also offered while remote humans are connected or expected (untested: the
+                                       --   restart travels every client)                               VERIFY(V-RST-09)
+cfg.PauseRestartArcadeGuard = true     -- "dialog": ArcadeSubsystem.LastPlayedArcadeEvent (set by an Arcade event played
+                                       --   earlier) is cleared while the entry is offered, so the game's own
+                                       --   RequestRestartEvent never travels to that event; restored at FRONTEND.
+                                       --   false: the entry is not offered while it is set              VERIFY(V-RST-05)
+cfg.PauseRestartAfterResumeMs = 250    -- "resume": RequestResetRace this long after the pause ended (>= 0)  V-RST-06
+cfg.PauseRestartWatchdogMs = 5000      -- still the same world this long after RequestResetRace: LEAVING undone (> 0)
+                                       --                                                          VERIFY(V-RST-08)
 
 ---------------------------------------------------------------------------------------------------- Race
 cfg.AIOnPadDisconnect = true           -- Disconnect override on pad loss (server)
@@ -777,8 +909,9 @@ cfg.WreckCamBadMs         = 400        -- "auto": unusable this long -> fallback
 cfg.WreckFadeClearMs      = 1500       -- a fade held this long on a wrecked view is cleared (StopCameraFade), checked
                                        --   every FAST tick; when the fade fields are unreadable, StopCameraFade is called
                                        --   blindly every 1 s from this time after the wreck. 0 = never   VERIFY(V-WD-15)
-cfg.WreckProbe            = true       -- camera probe lines at the wreck and +0.5/+2/+4.5/+6/+10/+20/+40 s and after
+cfg.WreckProbe            = false      -- camera probe lines at the wreck and +0.5/+2/+4.5/+6/+10/+20/+40 s and after
                                        --   photo mode (view, camStill, fade, phase, watched car, photo)  VERIFY(V-WD-04)
+                                       --   0.12.0: off by default (research probe)
 cfg.SpectateWidgetMode    = "hide"     -- P1 wrecked, guests racing: the game's full-screen spectate panel
                                        --   (WBP_PVP_Spectate_C) is "hide"-n until no guest races | "hide_inactive" (+
                                        --   DeactivateWidget while hidden) | "leave"                    VERIFY(V-WD-11)
@@ -803,7 +936,8 @@ cfg.CrashCamStuckMs       = 9000       -- a crash camera still the view this lon
 cfg.CrashCamFadeClearMs   = 1500       -- a fade >= 0.5 held this long around a crash is cleared (0 = never)  VERIFY(V-CC-04)
 cfg.CrashCamBlindFade     = true       -- fade fields unreadable: one blind StopCameraFade after CrashCamFadeClearMs
 cfg.CrashCamAfterMs       = 4000       -- the fade guard keeps watching this long after the crash
-cfg.CrashCamProbe         = true       -- probe lines at the crash, +0.5 s, +2 s, the switch and the end   VERIFY(V-CC-01)
+cfg.CrashCamProbe         = false      -- probe lines at the crash, +0.5 s, +2 s, the switch and the end   VERIFY(V-CC-01)
+                                       --   0.12.0: off by default (research probe)
 cfg.CrashCamWreckHold     = "proven"   -- wreck.lua's wreck-camera hold (WreckCrashCamHoldMs) for a GUEST: "proven" (only
                                        --   once that guest's crash camera was seen working in a crash; user after run
                                        --   F: "the wrecked is still black screen") | "never" | "always" (skip only a
@@ -910,6 +1044,8 @@ cfg.Defaults = {
     LastRaceMaxRacers  = 0,              -- RACE SETUP grid size (0 = the class limit)
     LastRaceVehicles   = "",             -- RACE SETUP per-player picks "1=PRE_Car_Orca@<build path>;2=..."
     LastRaceRacers     = "",             -- 0.10.0 RACERS step per pad "<ControllerId>=<pilot>@<preset>@<loadout code>;..."
+    OpponentTier       = 1,              -- 0.12.0 RACE SETUP > MODE "Opponents": the speeder build tier the race launches
+                                         --   on, i.e. the AI's strength (1 = TIER 1 [0%] .. 6 = TIER 6 [58%]); pods: 1
 }
 
 ---------------------------------------------------------------------------------------------------- override checks
@@ -967,6 +1103,10 @@ local ENUMS = {
     PauseUiImcBoost = { "all", "owner", "off" },
     PauseAnyStartResumes = { "fallback", "always", "off" },
     PauseRestartCsm = { "onpress", "eager", "off" },
+    -- 0.11.0 RESTART RACE
+    PauseRestartConfirm = { "dialog", "twice" },
+    PauseRestartSequence = { "direct", "resume" },
+    PauseRestartPosition = { "below_resume", "end" },
     IgnitionView = { "split", "single" },
     GuestNameMode = { "names", "off" },
     GuestNameMethod = { "auto", "rpc", "gamemode", "direct" },
@@ -1028,6 +1168,19 @@ local ENUMS = {
     PerkCritMalfunctions = { "keep", "on", "off" },
     PerkLaunchBase = { "zero", "pilot" },
     SetupPreviewSpinStage = { "vehicle", "all", "none" },
+    -- 0.11.0 narrow-view HUD
+    HudNarrowViews = { "readable", "fit" },
+    HudNarrowTopBar = { "compact", "native" },
+    HudNarrowHolo = { "hide", "keep" },
+    -- 0.12.0 UI v2
+    UiStyle = { "v2", "classic" },
+    PreviewBackdrop = { "studio", "scenario", "cutout" },
+    UiTitleWidget = { "game", "text" },
+    UiHeroPill = { "backer", "painted" },
+    StatusPillPlace = { "screen", "page" },
+    UiTraitGlyph = { "decorator", "runs" },
+    CardFigureTint = { "mid", "plain" },
+    VehicleNameSource = { "load", "find", "table" },
 }
 -- Keys whose value is a string selector OR a number (FinishGraceSec: "all" | seconds >= 0; PauseMenuZ: "auto" | Z >= 0;
 -- UxSplitSubHalfFrac: "auto" | a fraction 0..1). max is optional.
@@ -1035,8 +1188,14 @@ local MIXED = { FinishGraceSec = { strings = { "all" }, min = 0 }, PauseMenuZ = 
                 UxSplitSubHalfFrac = { strings = { "auto" }, min = 0, max = 1 } }
 -- Table-valued keys that also accept false (= feature off).
 local FALSEABLE = { GfxSingleViewCvars = true, GuestPilots = true, PilotExtras = true }
--- Table-valued keys with a fixed shape: n numbers >= min (one per player count), or a colour { R, G, B, A }.
-local SHAPES = { CardW = { n = 4, min = 1 }, CardGap = { n = 4, min = 0 }, CardPanelColour = { colour = true } }
+-- Table-valued keys with a fixed shape: n numbers >= min (one per player count), a colour { R, G, B, A }, or a rect
+-- {x, y, w, h} (positional or named, w and h > 0).
+local SHAPES = { CardW = { n = 4, min = 1 }, CardGap = { n = 4, min = 0 }, CardPanelColour = { colour = true },
+                 UiPageOrigin = { rect = true } }
+-- 0.12.0: keys without a default (nil = unset) that config_user.lua may still set; value = the type they must have.
+local NILABLE = { UiPageOrigin = "table" }
+-- 0.12.0: keys that take a number > 0 or a per-channel table {r, g, b} (positional or named) of numbers > 0.
+local NUM_OR_RGB = { PreviewStudioGain = true }
 -- Numbers that must be > 0 (a 0 period would run a loop on every engine tick).
 local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
                    LobbyNavRepeatMs = true, LobbyFocusKeepMs = true, SetupMaxRacers = true, SetupMaxRacersPlane = true,
@@ -1045,6 +1204,8 @@ local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, Fast
                    IgnitionSilentPresses = true, IgnitionSilentPressesP1 = true, TestCommandPollMs = true,
                    PauseLostMenuMs = true, IgnitionMapReprobeMs = true, WreckRigFov = true, UxSplitFadeMax = true,
                    PauseInputsBackMs = true, PauseNoSubStateMs = true,
+                   -- 0.11.0 RESTART RACE
+                   PauseRestartConfirmMs = true, PauseRestartWatchdogMs = true,
                    -- 0.8.0 (SetupPreviewFillLux accepts 0 and SetupPreviewSpinDps any sign: unchecked;
                    -- SetupPreviewCaptureMs accepts 0: NONNEG below)
                    UxSplitSubPendingMs = true, UxSplitSubAiRadiusUU = true, UxSplitSubSideScale = true,
@@ -1052,17 +1213,25 @@ local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, Fast
                    SetupPreviewFrame = true, SetupPreviewMaxRadius = true, SetupPreviewDebounceMs = true,
                    SetupPreviewTimeoutMs = true, SetupCardBadgeSize = true, SetupCardInsetH = true, SetupCardRowW = true,
                    -- 0.9.0
-                   SetupCMapAreaW = true, SetupCMapAreaH = true, SetupCMapArcScale = true, SetupCMapArcAngle = true,
+                   SetupCMapAreaW = true, SetupCMapAreaH = true, UiMokiWidthScale = true, SetupCMapArcScale = true, SetupCMapArcAngle = true,
                    SetupCMapInfoW = true, SetupCMapMapW = true, SetupCMapMapH = true, SetupCMapPlanetScale = true,
                    SetupCMapCardW = true, SetupCMapNodeMax = true,
                    -- 0.10.0 RACERS step (PerkPartSlots / PerkTraitSlots are also clamped: CLAMP)
                    CardBackTapMaxMs = true, CardP1BackConfirmMs = true, CardRowW = true, CardH = true, CardPad = true,
                    CardBuildsPerTick = true, CardRendersPerTick = true, CardLoadsPerTick = true, CardLoadBigBytes = true,
                    PerkPartSlots = true, PerkTraitSlots = true, SetupPreviewStillBurst = true,
-                   SetupPreviewCaptureBudget = true, SetupPreviewSpawnGapMs = true }
+                   SetupPreviewCaptureBudget = true, SetupPreviewSpawnGapMs = true,
+                   -- 0.11.0 narrow-view HUD
+                   HudNarrowBelow = true, HudNarrowScale = true,
+                   -- 0.12.0 UI v2
+                   InputModeDebounceMs = true, StatusPillMs = true, UiTitleBoxH = true }
 -- 0.10.0: numbers that must be >= 0 (0 = off / at once).
 local NONNEG = { CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
-                 SetupPreviewCaptureMs = true }
+                 SetupPreviewCaptureMs = true,
+                 -- 0.11.0 RESTART RACE
+                 PauseRestartAfterResumeMs = true,
+                 -- 0.12.0 UI v2 (0 = no planet video, the v2 default)
+                 SetupCMapVideoW = true }
 -- 0.10.0: integers clamped into [min, max] after the checks (an override outside is clamped, with a warning).
 local CLAMP = { PerkPartSlots = { 1, 10 }, PerkTraitSlots = { 1, 4 } }
 
@@ -1076,7 +1245,18 @@ local function overrideProblem(k, v)
         return "must be " .. table.concat(mixed.strings, ", ") .. " or a number >= " .. tostring(mixed.min)
             .. (mixed.max ~= nil and (" and <= " .. tostring(mixed.max)) or "")
     end
-    if type(v) ~= type(cfg[k]) then return "must be a " .. type(cfg[k]) .. (FALSEABLE[k] and " or false" or "") end
+    if NUM_OR_RGB[k] then
+        if type(v) == "number" and v > 0 and v < math.huge then return nil end
+        if type(v) == "table" then
+            local r, g, b = v[1] or v.r or v.R, v[2] or v.g or v.G, v[3] or v.b or v.B
+            if type(r) == "number" and type(g) == "number" and type(b) == "number" and r > 0 and g > 0 and b > 0 then
+                return nil
+            end
+        end
+        return "must be a number > 0 or {r, g, b} (numbers > 0)"
+    end
+    local want = NILABLE[k] or type(cfg[k])
+    if type(v) ~= want then return "must be a " .. want .. (FALSEABLE[k] and " or false" or "") end
     local allowed = ENUMS[k]
     if allowed then
         local hit = false
@@ -1089,6 +1269,12 @@ local function overrideProblem(k, v)
     if shape and shape.colour then
         for _, c in ipairs({ "R", "G", "B", "A" }) do
             if type(v[c]) ~= "number" then return "must be a colour { R = <n>, G = <n>, B = <n>, A = <n> }" end
+        end
+    elseif shape and shape.rect then
+        local x, y, w, h = v.x or v[1], v.y or v[2], v.w or v[3], v.h or v[4]
+        if type(x) ~= "number" or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number"
+            or not (w > 0 and h > 0) then
+            return "must be a rect { x, y, w, h } (numbers, w and h > 0)"
         end
     elseif shape then
         for i = 1, shape.n do
@@ -1110,6 +1296,7 @@ end
 -- settings.lua replaces a merged default outside its ALLOWED list with the built-in one (config cannot require settings).
 local builtinDefaults = {}
 for k, v in pairs(cfg.Defaults) do builtinDefaults[k] = v end
+local userSet = {}                  -- 0.12.0: keys config_user.lua replaced (the UiStyle resolution below keeps them)
 do
     local src = ""
     pcall(function() src = debug.getinfo(1, "S").source or "" end)
@@ -1125,7 +1312,7 @@ do
             if okRun and type(user) == "table" then
                 local n = 0
                 for k, v in pairs(user) do
-                    if cfg[k] == nil then
+                    if cfg[k] == nil and NILABLE[k] == nil then
                         print("[SWGRCouch][config] WARN config_user.lua: unknown key " .. tostring(k) .. " (ignored)\n")
                     elseif k == "Defaults" then
                         if type(v) == "table" then
@@ -1160,6 +1347,7 @@ do
                                 v = c
                             end
                             cfg[k] = v
+                            userSet[k] = true
                             n = n + 1
                         end
                     end
@@ -1174,5 +1362,31 @@ do
 end
 
 cfg.DefaultsBuiltin = builtinDefaults
+
+---------------------------------------------------------------------------------------------------- UiStyle "classic" values
+-- 0.12.0 UI v2 changed the defaults of these keys (ui-redesign-final.md §12.3). The classic code paths read the same keys
+-- (cards.lua: CardW / CardGap / CardH; setup.lua's classic card row: CardRowW / CardH; cmap.lua's classic views:
+-- SetupCMap*), so "classic must keep behaving exactly like 0.11.0": while UiStyle = "classic" (config_user.lua or a
+-- live `require("config").UiStyle = "classic"`), cfg.<key> resolves to the value below; otherwise to the v2 default
+-- above. A key config_user.lua replaced (or a live write cfg.<key> = v) is a plain value and applies in both styles.
+-- cfg.UiClassic lists the classic values (read-only; set after the merge, so config_user.lua cannot replace it).
+local CLASSIC = {
+    CardW = { 1720, 1720, 1140, 845 }, CardGap = { 0, 60, 40, 40 }, CardH = 1320, CardRowW = 3500,
+    SetupCMapVideoW = 768, SetupCMapBackground = true, SetupCMapMapW = 3500, SetupCMapMapH = 1200,
+}
+local styled = {}
+for k, classic in pairs(CLASSIC) do
+    if not userSet[k] then
+        styled[k] = { v2 = rawget(cfg, k), classic = classic }
+        rawset(cfg, k, nil)                                -- now resolved by __index (rawget(cfg, "UiStyle"))
+    end
+end
+cfg.UiClassic = CLASSIC
+setmetatable(cfg, { __index = function(t, k)
+    local s = styled[k]
+    if s == nil then return nil end
+    if rawget(t, "UiStyle") == "classic" then return s.classic end
+    return s.v2
+end })
 
 return cfg

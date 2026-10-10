@@ -18,6 +18,10 @@
 --   style = the perkdata STYLES / KITS key of the pilot's multiplayer racer style (Pvp_Style_<Key>; pods
 --   Pvp_IA_Plane_<Veg> = "Pod_<Veg>"); a speeder pilot's style applies in every class it is offered for.
 --   sig = RacerDef.PreferredCustomisationForVehicleArchetype (a hard TMap, decoded) as vehicles.lua preset ids.
+--   tile (0.12.0 UI v2, notes/design/ui-v2/ui-redesign-final.md §9.3, WI-10) = the pilot's SCENARIOS poster
+--   (Content/Scenarios/T_UI_FE_Scenario_0xx_<Tag>_Tile, 960x1580 duotone portrait; mapping decoded from the SCEN_0xx_*
+--   assets, notes/research/ui-parts-catalogue.md §3.4, every name in notes/asset-list.txt). SEBULBA and the pod pilots
+--   have none (nil): their card shows M.EMPTY_TILE with the full body (full / crop) on it.
 -- Never offered: DA_Racer_TestPilot (dev "AUTOPILOT", no art), DA_Racer_MentorBossRace (campaign copy of SEBULBA).
 local cfg = require("config")
 local U   = require("util")
@@ -33,8 +37,13 @@ local function opt(name, default)
 end
 
 local CHAR = "/Game/Griffin/UI/Library/Textures/Content/Characters/"
+local SCEN = "/Game/Griffin/UI/Library/Textures/Content/Scenarios/"
 local DEF_DIR = "/Game/Griffin/Narrative/CharacterDefs/Racers/"
 local SHADE = "DA_Racer_DarkEnigma"
+
+-- The SCENARIOS poster with the stripes only (catalogue §3.4 "no pilot / empty slot"): the art window of SEBULBA and
+-- the pod pilots (entry.tile nil) under their full body (UI v2 §9.3).
+M.EMPTY_TILE = SCEN .. "T_UI_FE_Scenario_000_Empty_Tile.T_UI_FE_Scenario_000_Empty_Tile"
 
 -- {u0, v0, u1, v1}, the same numbers also as named fields (crop[1] == crop.u0).
 local function box(u0, v0, u1, v1) return { u0, v0, u1, v1, u0 = u0, v0 = v0, u1 = u1, v1 = v1 } end
@@ -48,45 +57,52 @@ local function box(u0, v0, u1, v1) return { u0, v0, u1, v1, u0 = u0, v0 = v0, u1
 M.ALL = {
     -- the 13 PvpPlayable speeder pilots (DA_CharacterList order = multiplayer rank unlock order)
     { id = "DA_Racer_DarkEnigma", name = "SHADE", tag = "DarkEnigma", classes = { 0, 1, 2, 3 },
-      thumb = "T_UI_PlayerChar_4", full = "T_UI_PlayerChar_4_Fallback", style = "Cooling",
+      thumb = "T_UI_PlayerChar_4", full = "T_UI_PlayerChar_4_Fallback", tile = "T_UI_FE_Scenario_003_Tomato_Tile",
+      style = "Cooling",
       sig = { [0] = "PRE_Car_Beluga_Protagonist", [1] = "PRE_Plane_MythP3", [2] = "PRE_Bike_Taipan_Protagonist",
               [3] = "PRE_Skimmer_Merlin_Protagonist" } },
     { id = "DA_Racer_ElegantProfessional", name = "KATJA MOX", tag = "ElegantProfessional", classes = { 0, 2, 3 },
-      podRival = true, thumb = "T_UI_PlayerChar_6", full = "T_UI_PlayerChar_6_Fallback", style = "Abilities",
+      podRival = true, thumb = "T_UI_PlayerChar_6", full = "T_UI_PlayerChar_6_Fallback",
+      tile = "T_UI_FE_Scenario_010_ElegantProfessional_Tile", style = "Abilities",
       sig = { [2] = "PRE_Bike_Rattlesnake_ElegantProfessional" }, specialist = { [2] = 1 } },
     { id = "DA_Racer_Veteran", name = "GRIFF HALLORAN", tag = "Veteran", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_PlayerChar_2", full = "T_UI_PlayerChar_2_Fallback", style = "Afterburner",
-      sig = { [3] = "PRE_Skimmer_Saker_VeteranUpdated" }, specialist = { [3] = 1 } },
+      thumb = "T_UI_PlayerChar_2", full = "T_UI_PlayerChar_2_Fallback", tile = "T_UI_FE_Scenario_008_Veteran_Tile",
+      style = "Afterburner", sig = { [3] = "PRE_Skimmer_Saker_VeteranUpdated" }, specialist = { [3] = 1 } },
     { id = "DA_Racer_Protege", name = "ARY QUILL", tag = "Protege", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Yara", full = "T_UI_RivalChar_Yara_Fallback", style = "Ramjet",
-      sig = { [0] = "PRE_Car_Orca_Protege" }, specialist = { [0] = 1 } },
+      thumb = "T_UI_RivalChar_Yara", full = "T_UI_RivalChar_Yara_Fallback", tile = "T_UI_FE_Scenario_006_Protege_Tile",
+      style = "Ramjet", sig = { [0] = "PRE_Car_Orca_Protege" }, specialist = { [0] = 1 } },
     { id = "DA_Racer_InnerHonour", name = "SOREN ZAKS", tag = "InnerHonour", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_PlayerChar_5", full = "T_UI_PlayerChar_5_Fallback", style = "Malfunction",
-      sig = { [0] = "PRE_Car_Snook_InnerHonour" }, specialist = { [0] = 2 } },
+      thumb = "T_UI_PlayerChar_5", full = "T_UI_PlayerChar_5_Fallback", tile = "T_UI_FE_Scenario_004_InnerHonour_Tile",
+      style = "Malfunction", sig = { [0] = "PRE_Car_Snook_InnerHonour" }, specialist = { [0] = 2 } },
     { id = "DA_Racer_QuietStrength", name = "NIK SKANDARO", tag = "QuietStrength", classes = { 0, 2, 3 },
-      podRival = true, thumb = "T_UI_PlayerChar_1", full = "T_UI_PlayerChar_1_Fallback", style = "Defence",
+      podRival = true, thumb = "T_UI_PlayerChar_1", full = "T_UI_PlayerChar_1_Fallback",
+      tile = "T_UI_FE_Scenario_001_QuietStrength_Tile", style = "Defence",
       sig = { [0] = "PRE_Car_Hammerhead_QuietStrength" }, specialist = { [0] = 3 } },
     -- Ghost and Nomad also prefer the Hexing pod (decoded): their signature when cfg.PilotPodRivals offers them in pods
     { id = "DA_Racer_Ghost", name = "GOLI & 02-R0", tag = "Ghost", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Ghost", full = "T_UI_RivalChar_Ghost_Fallback", style = "Surging",
-      sig = { [1] = "PRE_Plane_Hexing", [3] = "PRE_Skimmer_Pelican_Ghost" }, specialist = { [3] = 2 } },
+      thumb = "T_UI_RivalChar_Ghost", full = "T_UI_RivalChar_Ghost_Fallback", tile = "T_UI_FE_Scenario_009_Ghost_Tile",
+      style = "Surging", sig = { [1] = "PRE_Plane_Hexing", [3] = "PRE_Skimmer_Pelican_Ghost" },
+      specialist = { [3] = 2 } },
     { id = "DA_Racer_Nomad", name = "FOLA KANJEN", tag = "Nomad", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_PlayerChar_3", full = "T_UI_PlayerChar_3_Fallback", style = "Struggling",
-      sig = { [1] = "PRE_Plane_Hexing", [3] = "PRE_Skimmer_Condor_Nomad" }, specialist = { [3] = 3 } },
+      thumb = "T_UI_PlayerChar_3", full = "T_UI_PlayerChar_3_Fallback", tile = "T_UI_FE_Scenario_002_Nomad_Tile",
+      style = "Struggling", sig = { [1] = "PRE_Plane_Hexing", [3] = "PRE_Skimmer_Condor_Nomad" },
+      specialist = { [3] = 3 } },
     { id = "DA_Racer_Thrall", name = "SEN FIRA", tag = "Thrall", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Sen", full = "T_UI_RivalChar_Sen_Fallback", style = "Drafting",
-      sig = { [2] = "PRE_Bike_Boomslang_Thrall" }, specialist = { [2] = 2 } },
+      thumb = "T_UI_RivalChar_Sen", full = "T_UI_RivalChar_Sen_Fallback", tile = "T_UI_FE_Scenario_012_Broccoli_Tile",
+      style = "Drafting", sig = { [2] = "PRE_Bike_Boomslang_Thrall" }, specialist = { [2] = 2 } },
     { id = "DA_Racer_Rager", name = "BIDDY BLAS", tag = "Rager", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Ziff", full = "T_UI_RivalChar_Ziff_Fallback", style = "Burning",
-      sig = { [2] = "PRE_Bike_Sidewinder_Rager" }, specialist = { [2] = 3 } },
+      thumb = "T_UI_RivalChar_Ziff", full = "T_UI_RivalChar_Ziff_Fallback", tile = "T_UI_FE_Scenario_011_Carrot_Tile",
+      style = "Burning", sig = { [2] = "PRE_Bike_Sidewinder_Rager" }, specialist = { [2] = 3 } },
     { id = "DA_Racer_Mercenary", name = "MALIS VAZOSK", tag = "Mercenary", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Mercenary", full = "T_UI_RivalChar_Mercenary_Fallback", style = "Battling",
+      thumb = "T_UI_RivalChar_Mercenary", full = "T_UI_RivalChar_Mercenary_Fallback",
+      tile = "T_UI_FE_Scenario_005_Mercenary_Tile", style = "Battling",
       sig = { [2] = "PRE_Bike_Boa_Mercenary" }, specialist = { [2] = 4 } },
     { id = "DA_Racer_Star", name = "LYREN SHOK", tag = "Star", classes = { 0, 2, 3 }, podRival = true,
-      thumb = "T_UI_RivalChar_Lyren", full = "T_UI_RivalChar_Lyren_Fallback", style = "Airborne",
-      sig = { [3] = "PRE_Skimmer_Crow_StarUpdated" }, specialist = { [3] = 4 } },
+      thumb = "T_UI_RivalChar_Lyren", full = "T_UI_RivalChar_Lyren_Fallback", tile = "T_UI_FE_Scenario_007_Star_Tile",
+      style = "Airborne", sig = { [3] = "PRE_Skimmer_Crow_StarUpdated" }, specialist = { [3] = 4 } },
     { id = "DA_Racer_Antagonist", name = "KESTAR BOOL", tag = "Antagonist", classes = { 0, 1, 2, 3 },
-      thumb = "T_UI_Antagonist", full = "T_UI_PlayerChar_Antagonist_Fallback", style = "Antagonist",
+      thumb = "T_UI_Antagonist", full = "T_UI_PlayerChar_Antagonist_Fallback",
+      tile = "T_UI_FE_Scenario_013_Antagonist_Tile", style = "Antagonist",
       sig = { [0] = "PRE_Car_Antagonist", [1] = "PRE_Plane_Northropi" }, specialist = { [0] = 4 } },
     -- extra (cfg.PilotExtras): SEBULBA in a skim speeder. His MainIcon is a favour card, so he uses the pod pilot's art.
     { id = "DA_Racer_Mentor", name = "SEBULBA", tag = "Mentor", classes = { 3 }, extra = true,
@@ -139,6 +155,9 @@ M.ALL = {
 
 -- Entry shape (§5.2): {id, name, tag, classes = {[arch] = true}, thumb, full (Texture2D paths), crop = box | nil,
 -- style, sig = {[arch] = presetId}, specialist = {[arch] = rank}, path (RacerDef object path), index, flags}.
+-- UI v2 (§12.2): tile = the SCENARIOS poster path | nil (SEBULBA, pods); baseName = the name without the Pod Tour
+-- suffix ("BEN QUADINAROS"), rankTag = "AGED" for the Aged five, else nil: the suffix moves to the card's rank line
+-- ("TOP · AGED · 3 / 8", §9.7) and never joins the poster name. name keeps "BEN QUADINAROS · AGED" (classic cards).
 local BY_ID = {}
 local TWINS = {}   -- CharacterTag -> ids of that character (SEBULBA x3, the Aged pod pilots and their younger selves)
 for i, e in ipairs(M.ALL) do
@@ -147,6 +166,13 @@ for i, e in ipairs(M.ALL) do
     e.classes = set
     e.thumb = CHAR .. e.thumb .. "." .. e.thumb
     e.full = CHAR .. e.full .. "." .. e.full
+    if e.tile then e.tile = SCEN .. e.tile .. "." .. e.tile end
+    if e.aged then
+        e.baseName = e.name:match("^(.-)%s*\194\183%s*AGED$") or e.name     -- "·" = UTF-8 C2 B7
+        e.rankTag = "AGED"
+    else
+        e.baseName = e.name
+    end
     if e.crop then e.crop = box(e.crop[1], e.crop[2], e.crop[3], e.crop[4]) end
     e.sig = e.sig or {}
     e.specialist = e.specialist or {}

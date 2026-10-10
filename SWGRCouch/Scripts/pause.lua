@@ -124,6 +124,9 @@
 --   dialog answered by P2 through menubridge, Cancel -> "IMC_UI priority -> 500 for P2 (confirm dialog closed)".
 -- VERIFY(V-PAU-22): the inactivity auto-pause (run J: ~60 s without game input) gets P1 as controller ("pauser unknown
 --   -> P1") and its sub-screens are P1's.
+-- Revision 0.11.0 (RESTART RACE, restart.lua): every WBP_PauseRacing_C screen is handed to restart.decorate right after
+--   its pre-create and at first sight in menuTick (the screen findPauseMenu already found: no extra UIManager query);
+--   new export resume() (pause CSM -> Idle) for its PauseRestartSequence "resume".
 
 local C = require("consts")
 local cfg = require("config")
@@ -907,6 +910,11 @@ local function precreate(st, kind, leaf, owner, ownerWhy, why)
     st.pre = { w = w, key = U.key(w), cls = cls, path = path, leaf = leaf, kind = kind, owner = owner,
                ownerWhy = ownerWhy, atMs = St.nowMs(), z = z, zHow = zHow, why = why,
                vid = (kind == "sub") and "V-PAU-19" or "V-PAU-11" }
+    -- 0.11.0: RESTART RACE (restart.lua) placed before the CSM shows the screen (AddToViewport ran its PreConstruct)
+    if leaf == "Paused_Racing" then
+        local okR, r = pcall(U.mod, "restart")
+        if okR and type(r) == "table" and type(r.decorate) == "function" then U.try(TAG, r.decorate, w, "pre-create") end
+    end
     return w, z
 end
 
@@ -2043,6 +2051,10 @@ local function menuTick(st, pausedNow, now)
         end
         -- D for a menu nobody pre-created (hook off / missed) and for cfg.PauseUiImcBoost "owner"
         if localPCCount() >= 2 then imcBoost(st, st.lastOwner, "menu owner") end
+        -- 0.11.0: RESTART RACE (restart.lua) on a screen nobody pre-created (one local player, PauseMenuOwner "game", a
+        -- missed request); a pre-created one is already done (idempotent per screen)
+        local okR, r = pcall(U.mod, "restart")
+        if okR and type(r) == "table" and type(r.decorate) == "function" then U.try(TAG, r.decorate, w, how) end
     end
     local age = now - st.menuSeenMs
     local due = ({ 0, 500, 2000 })[st.menuProbes + 1]
@@ -2503,6 +2515,12 @@ end
 -- "Dialog:1"; nil when none. The containers are resolved per split race (prepare).
 function M.dialogWidget()
     return dialogTop()
+end
+
+-- 0.11.0 (restart.lua, PauseRestartSequence "resume"): resume from Lua, the F2 / F3 path (pause CSM ->
+-- CSM_PauseMenus_Idle). true = the call went through.
+function M.resume(why)
+    return pauseCsmChange("CSM_PauseIdle", why or "SWGRCouch")
 end
 
 -- Diagnostics (diag.lua may print it): hook state and the pause layers' live records.

@@ -156,6 +156,30 @@ function ui.button(pc, id, text, fn, opts)
   return w
 end
 
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §3.3): the one focus mechanism of the v2 pages. A ghost is
+-- ui.button with an empty label at render opacity 0: still Visible and focusable (CommonUI navigation and its
+-- navigation sounds), clicked through the same selected-toggle poll / registry as every row (opts: see
+-- ui.registerButton). Its own hover and focus looks are invisible, so the look Lua paints under it is the only one;
+-- that look follows ui.hasFocus(ghost, p1) and ui.hovered(ghost). VERIFY(V-FIN-04): a ghost keeps CommonUI focus,
+-- the navigation sounds and poll clicks; fallback SetNavigationRuleExplicit per ghost (theme.nav).
+function ui.ghost(pc, id, fn, opts)
+  local w = ui.button(pc, id, "", fn, opts)
+  if not w then return nil end
+  U.try(TAG, function()
+    w:SetRenderOpacity(0)                       -- UWidget::SetRenderOpacity(Float): paint nothing, keep hit-testing
+    w:SetVisibility(C.E.Vis.Visible)            -- hit-testable: Slate's focus navigation and the mouse need it
+    w:BP_SetIsFocusable(true)                   -- UCommonButtonBase::BP_SetIsFocusable(Bool)
+  end)
+  return w
+end
+
+-- true while the mouse is over w (UWidget::IsHovered() -> Bool); false on any error or an invalid widget.
+function ui.hovered(w)
+  if not U.ok(w) then return false end
+  local ok, v = pcall(function() return w:IsHovered() end)
+  return ok and v == true
+end
+
 -- Add w to a vertical box with the lobby row spacing; returns the UVerticalBoxSlot (or nil).
 function ui.addRow(vbox, w, top, bottom)
   if not (U.ok(vbox) and U.ok(w)) then return nil end

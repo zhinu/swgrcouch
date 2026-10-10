@@ -48,12 +48,19 @@ local TAG = "main"
 -- shows at boot. No init, no loop of their own: setup.lua reaches racers / cards / perkapply lazily and ticks racers
 -- from its FAST pollNav; launch.raceTick ticks perkapply. perkapply is persisted for hot reload (the in-memory
 -- base-build patch record: the next Lua state restores the asset by path).
-local MODULES = { "phase", "fastboot", "ui", "menu_tab", "lobby", "join", "split", "vehicles", "setup", "vpreview", "cmap",
-                  "pilots", "perkdata", "perks", "perkapply", "cards", "racers",
+-- 0.11.0 RESTART RACE (notes/research/restart-race.md): restart (the pause menu's RESTART RACE entry: pause.lua hands it
+-- every WBP_PauseRacing_C; its RequestRestartEvent hook exists only while an eligible race is RACING). Init after
+-- menubridge, FAST right after menubridge's tick, persisted for hot reload (the cleared LastPlayedArcadeEvent's path).
+-- 0.12.0 UI v2 (notes/design/ui-v2/ui-redesign-final.md §3, §9, §12): theme (tokens + the shared chrome builders of the
+-- lobby, OPTIONS, RACE SETUP and cmap; its "menu" / "phase" listeners drop the page's widgets) is listed right after ui,
+-- cards2 (the v2 RACERS cards, cards.lua's API) right after cards, so a load error shows at boot like cards / cmap. No
+-- init, no loop of their own: lobby / setup / cmap / racers reach them lazily (U.mod) and tick them from their polls.
+local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join", "split", "vehicles", "setup", "vpreview",
+                  "cmap", "pilots", "perkdata", "perks", "perkapply", "cards", "cards2", "racers",
                   "builder", "launch", "inputfix", "hud", "uxsplit", "subsplit", "present", "ignition", "ignpad", "wreck",
                   "crashcam", "nametags", "gfx", "pause",
                   "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
-                  "feowner" }
+                  "restart", "feowner", "backprompt" }
 local mods = {}
 for _, name in ipairs(MODULES) do
   local ok, m = pcall(require, name)
@@ -127,7 +134,7 @@ end
 --    lazily on the game thread (first armed race timeout), never here.
 local INIT_ORDER = { "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
                      "uxsplit", "subsplit", "hud", "present", "wreck", "crashcam", "gfx", "pause", "net", "netfix", "diag",
-                     "testcmd", "viewguard", "menubridge", "feowner" }
+                     "testcmd", "viewguard", "menubridge", "restart", "feowner" }
 for _, name in ipairs(INIT_ORDER) do
   if name ~= "present" or cfg.PresentFromMain == true then call(name, "init") end
 end
@@ -148,7 +155,7 @@ call("keys", "init")
 --     duplicate page/HUD; cvars are restored in the next front end.
 local SHARED_PREFIX = C.MOD .. "."
 local PERSIST_MODULES = { "join", "net", "gfx", "takeover", "launch", "inputfix", "wreck", "crashcam", "subsplit",
-                          "vpreview", "perkapply" }
+                          "vpreview", "perkapply", "restart" }
 
 local function sharedPut(name, v)
   local ok, err = pcall(function() ModRef:SetSharedVariable(SHARED_PREFIX .. name, v) end)
@@ -203,6 +210,18 @@ local function measureFast()
   end
 end
 
+-- 0.12.0 launch hold (state.lua St.launchHold): the front end is being torn down; its pages, the main menu's objects
+-- and the theme's widgets are not touched until the race world (phase.tick keeps running: it ends the hold).
+local holdSeen = nil
+local function frontHeld()
+  if not St.launchHold() then return false end
+  if holdSeen ~= St.launch.atMs then
+    holdSeen = St.launch.atMs
+    U.log(TAG, "launch hold: the front-end pages stop until the race world (V-LCH-07)")
+  end
+  return true
+end
+
 local function fastTick()
   -- 0.10.0: keyboard presses queued by keyq's event-loop callbacks run here, on the game thread, in every phase
   U.try(TAG, mods.keyq and mods.keyq.drain or function() end)
@@ -210,7 +229,9 @@ local function fastTick()
   if St.join.active then call("join", "poll") end
   -- every ClickMode: ui.pollClicks runs the lobby's pad/keyboard navigation (cfg.LobbyPadNav) and, in ClickMode
   -- "poll" (default: BP_OnClicked never fires in this build), the selected-toggle click detection
-  if St.menu.visible then call("ui", "pollClicks") end
+  if St.menu.visible and not frontHeld() then call("ui", "pollClicks") end
+  -- 0.12.0: P1's B on OPTIONS / RACE SETUP reaches only the game (its QuitGame prompt): answered No + the page's back
+  call("backprompt", "fastTick")
   -- guests (GuestPauseMode "poll", or "hud" + GuestPauseFallback) and P1 while its HUD is re-hosted (P1PausePoll);
   -- pause.poll decides who. 0.7.0: it also runs the split-race pause layers A-G (HUD input guard, request hook arming,
   -- pre-created screen, guests' IMC_UI, focus, safety net, after-wreck restart). It must stay FIRST in this block:
@@ -220,6 +241,9 @@ local function fastTick()
     -- 0.7.1 (run I): guest-owned menus and shared post-race screens take A/B through a click bridge (after pause.poll:
     -- it reads this tick's St.pause.menuWasPaused)
     call("menubridge", "fastTick")
+    -- 0.11.0: RESTART RACE (placed by pause.lua's calls): hook arming, the re-check of the row, the confirmed request ->
+    -- RequestResetRace; after menubridge (a bridged Accept on the confirm dialog lands in this tick's pause state)
+    call("restart", "fastTick")
     call("inputfix", "bindPoll")   -- a car re-pointed by the game is re-bound within one FAST tick
     call("inputfix", "p1UiGuard")  -- 0.9.0: P1's vehicle IMC over IMC_UI while racing (LB / R3), released at once on pause
     if cfg.PresentFromMain == true then call("present", "fastTick") end   -- ignition: ignpad pad poll + replay (0.5.1)
@@ -240,15 +264,18 @@ end
 local function mainTick()
   call("phase", "tick")
   if isFrontEnd() then
-    call("lobby", "tick")
+    local held = frontHeld()       -- 0.12.0: nothing of the dying front end during the launch hold
+    if not held then call("lobby", "tick") end
     call("net", "tick")
     -- always in this build (menu_tab.pollWanted() == true: the CustomEvent hook never fires); also drives
     -- builder.poll() (Go / live pick capture)
     local mt = mods.menu_tab
-    if mt and (type(mt.pollWanted) ~= "function" or mt.pollWanted()) then call("menu_tab", "pollTab") end
-    -- guests get their own names already in the menu (feedback 5; 1 s throttle inside, cheap without guests)
-    call("nametags", "namesTick")
-    call("feowner", "mainTick")    -- 0.10.0: Multiplayer tab hidden while split-screen guests exist (V-FEO-07)
+    if not held and mt and (type(mt.pollWanted) ~= "function" or mt.pollWanted()) then call("menu_tab", "pollTab") end
+    if not held then
+      -- guests get their own names already in the menu (feedback 5; 1 s throttle inside, cheap without guests)
+      call("nametags", "namesTick")
+      call("feowner", "mainTick")  -- 0.10.0: Multiplayer tab hidden while split-screen guests exist (V-FEO-07)
+    end
   elseif isRace() then
     call("roster", "tick")
     call("launch", "raceTick")     -- LOADING: per-player vehicle override retries (cheap no-op otherwise)
@@ -270,12 +297,14 @@ end
 local function slowTick()
   U.try(TAG, U.checkThreadAnchor)  -- 0.10.0 V-CORE-12: log when UE4SS drops its anchor of the shared hook thread
   U.try(TAG, U.retryPendingHooks)
-  if isFrontEnd() then call("menu_tab", "ensure") end
+  if isFrontEnd() and not frontHeld() then call("menu_tab", "ensure") end
   call("net", "slowTick")
   if isRace() then call("takeover", "finishIdlePlayerStates") end
   -- every mode: "hook" runs it as an edge-only watchdog for a silent device hook (join.pollDevices decides)
   call("join", "pollDevices")
-  call("join", "hotplugTick")      -- 0.8.1: a hot-plugged pad takes P1 (deferred from a race to the next front end)
+  if not frontHeld() then
+    call("join", "hotplugTick")    -- 0.8.1: a hot-plugged pad takes P1 (deferred from a race to the next front end)
+  end
   call("diag", "periodic")
 end
 

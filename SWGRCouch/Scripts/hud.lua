@@ -70,6 +70,17 @@
 --   * Guest BotEngineInfo "Vehicle State" is checked against the guest's car (index-remap evidence, else written,
 --     V-UX-01); the radio-chatter portrait (one dialogue line for everybody) is hidden in guest HUDs
 --     (cfg.UxSplitGuestHolo, V-UX-12); the arcade ramjet-distance / bonus-time counters joined cfg.GuestHudCollapse.
+-- Revision 0.11.0 (2026-10-10, user: "HUD is bad on screen where width is 1/2, fix that."; notes/research/
+-- hud-narrow-views.md): the 0.8.2 fit scaled the WHOLE HUD interior (top bar, centre, engine row: all of it sits in
+-- SzB_InteriorScale > SzB_InteriorSize 3620 > HudWings_Bind) to 0.53 in a half-width view: tiny timer / LAP / POS on a
+-- TV. A view narrower than cfg.HudNarrowBelow now gets a narrower interior (SzB_InteriorSize ~2000, the scale box fits
+-- it by WIDTH, ScaleToFitX), so the top bar, centre messages and countdown run at ~0.96 at layout scale (crisp text);
+-- the Race top bar is compacted to fit (timer / LAP / POS 197 units in, P1's 1D map at 0.6) and the engine row, wider
+-- than half a screen, is render-scaled down (~0.79) with the radio portrait collapsed. The view size is computed from
+-- the split layout (it is not readable from Lua); a wrong estimate changes the scale, never cuts: every row fits the
+-- interior. Applied when a HUD is created and whenever its plan changes (F8 flip, a guest leaving, one view / split,
+-- window resize); full-width views keep the designer layout. cfg.HudNarrowViews = "fit" is the 0.8.2 behaviour.
+-- VERIFY(V-HUD-17/18/19).
 
 local C = require("consts")
 local cfg = require("config")
@@ -139,9 +150,13 @@ end
 -- wide (Offsets L -1820 R 3640, T/B 48, anchors (0.5,0)-(0.5,1)), so it was never narrower than its content. The slot
 -- is stretched to the player's view (anchors (0,0)-(1,1), offsets 0/48/0/48): the bar then scales down in a quarter
 -- view and stays as it was (centred, unscaled) in a 3840-wide view. Live-verified 2026-10-07 23:16 (3P bottom views).
+-- 0.11.0: ScaleToFitX under the narrow-view layout (only the view WIDTH sets the scale: the narrower interior of a
+-- narrow view is then run at view width / interior width, and a 3840-wide view still gives exactly 1.0); ScaleToFit as in
+-- 0.8.2 with cfg.HudNarrowViews = "fit".
 -- VERIFY(V-HUD-15): 3 players: P2's and P3's timer and POS fully visible; P1's bar unchanged.
 local function fitInterior(w, who)
     if cfg.HudFitInterior == false or not U.ok(w) then return false end
+    local stretch = (cfg.HudNarrowViews == "fit") and C.E.Stretch.ScaleToFit or C.E.Stretch.ScaleToFitX
     local ok, err = pcall(function()
         local wing = w.HudWings_Bind
         if not U.ok(wing) then error("no HudWings_Bind") end
@@ -154,11 +169,11 @@ local function fitInterior(w, who)
         if not U.ok(slot) then error("no slot on the scale box") end
         slot:SetAnchors({ Minimum = { X = 0, Y = 0 }, Maximum = { X = 1, Y = 1 } })   -- stretch over the view
         slot:SetOffsets({ Left = 0, Top = 48, Right = 0, Bottom = 48 })              -- margins (designer T/B 48)
-        sc:SetStretch(2)                                   -- EStretch ScaleToFit (StretchDirection stays DownOnly)
+        sc:SetStretch(stretch)                             -- ScaleBox:SetStretch(Enum EStretch); StretchDirection stays DownOnly
     end)
     if ok then
-        U.logOnce("hud.fit." .. tostring(who), TAG, "%s HUD top bar fits its view (ScaleToFit, DownOnly) (V-HUD-15)",
-            tostring(who))
+        U.logOnce("hud.fit." .. tostring(who), TAG, "%s HUD top bar fits its view (%s, DownOnly) (V-HUD-15)",
+            tostring(who), stretch == C.E.Stretch.ScaleToFitX and "ScaleToFitX" or "ScaleToFit")
     else
         U.logOnce("hud.fitfail", TAG, "HUD top bar fit unavailable (%s): quarter views may cut the timer / POS",
             tostring(err))
@@ -335,6 +350,367 @@ local function membersOf(w)
 end
 M._membersOf = membersOf -- for diag only
 
+---------------------------------------------------------------------------------------------------- narrow views
+-- 0.11.0 (header; notes/research/hud-narrow-views.md §2, §5-§8). SzB_InteriorScale > SzB_InteriorSize > HudWings_Bind
+-- holds the WHOLE HUD, so a narrow view gets a narrower interior (Wn) that the scale box (ScaleToFitX) runs at
+-- view width / Wn. Text keeps the layout scale (Slate rasterises glyphs at the accumulated layout scale; a render
+-- transform only stretches the quads), so only the engine row and P1's 1D map (graphics) are render-scaled, and only
+-- DOWN. Every row is sized to fit Wn, never the view: a wrong view estimate changes the achieved scale, never cuts.
+-- Designer values in UI units [V: decoded WBP_Hud_Race, WBP_HUD_RaceInfo, WBP_HUD_BotEngineInfo, WBP_Hud_Memory trees]:
+local INTERIOR_W = 3620                           -- SzB_InteriorSize.WidthOverride (Memory: FuseSizeBox_0 / _1 too)
+local FULL_VIEW = { w = 3840, h = 2160 }          -- the full viewport in units when it cannot be read (16:9)
+local BOT_MARGIN = 44                             -- WBP_HUD_BotEngineInfo slot Left / Right
+local BOT_ROW_W = { hide = 2417, keep = 2767 }    -- its HB_Container width without / with the radio portrait (350 + 32)
+local ROW_BOTTOM = 12                             -- C_BotLayout, and so the engine row, ends 12 units below the interior
+local TOP_HALF = { native = 1170, compact = 1000 } -- top bar half width + the 75-unit HUD sway (UFuseHudWidget::NativeTick)
+local TOP_SHIFT = 197                             -- compact bar: blocks this much further in, flat middle 2 x 197 shorter
+-- WBP_HUD_RaceInfo > C_TopLayout children (CanvasPanelSlot, anchors (0.5,0)): designer position / size + compact delta.
+-- The brackets' and the shadow's box margins (L 0.9 / R 0.1) keep their outer steps: only the flat middle shortens.
+local TOP_SLOTS = {
+    WBP_Hud_EventTotalTime       = { pos = { X = -905, Y = 50 }, d = TOP_SHIFT },         -- timer
+    WBP_Hud_EventLapCounter      = { pos = { X = 612, Y = 40 }, d = -TOP_SHIFT },         -- LAP
+    WBP_Hud_EventCurrentPosition = { pos = { X = 847.9174, Y = 40 }, d = -TOP_SHIFT },    -- POS
+    HB_Layout_BackerLine         = { size = { X = 2180, Y = 128 }, d = -2 * TOP_SHIFT },  -- bracket lines
+    HB_TopBar_Layout_Shadow      = { size = { X = 2340, Y = 260 }, d = -2 * TOP_SHIFT },  -- shadow glow
+}
+local MAP_COMPACT = 0.6                           -- P1's 1D map (980 wide): the designer gaps to timer and LAP are kept
+-- render pivot at Img_1DMap_MidSection's height (T 101.17 in the 170-tall map box at T 36): the map image sits 14 units
+-- up in its box, so scaling about the box centre would move the map's line off the centre mark
+local MAP_PIVOT = { X = 0.5, Y = (101.17123 - 36) / 170 }
+local RAMJET_MSG = { X = 994.622, Y = -340, halfW = 153 }  -- WBP_Hud_RamjetMessage: anchor (0.5,1), 306 x 157, centred
+local RAMJET_FROM_RIGHT = { hide = 537, keep = 887 }       -- the ramjet bar's centre from the engine row's right end
+local CRASHES_BOT = { X = 714.63654, Y = -119.747795 }     -- WBP_HUD_Crashes_Bot: anchor (0,1) of C_BotLayout
+-- a measured Race engine row replaces the estimate when it is more than tol and at most dev units WIDER (Q2: the energy
+-- pips vary by about 20; a reading 350 wider would be the portrait, which no BP ever shows again once collapsed)
+local ROW_MEASURE = { tol = 4, dev = 150 }
+local PROBE_TICKS = 40                            -- V-HUD-19: MAIN ticks a probe waits for its HUD to be drawn
+local narrowOff = nil                             -- why the narrow layout is off for this session (V-HUD-19), or nil
+
+-- WBP_HUD_RaceInfo's C_TopLayout children by name (RaceInfo has no BP variables: its tree root's direct children).
+local function topBarParts(ri)
+    local out = {}
+    if not U.ok(ri) then return out end
+    local tree = ri.WidgetTree
+    local root = U.ok(tree) and tree.RootWidget or nil
+    if not U.ok(root) then return out end
+    for i = 0, (root:GetChildrenCount() or 0) - 1 do   -- PanelWidget:GetChildrenCount() -> Int, GetChildAt(Int)
+        local ch = root:GetChildAt(i)
+        if U.ok(ch) then out[ch:GetFName():ToString()] = ch end
+    end
+    return out
+end
+
+-- UWidget.Slot (a CanvasPanelSlot for every widget moved here); nil when the widget or its slot is invalid.
+local function slotOf(x)
+    if not U.ok(x) then return nil end
+    local s = x.Slot
+    if U.ok(s) then return s end
+    return nil
+end
+
+-- Two number fields of a struct return value (UE4SS gives a table [API§9]; read through pcall + tonumber like
+-- subsplit's viewport read, so a struct wrapper would do as well). nil, nil when unreadable.
+local function fields2(v, a, b)
+    local ok, x, y = pcall(function() return tonumber(v[a]), tonumber(v[b]) end)
+    if ok then return x, y end
+    return nil, nil
+end
+
+-- BotEngineInfo's radio-chatter portrait (a BP variable in both HUD variants), nil when absent.
+local function holoOf(bot)
+    if not U.ok(bot) then return nil end
+    for _, n in ipairs({ "WBP_Hud_CharacterHolo", "WBP_Hud_CharacterHolo_Memory" }) do
+        local ok, x = pcall(function() return bot[n] end)
+        if ok and U.ok(x) then return x end
+    end
+    return nil
+end
+
+-- Every local player's view in UI units by lp.index, the full screen, and whether the race runs on one view. The view
+-- itself is not readable (ULocalPlayer Origin/Size and FGeometry are not reflected, hud-narrow-views §6): the engine's
+-- default SplitscreenInfo for the layout split.lua writes, times the viewport size / DPI scale.
+local function viewSizes(lps)
+    local single = St.race.singleView == true          -- join's race_enter guard: one view by design
+    local present = lazy("present")
+    if not single and present and present.isSingleView then
+        local ok, s = pcall(present.isSingleView)
+        single = ok and s == true
+    end
+    local full = { w = FULL_VIEW.w, h = FULL_VIEW.h }
+    pcall(function()
+        local wll, world = U.cdo("WidgetLayoutLibrary"), U.world()
+        if not (U.ok(wll) and U.ok(world)) then return end
+        local px, py = fields2(wll:GetViewportSize(world), "X", "Y")   -- GetViewportSize(Object) -> Vector2D (px)
+        local dpi = wll:GetViewportScale(world)        -- WidgetLayoutLibrary:GetViewportScale(Object) -> Float (DPI)
+        if px and py and px > 0 and py > 0 and type(dpi) == "number" and dpi > 0 then
+            full.w, full.h = px / dpi, py / dpi        -- 3840 x 2160 at 16:9 whatever the resolution (live: subsplit)
+        end
+    end)
+    local twoP = C.E.TwoP.Horizontal
+    pcall(function()
+        local g = U.GMS()
+        if U.ok(g) then twoP = g.TwoPlayerSplitscreenLayout end   -- Byte, written by split.applyLayoutSettings
+    end)
+    local n, views = #lps, {}
+    for _, lp in ipairs(lps) do
+        local fw, fh = 1, 1
+        if n == 2 then
+            if twoP == C.E.TwoP.Vertical then fw = 0.5 else fh = 0.5 end   -- side by side | top / bottom
+        elseif n == 3 then
+            fh = 0.5
+            if lp.index > 1 then fw = 0.5 end          -- FavorTop: P1 across the top, P2 / P3 below
+        elseif n >= 4 then
+            fw, fh = 0.5, 0.5                          -- Grid
+        end
+        views[lp.index] = { w = fw * full.w, h = fh * full.h }
+    end
+    return views, full, single
+end
+M._viewSizes = viewSizes -- for diag / tests
+
+-- The layout of one HUD in a view v = {w, h} (units): { key = "W" } = the designer layout, else the narrow plan (§5.1):
+--   e   top bar / centre scale = HudNarrowScale (<= 1), capped so the top bar plus sway keeps inside the view
+--   wn  interior width: ScaleToFitX runs it at v.w / wn = e
+--   r   engine-row render scale (<= 1): the row's visual width is wn - 2 x 44
+-- kind "race" | "memory"; holoShown: the radio portrait stays in the engine row; rowW: the row's measured width or nil.
+local function narrowPlan(v, kind, holoShown, rowW)
+    if narrowOff or not (v.w > 0) or v.w >= (tonumber(cfg.HudNarrowBelow) or 3000) then return { key = "W" } end
+    local tgt = math.min(tonumber(cfg.HudNarrowScale) or 1, 1)
+    if not (tgt > 0) then tgt = 1 end
+    local top, e = "row", tgt                          -- Memory HUD: its top row is a size box that follows the interior
+    if kind == "race" then
+        top = (cfg.HudNarrowTopBar ~= "native" and v.w / (2 * TOP_HALF.native) < tgt) and "compact" or "native"
+        e = math.min(tgt, v.w / (2 * TOP_HALF[top]))
+    end
+    local wn = math.ceil(v.w / e - 1e-6)
+    local holo = holoShown and "keep" or "hide"
+    local row = rowW or BOT_ROW_W[holo]
+    local r = math.min(1, (wn - 2 * BOT_MARGIN) / row)
+    return { key = string.format("N%d:%s:%s:%d:%.3f", wn, top, holo, row, r), wn = wn, e = e, top = top, holo = holo,
+             row = row, r = r }
+end
+M._narrowPlan = narrowPlan -- for diag / tests
+
+-- Apply a plan to one HUD. EVERY value is set in both directions ("W" = designer), so an apply is idempotent and
+-- repairs a half-applied state. Everything is resolved before the first write (a missing part changes nothing), and
+-- the interior narrows last and widens first: a failure in between never leaves a row wider than the interior.
+local function applyLayout(w, plan, st, kind, holoHidden)
+    local narrow = plan.key ~= "W"
+    local wn, r = narrow and plan.wn or INTERIOR_W, narrow and plan.r or 1
+    local wing = w.HudWings_Bind                       -- UFuseHudWidget.HudWings_Bind (native property, both variants)
+    if not U.ok(wing) then error("no HudWings_Bind") end
+    local size = wing:GetParent()
+    if not (U.ok(size) and U.pathOf(size):find("SzB_InteriorSize", 1, true)) then
+        error("no SzB_InteriorSize above HudWings_Bind")
+    end
+    local parts, rows = {}, {}
+    if kind == "race" then
+        parts = topBarParts(w.WBP_HUD_RaceInfo)        -- BP variable
+        if narrow and plan.top == "compact" then
+            for name in pairs(TOP_SLOTS) do
+                if not slotOf(parts[name]) then error("top bar part " .. name .. " not found") end
+            end
+        end
+    else
+        for i = 0, (wing:GetChildrenCount() or 0) - 1 do   -- Memory: top row and decor line, direct children
+            local ch = wing:GetChildAt(i)
+            local n = U.ok(ch) and fnameLower(ch) or ""
+            if n == "fusesizebox_0" or n == "fusesizebox_1" then rows[n] = ch end
+        end
+        if narrow and not rows.fusesizebox_1 then error("Memory top row FuseSizeBox_1 not found") end
+    end
+    local bot = membersOf(w).bot
+    local bslot = slotOf(bot)
+    if narrow and not bslot then error("no WBP_HUD_BotEngineInfo slot") end
+    local offTop, offBottom                            -- CanvasPanelSlot:GetOffsets() -> Margin (Race T 0, Memory T -88)
+    if bslot then
+        offTop, offBottom = fields2(bslot:GetOffsets(), "Top", "Bottom")
+        if not (offTop and offBottom) then error("BotEngineInfo slot offsets unreadable") end
+    end
+    if not narrow then size:SetWidthOverride(wn) end   -- SizeBox:SetWidthOverride(Float)
+    if kind == "race" then
+        local compact = narrow and plan.top == "compact"
+        for name, d in pairs(TOP_SLOTS) do
+            local slot = slotOf(parts[name])
+            if slot and d.pos then                     -- CanvasPanelSlot:SetPosition(Vector2D) = Offsets Left / Top
+                slot:SetPosition({ X = d.pos.X + (compact and d.d or 0), Y = d.pos.Y })
+            elseif slot then                           -- CanvasPanelSlot:SetSize(Vector2D) = Offsets Right / Bottom
+                slot:SetSize({ X = d.size.X + (compact and d.d or 0), Y = d.size.Y })
+            end
+        end
+        local map = parts.WBP_Hud_PositionMap          -- P1 only (collapsed in guests); drawn in UV space: render scale
+        if U.ok(map) then
+            local m = compact and MAP_COMPACT or 1
+            map:SetRenderTransformPivot(MAP_PIVOT)     -- Widget:SetRenderTransformPivot(Vector2D)
+            map:SetRenderScale({ X = m, Y = m })       -- Widget:SetRenderScale(Vector2D)
+        end
+        local msg = slotOf(w.WBP_Hud_RamjetMessage)    -- BP variable (Race only)
+        if msg then
+            local x, y = RAMJET_MSG.X, RAMJET_MSG.Y
+            if narrow and RAMJET_MSG.X + RAMJET_MSG.halfW > wn / 2 - BOT_MARGIN then
+                x = (plan.row / 2 - RAMJET_FROM_RIGHT[plan.holo]) * r   -- over the shrunk ramjet bar's centre
+            end
+            if narrow then y = ROW_BOTTOM - (ROW_BOTTOM - RAMJET_MSG.Y) * r end   -- same height over the shrunk row
+            msg:SetPosition({ X = x, Y = y })
+        end
+    else
+        for _, ch in pairs(rows) do ch:SetWidthOverride(wn) end
+    end
+    local cb = slotOf(w.WBP_HUD_Crashes_Bot)           -- BP variable, the same slot in both variants: kept over the row
+    if cb then cb:SetPosition({ X = BOT_MARGIN + (CRASHES_BOT.X - BOT_MARGIN) * r, Y = CRASHES_BOT.Y * r }) end
+    if bslot then
+        -- a shrunk row's layout box is its own width (its Fill spacer then cannot push the ramjet end past the edge),
+        -- render-scaled about its bottom centre to wn - 88 wide
+        local side = (r < 1) and (wn - plan.row) / 2 or BOT_MARGIN
+        bslot:SetOffsets({ Left = side, Top = offTop, Right = side, Bottom = offBottom })   -- CanvasPanelSlot:SetOffsets
+        bot:SetRenderTransformPivot({ X = 0.5, Y = 1 })
+        bot:SetRenderScale({ X = r, Y = r })
+    end
+    -- the radio portrait: collapsed while narrow, its visibility given back when wide. Re-collapsed every tick by
+    -- layoutHud like collapseGlobalParts' parts, although no BP writes its own visibility (decoded: the holo BP only
+    -- toggles its Img_Empty / Img_Character children). A guest's is already hidden by collapseGlobalParts (holoHidden).
+    local holo = holoOf(bot)
+    if holo and narrow and plan.holo == "hide" and not holoHidden then
+        if st.holoVis == nil then st.holoVis = holo:GetVisibility() end   -- Widget:GetVisibility() -> Enum
+        holo:SetVisibility(VIS_HIDE)
+        st.holo = holo
+    elseif st.holoVis ~= nil then
+        if holo then holo:SetVisibility(st.holoVis) end
+        st.holo, st.holoVis = nil, nil
+    end
+    if narrow then size:SetWidthOverride(wn) end
+end
+
+-- V-HUD-19, from the MAIN tick after a narrow apply, once the HUD is drawn (a collapsed HUD keeps stale desired sizes):
+-- SzB_InteriorSize must report our width override (Q1: the Fuse size box removes the application scale). Narrower than
+-- planned would cut the rows: the narrow layout then goes off for the session (every HUD back to the 0.8.2 fit). Wider
+-- only makes the HUD smaller (logged). The Race engine row's real width replaces the estimate when it is wider (Q2: the
+-- energy pips depend on the car): re-planned on the next tick.
+-- VERIFY(V-HUD-19): "interior 2000 wide, 2000 planned; engine row 2417 wide" one tick after the narrow apply. Fallback:
+-- cfg.HudNarrowViews = "fit" (taken automatically for the session when the interior reads narrower).
+local function probeLayout(w, who, st)
+    local p = st.probe
+    p.n = p.n + 1
+    if p.n > PROBE_TICKS then
+        st.probe = nil
+        U.dbg(TAG, "%s HUD: V-HUD-19 probe dropped (not drawn for %d ticks)", who, PROBE_TICKS)
+        return
+    end
+    if w:GetVisibility() == VIS_HIDE then return end
+    local wing = w.HudWings_Bind
+    local size = U.ok(wing) and wing:GetParent() or nil
+    if not U.ok(size) then return end
+    local x = fields2(size:GetDesiredSize(), "X", "Y") -- Widget:GetDesiredSize() -> Vector2D (last layout pass)
+    if not (x and x > 0) then return end               -- not laid out yet
+    local bx
+    local bot = st.kind == "race" and membersOf(w).bot or nil
+    if U.ok(bot) then bx = fields2(bot:GetDesiredSize(), "X", "Y") end
+    if x < p.wn - 2 then
+        p.bad = p.bad + 1
+        if p.bad < 3 then return end                   -- three draws in a row: not a stale value
+        st.probe = nil
+        narrowOff = string.format("%s HUD interior %.0f wide, %d planned", who, x, p.wn)
+        U.warn(TAG, "%s HUD: SzB_InteriorSize reports %.0f, %d planned: the Fuse size box changes the width override "
+            .. "(V-HUD-19 FAILED); narrow-view layout off for this session, every HUD fitted to its view as in 0.8.2 "
+            .. "(cfg.HudNarrowViews = \"fit\" keeps it off)", who, x, p.wn)
+        return
+    end
+    st.probe = nil
+    U.log(TAG, "%s HUD: interior %.0f wide, %d planned%s; engine row %s wide, %d planned (V-HUD-19)", who, x, p.wn,
+        x > p.wn + 2 and " (wider: the HUD is smaller than planned, nothing cut)" or "",
+        bx and string.format("%.0f", bx) or "?", p.row)
+    -- review 0.11.0: only a WIDER row is re-planned. A box narrowed to a reading taken while the row was short (energy
+    -- pips not built yet, a part hidden for a moment) would let the row overflow it later and push the ramjet end past
+    -- the interior; a narrower row in the estimate's box only leaves it a little smaller (never cut).
+    local dev = bx and (bx - p.row) or 0
+    if dev > ROW_MEASURE.tol and dev <= ROW_MEASURE.dev then
+        st.rowW = st.rowW or {}
+        st.rowW[p.holo] = math.ceil(bx)
+        U.log(TAG, "%s HUD: engine row measured %d wide (estimate %d): re-planned", who, st.rowW[p.holo], p.row)
+    end
+end
+
+-- One HUD we host: compare its plan with the applied one and apply on a change (V-HUD-17 narrow, V-HUD-18 designer),
+-- run the V-HUD-19 probe after a narrow apply, keep the portrait collapsed. st = the HUD's layout record (a guest
+-- entry's .layout, h.gameLayout). Callers wrap it in U.try / U.tryEvery.
+-- VERIFY(V-HUD-17): 2P side by side logs "P2 HUD: narrow view 1920x2160: interior 2000 (scale 0.96), top bar compact,
+-- engine row x0.79"; on screen timer / LAP / POS ~1.8x their 0.10.0 size, no view edge touched, the whole engine row
+-- visible. Fallback: cfg.HudNarrowViews = "fit".
+local function layoutHud(w, who, v, st, holoHidden)
+    if cfg.HudFitInterior == false or cfg.HudNarrowViews ~= "readable" or not (U.ok(w) and v and st) then return end
+    local wk = U.key(w)
+    if st.widgetKey ~= wk then                         -- another instance under this record: start over
+        for k in pairs(st) do st[k] = nil end
+        st.widgetKey = wk
+    end
+    if st.kind == nil then
+        local p = U.pathOf(w:GetClass())
+        st.kind = (p == C.BP.HudRace and "race") or (p == C.BP.HudMemory and "memory") or "other"
+        if st.kind == "other" then
+            U.logOnce("hud.layoutkind." .. p, TAG, "%s HUD: no narrow-view layout for %s (fit only)", who, p)
+        end
+    end
+    if st.kind == "other" then return end
+    local holoShown = cfg.HudNarrowHolo == "keep" and not holoHidden
+    local plan = narrowPlan(v, st.kind, holoShown, st.rowW and st.rowW[holoShown and "keep" or "hide"])
+    local applied = false
+    if st.key ~= plan.key and st.failKey ~= plan.key then
+        if st.tryKey ~= plan.key then st.tryKey, st.fails = plan.key, 0 end
+        local ok, err = pcall(applyLayout, w, plan, st, st.kind, holoHidden)
+        if ok then
+            applied, st.key, st.probe = true, plan.key, nil
+            if plan.key == "W" then
+                U.log(TAG, "%s HUD: view %.0fx%.0f, designer layout (V-HUD-18)", who, v.w, v.h)
+            else
+                st.probe = { wn = plan.wn, row = plan.row, holo = plan.holo, n = 0, bad = 0 }
+                U.log(TAG, "%s HUD: narrow view %.0fx%.0f: interior %d (scale %.2f), top bar %s, engine row x%.2f%s "
+                    .. "(V-HUD-17)", who, v.w, v.h, plan.wn, plan.e,
+                    plan.top == "row" and "row at the interior width (Memory)" or plan.top, plan.r,
+                    st.holo ~= nil and ", portrait hidden" or "")
+            end
+        else
+            st.fails = st.fails + 1
+            U.logEvery("hud.layoutfail", 5000, TAG, "%s HUD layout %s failed (%d/3): %s", who, plan.key, st.fails,
+                tostring(err))
+            if st.fails >= 3 then
+                st.failKey = plan.key
+                -- the fallback is the 0.8.2 fit: the designer interior, scaled to the view by fitInterior's box
+                if plan.key ~= "W" and pcall(applyLayout, w, { key = "W" }, st, st.kind, holoHidden) then st.key = "W" end
+                U.logOnce("hud.layoutoff." .. tostring(who), TAG, "%s HUD: narrow-view layout unavailable (%s); the "
+                    .. "whole HUD is fitted to its view as in 0.8.2", who, tostring(err))
+            end
+        end
+    end
+    if not applied and st.probe then probeLayout(w, who, st) end
+    if st.holo ~= nil then
+        if U.ok(st.holo) then
+            if st.holo:GetVisibility() ~= VIS_HIDE then st.holo:SetVisibility(VIS_HIDE) end
+        else
+            st.holo, st.holoVis = nil, nil
+        end
+    end
+end
+M._layoutHud = layoutHud -- for diag / tests
+
+-- One HUD entry we host (a guest's or P1's clone) in its player's view; P1's covers the screen in one-view phases.
+local function layoutEntry(e, idx, views, full, single)
+    local v = (single and idx == 1) and full or views[idx]
+    if not (v and U.ok(e.widget)) then return end
+    e.layout = e.layout or {}
+    U.tryEvery("hud.layout", nil, TAG, layoutHud, e.widget, "P" .. tostring(e.pnum), v, e.layout,
+        e.pnum ~= 1 and cfg.UxSplitGuestHolo ~= "keep")
+end
+
+-- The game's own HUD (re-hosted into P1's view) gets its designer layout back before we let go of it (our guest HUDs
+-- and P1's clone are removed instead). Clears h.gameLayout.
+local function releaseGameLayout(h, w)
+    local st = h.gameLayout
+    h.gameLayout = nil
+    if st and st.key ~= nil and st.key ~= "W" and st.kind ~= nil and U.ok(w) and st.widgetKey == U.key(w) then
+        U.try(TAG, applyLayout, w, { key = "W" }, st, st.kind, false)
+    end
+end
+
 
 local eqWarned = false
 -- VERIFY(V-HUD-14): logged at most once per session when UE4SS `==` and the address disagree.
@@ -395,6 +771,7 @@ local HUD_CLASS_KEYS = { { key = "HudRace", short = "WBP_Hud_Race_C" }, { key = 
 -- Forget a P1 HUD instance we had placed (the CSM replaced it, or the race is over).
 local function releaseP1(old)
     local h = H()
+    releaseGameLayout(h, old) -- 0.11.0: designer layout back (before forget: it reads the member cache)
     forget(old) -- its cache entry must not outlive it (address reuse, see cacheValid)
     if U.ok(old) then
         U.try(TAG, function()
@@ -679,11 +1056,7 @@ local function collapseGlobalParts(e, mem)
     -- tree walk does not descend into BotEngineInfo); re-collapsed every poll with the other hidden parts.
     -- VERIFY(V-UX-12): the portrait shows in P1's half only. Fallback: cfg.UxSplitGuestHolo = "keep".
     if cfg.UxSplitGuestHolo ~= "keep" and mem.bot and U.ok(mem.bot) then
-        local holo
-        for _, n in ipairs({ "WBP_Hud_CharacterHolo", "WBP_Hud_CharacterHolo_Memory" }) do
-            local ok, x = pcall(function() return mem.bot[n] end)
-            if ok and U.ok(x) then holo = x; break end
-        end
+        local holo = holoOf(mem.bot)
         if holo then
             holo:SetVisibility(VIS_HIDE)
             e.hidden[#e.hidden + 1] = holo
@@ -748,10 +1121,19 @@ function M.ensureGuest(pc, pnum)
         U.try(TAG, function() w:RegisterInputComponent() end)
     end
     e = { pc = pc, widget = w, pnum = pnum, lapCounter = nil, lastLapText = nil, lapFText = nil, shown = nil,
-          eventInfoClassKey = nil, hidden = {} }
+          eventInfoClassKey = nil, hidden = {},
+          layout = { widgetKey = U.key(w), key = "W" } }   -- 0.11.0: a fresh HUD has the designer layout
     h.guests[key] = e
     forget(w) -- a freshly created widget can never own an existing cache entry (freed address reused)
     local mem = membersOf(w)
+    -- 0.11.0: the narrow-view layout before the HUD is first drawn (no 0.53 -> 0.96 jump on screen) (V-HUD-17)
+    U.try(TAG, function()
+        local lps = U.localPlayers()
+        local views, full, single = viewSizes(lps)
+        for _, lp in ipairs(lps) do
+            if sameObj(lp.pc, pc) then layoutEntry(e, lp.index, views, full, single) end
+        end
+    end)
     e.lapCounter, e.lapCounterList, e.posWidgets, e.bot, e.markers = mem.lap, mem.laps, mem.poss, mem.bot, mem.markers
     for _, lc in ipairs(e.lapCounterList) do h.lapCounters[U.key(lc)] = key end
     -- Memory-variant lap counters (rewritten every Tick by their BP): need the UpdateCurrentLap post-hook
@@ -1652,6 +2034,39 @@ local function sweepOrphanP1Clones(h)
     if n > 0 then U.warn(TAG, "removed %d P1 HUD clone(s) of a previous mod instance (hot reload)", n) end
 end
 
+-- 0.11.0: the MAIN tick's layout pass (after the guest loop): every HUD we host follows its player's view, applied only
+-- when its plan changes (a new HUD, the F8 2P flip, a guest leaving, one view / split, a window resize). One view: P1's
+-- HUD covers the screen (designer layout), the guests' are hidden and keep their split layout. The game's own HUD in
+-- "leave" (whole viewport) or "clone" (hidden) mode keeps the fit only.
+-- VERIFY(V-HUD-18): F8 / a guest leaving / the results switch a HUD between "narrow view" and "designer layout".
+function M.updateLayouts(lps)
+    if cfg.HudFitInterior == false or cfg.HudNarrowViews ~= "readable" then return end
+    local h = H()
+    local views, full, single = viewSizes(lps)
+    local idxOf = {}
+    for _, lp in ipairs(lps) do if U.ok(lp.pc) then idxOf[U.key(lp.pc)] = lp.index end end
+    for k, e in pairs(h.guests) do
+        if idxOf[k] then layoutEntry(e, idxOf[k], views, full, single) end
+    end
+    if p1Mode() == "rehost" and h.p1Placed and U.ok(h.p1hud) then
+        h.gameLayout = h.gameLayout or {}              -- dropped in releaseP1 / clearAll (releaseGameLayout)
+        U.tryEvery("hud.layout", nil, TAG, layoutHud, h.p1hud, "game", (single or not views[1]) and full or views[1],
+            h.gameLayout, false)
+    end
+end
+
+-- 0.11.0 (diag / test probes): every hosted HUD's layout record as plain values.
+function M.layoutStatus()
+    local h = H()
+    local out = { off = narrowOff }
+    for _, e in pairs(h.guests or {}) do
+        local st = e.layout or {}
+        out[#out + 1] = { who = "P" .. tostring(e.pnum), key = st.key, failKey = st.failKey, holo = st.holo ~= nil }
+    end
+    if h.gameLayout then out[#out + 1] = { who = "game", key = h.gameLayout.key, failKey = h.gameLayout.failKey } end
+    return out
+end
+
 function M.tick()
     local h = H()
     -- present.lua (view layout per race-flow state, per-player ignition screens) runs first, so that this tick's
@@ -1700,6 +2115,8 @@ function M.tick()
             U.try(TAG, M.manageLocalResults)
             U.try(TAG, M.manageSpectateWidget)
         end
+        -- 0.11.0: P1's clone / re-hosted HUD goes back to the designer layout once its view covers the screen (V-HUD-18)
+        if next(h.guests) ~= nil or h.gameLayout ~= nil then U.tryEvery("hud.layouts", nil, TAG, M.updateLayouts, lps) end
         return
     end
     if not h.orphansSwept then U.try(TAG, sweepOrphanHuds, h, lps) end
@@ -1755,6 +2172,7 @@ function M.tick()
         local e = h.guests[U.key(U.p1())]
         if e then U.try(TAG, M.patchGuest, e) end
     end
+    U.tryEvery("hud.layouts", nil, TAG, M.updateLayouts, lps)   -- 0.11.0 narrow views (V-HUD-17/18/19)
     U.try(TAG, M.calibrateLap)
     U.try(TAG, M.updateVisibility)
     U.try(TAG, M.manageLocalResults)
@@ -1768,6 +2186,7 @@ function M.clearAll()
     local keys = {}
     for k in pairs(h.guests or {}) do keys[#keys + 1] = k end
     for _, k in ipairs(keys) do M.removeGuest(k) end
+    releaseGameLayout(h, h.p1hud)                      -- 0.11.0: re-hosted game HUD back to its designer layout
     if U.ok(h.p1hud) then
         U.try(TAG, function()
             if cfg.P1HudMode == "rehost" and h.p1Placed then

@@ -285,6 +285,7 @@ local function clearOurHighlight(menu, why)
   if cfg.OurTabSyncFix ~= "clear" then return end
   local token = St.menu.key
   sched.after("tab", 0, function()
+    if St.launchHold() then return end      -- 0.12.0: the menu is being torn down (state.lua St.launchHold)
     if St.menu.key ~= token or not U.same(St.menu.widget, menu) then return end
     if St.menu.visible or tabOpen then return end
     local btn = ourTabButton(menu)

@@ -16,7 +16,7 @@ local DEFAULTS = cfg.Defaults
 local ORDER = { "Layout2P", "SplitGraphics", "TakedownCams", "NameTags", "KeyboardIsP1", "NetMode",
                 "JoinAddress", "Port", "LastRaceArchetype", "LastRaceGameMode", "LastRacePlanet", "LastRaceTrack",
                 "LastRaceBuild", "LastRaceDebugBuild", "LastRaceCondition", "LastRaceMaxRacers", "LastRaceVehicles",
-                "LastRaceRacers" }
+                "LastRaceRacers", "OpponentTier" }
 -- Enumerated string keys: allowed values (a value outside the list is refused / replaced by the default)
 settings.ALLOWED = {
     Layout2P      = { "top-bottom", "side-by-side" },
@@ -48,6 +48,7 @@ local COMMENTS = {
     LastRaceMaxRacers = "RACE SETUP grid size, humans included (0 = the class limit: 12 speeders / 8 podracers)",
     LastRaceVehicles  = "RACE SETUP picks per player: <pnum>=<PRE_* preset>@<build path>;...",
     LastRaceRacers    = "RACERS step per pad: <ControllerId>=<pilot>@<preset>@<loadout>;...",
+    OpponentTier      = "RACE SETUP opponents (speeders): 1 = TIER 1 [0%] (weakest) .. 6 = TIER 6 [58%]",
 }
 
 local values = {}        -- key -> typed value (only keys of DEFAULTS)

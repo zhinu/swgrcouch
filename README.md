@@ -5,12 +5,24 @@ race **any track on any planet, in any vehicle class (podracers included), in an
 AI grid. Play **alone or with up to 4 local players** on one screen. Every player picks their own **pilot, vehicle and
 complete loadout**: abilities, parts, upgrade levels, racer style and traits, all unlocked.
 
-> **Version 0.10.1.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
+> **Version 0.12.0.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
 > 1280x720 test window; account names are blurred. The game itself is not included: you need a legitimately bought
 > copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It contains no game
-> code and no game files; the perk menus use names and descriptions from the game's data (`Scripts/perkdata.lua`).
+> code and no game files: its pages are drawn with the art and fonts of your installed game, and the perk menus use
+> names and descriptions from the game's data (`Scripts/perkdata.lua`).
 
-![Four players, one card each, on different stages](docs/screenshots/free-mode/14-racers-4-players-stages.jpg)
+> **⚠ Offline play only.** With SWGRCouch installed, the game's online mode may stop working. To start straight at the
+> main menu, the mod turns off the game's Epic account link in your game profile (as accepting the game's own "EOS
+> linking will be disabled" prompt does), and online play may need that link: on our test machine, starts with Steam
+> online stopped at the main menu, while starts with Steam in Offline Mode worked. So:
+> - Start Steam in **Offline Mode** (Steam menu > Go Offline) before you play with the mod, and do not use the mod for
+>   online play.
+> - If you may want to play online later, keep a copy of the game's `Saved` folder from before the install (Proton:
+>   `steamapps/compatdata/4078430/pfx/drive_c/users/steamuser/AppData/Local/StarWarsGalacticRacer/Saved`; Windows:
+>   `%LOCALAPPDATA%\StarWarsGalacticRacer\Saved`). Putting it back restores the link setting, and your progress as it
+>   was then. Removing the mod alone may not bring online play back (see *Uninstall*).
+
+![RACERS with four players](docs/screenshots/0.12/14-racers-4-players.jpg)
 
 ---
 
@@ -18,105 +30,122 @@ complete loadout**: abilities, parts, upgrade levels, racer style and traits, al
 
 ### 1. The FREE MODE tab
 
-![The FREE MODE tab and its page](docs/screenshots/free-mode/01-free-mode-tab.jpg)
+![The FREE MODE tab with two players](docs/screenshots/0.12/01-free-mode-2-players.jpg)
 
-**The tab formerly called SPLIT SCREEN is now FREE MODE**, because the mod is just as much for one player: any map,
-any pod, any settings. The page lists the players (P1 is always the main pad), **ADD PLAYERS** for friends' pads, the
-race that START RACE will run (here *Jakku / Debris Dunes / single vehicle race / Landspeeder / Sunset*), the advanced
-dev race builder and the options: 2-player layout, split graphics preset, takedown cameras, name tags, keyboard as P1,
-network. This page still has the 0.10 list layout; its redesign is in progress (section 5).
+**The FREE MODE tab is drawn like the game's own tabs** (new in 0.12.0). Four posters: the **RACE** card shows the race
+START RACE will run (here Jakku, Debris Dunes: *LANDSPEEDER · RACE*, *REVERSE · SUNSET · 12 RACERS*; before the first
+choice it reads *CHOOSE RACE*). **START RACE** says who races (*2 players · 10 AI*) or why it cannot start yet.
+**ADD PLAYERS** turns the friends' pads on (here already *PADS ON*). **OPTIONS** holds the settings. Under them, the
+**players strip** has one cell per pad: the P-tag in the player's colour, the head of the pilot that pad picked last,
+and what the pad can do (*Host · ready* for P1, *(B) to leave* for P2, *(A) to join* for pads 3 and 4). Messages show
+for 5 seconds in a pill at the bottom left.
 
-![Lobby with two players](docs/screenshots/free-mode/02-lobby-2-players.jpg)
+![The FREE MODE tab with four players](docs/screenshots/0.12/15-free-mode-4-players.jpg)
 
-**Two players joined.** P2 pressed A on their own pad and shows as *READY, B = LEAVE (PAD 2)*; the free slots say which
-pad can still join. (Captured just before the rename, so the tab still reads SPLIT SCREEN.)
+**Four players joined** (the pill: *P4 JOINED*). Every guest's cell reads *(B) to leave*; a pad that has not picked a
+pilot yet shows the player icon instead of a head. The focused RACE card offers *Change race*.
+
+![OPTIONS](docs/screenshots/0.12/02-options.jpg)
+
+**OPTIONS** (new in 0.12.0) holds what were rows on the old page, as a settings list in the game's look: SPLIT SCREEN
+(2-player layout, split graphics, takedown cameras, name tags), PLAYERS (keyboard is player 1), NETWORK (offline, host
+or join; a second row then starts hosting or connects) and ADVANCED (*Race builder*: the game's own race builder,
+formerly the ADVANCED: DEV RACE BUILDER row). The right column explains the focused row and, for a setting, gives
+its default (*Default value: Top / bottom*). Left / right change a value; **B**, Backspace or **BACK** returns to the
+posters.
 
 ### 2. Race setup (steps 1-4)
 
-![CLASS step](docs/screenshots/free-mode/03-setup-class.jpg)
+![CLASS step](docs/screenshots/0.12/03-setup-class.jpg)
 
-**Step 1, CLASS:** landspeeder, speeder bike, skim speeder or podracer, with the class traits from the game data.
-Fixed in 0.10.1: the trait texts used to show the game's raw markup (`USE <ACTION ID="IMPROVEDSTEERING"/> TO DRIFT`);
-they now read *DRIFT: USE X TO DRIFT SHARPLY WHILE MAINTAINING SPEED*.
+**Step 1, CLASS:** under the **/RACE SETUP** title, a step row that turns each choice into a ticked value as you go,
+and BACK at the bottom right. Four class posters (landspeeder, speeder bike, skim speeder, podracer) with the grid size
+and the class traits, and a panel built from the game's vehicle-select parts with the focused class's description and
+traits (DRIFT: *Use (X) to drift sharply while maintaining speed*). The pill notes that changing the class resets
+planet and track.
 
-![PLANET step](docs/screenshots/free-mode/04-setup-planet.jpg)
+![PLANET step](docs/screenshots/0.12/04-setup-planet.jpg)
 
-**Step 2, PLANET:** the campaign's own planet carousel with the planet's description and its circuit and track count
-(*6 circuits, 17 tracks* on Jakku). The black box is the planet video that did not start in the test window (being
-looked at with the redesign).
+**Step 2, PLANET:** the campaign's planet arc, a row of planet discs to pick with, the planet's description and its
+circuit and track count for the class (*6 CIRCUITS · 17 TRACKS FOR THE LANDSPEEDER* on Jakku), and the planet's Arcade
+art for that class where the planet video box used to be.
 
-![TRACK step](docs/screenshots/free-mode/05-setup-track.jpg)
+![TRACK step](docs/screenshots/0.12/05-setup-track.jpg)
 
-**Step 3, TRACK:** the game's own run map of the planet: one row per circuit, one node per variant (standard,
-reverse, mines, scorching...), and a preview with laps, direction and the conditions the game offers for that track.
-Only the tracks the game itself offers in Quick Race and the Arcade are listed: no debug, prologue or campaign copies.
+**Step 3, TRACK:** the game's run map of the planet in one frame: one row per circuit, one node per variant (standard,
+reverse, mines, scorching, point to point...), and a card with the laps, the variant and its conditions (*3 LAPS ·
+SCORCHING · REVERSE · LOOP B · HARD*). Only the tracks the game itself offers in Quick Race and the Arcade are listed:
+no debug, prologue or campaign copies.
 
-![CONDITIONS step](docs/screenshots/free-mode/06-setup-conditions.jpg)
+![CONDITIONS step](docs/screenshots/0.12/06-setup-conditions.jpg)
 
-**CONDITIONS:** the time of day / weather variants the game has for the chosen track (here *Sunset* and *Bluehour*).
+**CONDITIONS** (only for a track with several): one poster per time of day or weather the game offers for the chosen
+track, and the race's facts for the focused one (here *Sunset* and *Bluehour*: "Debris Dunes, reverse, loop B: 2 laps
+at sunset. This track also runs at Bluehour.").
 
-![MODE step](docs/screenshots/free-mode/07-setup-mode.jpg)
+![MODE step](docs/screenshots/0.12/07-setup-mode.jpg)
 
-**Step 4, MODE:** race, full grid race, mixed class race or eliminator, and the grid size (*12 racers, 10 AI* here:
-up to 12 speeders or 8 pods).
+**Step 4, MODE:** four mode posters (race, full grid race, mixed class race, eliminator) with the focused mode's
+description, and two GRID rows. **Racers** is the grid size with its AI count (*12 (10 AI)*; up to 12 speeders or 8
+pods; *Set by the game* for the modes with a grid of their own). **Opponents** is back in 0.12.0: the AI's strength,
+from *TIER 1 · MASTIFF (0%)* (the default: AI without abilities or parts) to *TIER 6 · WHIPPET (58%)*, here *TIER 3 ·
+HUSKY (23%)*; pods have no tier (the row reads *Standard*). Under the rows, the grid as a strip of silhouettes
+(humans solid, AI dimmed): *2 players and 10 AI, all in landspeeders*.
 
 ### 3. RACERS: pilot, then vehicle, then perks (step 5)
 
-Every player gets **the same card** and moves through **PILOT → VEHICLE → PERKS → READY** with their own pad:
-D-pad up/down = row, left/right = change (on the stage strip: switch stage), A = next or open a picker, B = back
-(a guest holds B to leave). **A, A, A** from a fresh card is the quick path to READY with the pilot's signature vehicle
-and style kit. Picks are remembered per pad and come back after a restart.
+Every player gets **the same card**, drawn like the game's Scenarios posters, and moves through **PILOT → VEHICLE →
+PERKS → READY** with their own pad: D-pad up/down = row (the top row is the stage icons: left/right there switches
+stage), left/right = change, A = next or open a picker, B = back (a guest holds B to leave). **A, A, A** from a fresh
+card is the quick path to READY with the pilot's signature vehicle and style kit. Picks are remembered per pad and
+come back after a restart.
 
-![2 players: pilot and perks](docs/screenshots/free-mode/10-racers-2p-pilot-perks.jpg)
+![2 players on PILOT](docs/screenshots/0.12/10-racers-2p-pilot.jpg)
 
-**PILOT (left) and PERKS (right).** P1 browses pilots: the full-body art over the racer style's artwork, the style
-(*Tech Expert*: "a technical style for racers who want to take full advantage of abilities") with its three traits,
-the signature vehicle (*any landspeeder* for Katja Mox) and the roster of heads; a pilot another player holds is
-dimmed with that player's tag. P2's **PERKS** board shows the whole kart at once: the loadout kit (*Survivor kit*),
-**POWER 31 / 60** and ENERGY, the four d-pad abilities laid out like the race HUD with the crash ability in the
-middle, 4 of 6 part slots with their tier pips, the six upgrade bars (cornering, afterburner, resilience, ramjet,
-battery, drift) at their levels, the racer style with its traits, and the game's own description card for the
-selected part (*Protective Ignition III: perfect start grants Shielded until it is broken*).
+**PILOT:** the pilot's poster art, the racer style (Tech Expert for Katja Mox, Survivor for Nik Skandaro: *PILOT'S OWN
+STYLE*) with its three traits, the signature vehicle (*ANY LANDSPEEDER*, *SIGNATURE · JAKOBEAST*) and the roster of
+heads. The line above the name says where that player's view will be in the race and the pilot's place in the roster
+(*TOP LEFT · 2 / 13*: four pads were connected for this shot, so the race has four views). The four icons at the top
+of each card are the stages; the pill tells pads 3 and 4 how to join.
 
-![2 players: vehicle and perks](docs/screenshots/free-mode/11-racers-2p-vehicle-perks.jpg)
+![2 players on VEHICLE](docs/screenshots/0.12/11-racers-2p-vehicle.jpg)
 
-**VEHICLE:** a live 3D render of the pick (it turns on this stage), the manufacturer badge, DRIVEN BY with the pilot's
-head, and the MODEL and LIVERY rows (*Beluga*, livery *Shade*), plus the class traits underneath.
+**VEHICLE:** a live 3D render of the pick in a studio, the manufacturer badge, the game's own model name (*ARZ 41*,
+*JAKOBEAST*; in the game's language) with a row of model tiles to switch models, the LIVERY, DRIVEN BY with the pilot's
+head, the class traits, and a SIGNATURE chip on the pilot's own vehicle.
 
-![Parts picker and a ready card](docs/screenshots/free-mode/12-racers-2p-picker-ready.jpg)
+![2 players on PERKS](docs/screenshots/0.12/12-racers-2p-perks.jpg)
 
-**Pickers and READY.** A on a perk slot opens a picker by category (*Energy & abilities, 2 / 13*) with tier pips, the
-equipped part ticked and its description; equipping something else turns the kit into *CUSTOM, FROM TECH EXPERT*.
-P2's **READY** card: the pilot, a still render with the READY stamp in the player colour, the complete loadout as one
-strip of icons, POWER / ENERGY and *READY, WAITING FOR P1*.
+**PERKS:** the whole kart on one board: the kit (*SURVIVOR KIT*; P1 edited theirs, so it is a *CUSTOM KIT*, *FROM TECH
+EXPERT*), the four d-pad abilities laid out like the race HUD with the crash ability in the middle, 4 of 6 part slots
+with their tier pips, **POWER 31 / 60** and ENERGY, the six upgrade bars (cornering, afterburner, resilience, ramjet,
+battery, drift) at their levels, the racer style with its traits, and a detail card for the selected slot. A on a slot
+opens a picker with every item of that category, with tier pips and the game's description.
 
-![3 players](docs/screenshots/free-mode/13-racers-3-players.jpg)
+![2 players READY](docs/screenshots/0.12/13-racers-2p-ready.jpg)
 
-**Three players on three different stages** (vehicle, parts picker, ready). The cards shrink as a set so nothing is
-cut off.
+**READY:** the pilot's poster with a check badge by the P-tag, a still render of the vehicle, the model and style, the
+complete loadout in two rows of icons and POWER / ENERGY. P1's card offers **START RACE** (with a tick once everybody
+is ready) and SAVE AND RETURN; P2's card reads *WAITING FOR P1*, the pill *ALL READY · P1: (A) TO START*. With mouse +
+keyboard, START RACE and SAVE AND RETURN move to the bottom right next to BACK, and P1's card shows a READY pill.
 
-![4 players, one per stage](docs/screenshots/free-mode/14-racers-4-players-stages.jpg)
+![4 players](docs/screenshots/0.12/14-racers-4-players.jpg)
 
-**Four players, one per stage:** pilot, vehicle, perks and ready side by side. The status line under the cards always
-says where everybody is.
+**Four players, one per stage:** P1 on PILOT, P2 on VEHICLE, P3 on PERKS (*REDLINER KIT*) and P4 READY, *WAITING FOR
+P1*. With four players the cards are at their narrowest: VEHICLE switches models in one title row (*JAKOBEAST* between
+two arrows) instead of the row of tiles.
 
-![4 players ready](docs/screenshots/free-mode/15-racers-4-players-ready.jpg)
+![Podracers](docs/screenshots/0.12/16-racers-pods.jpg)
 
-**Everybody ready.** P1's card offers **START RACE, ALL READY** (and SAVE AND RETURN); the guests wait for P1.
-
-![Podracer pilots](docs/screenshots/free-mode/16-racers-pods-pilots.jpg)
-
-**Podracers (Tatooine):** the eight pod pilots, each with their own pod style (*Vulptereen 327* for Dud Bolt, with his
-traits Repulsor Fuel Link, Potential Energy, Repulsor Alignment) and signature pod.
-
-![Podracer perks](docs/screenshots/free-mode/17-racers-pods-perks.jpg)
-
-**Pod perks:** the sixth upgrade is AIR BRAKE for pods, and the pod kits load like the speeder kits. Items that need
-a ramjet are hidden for pods, which have none.
+**Podracers (Tatooine, Mos Espa Speedway)** use the same cards. The eight pod pilots have their own racer styles and
+signature pods (Shade: *RAMJET RIDER*, *MYTH*; Teemto Pagalies: *IPG-X1131 LONGTAIL*), the pods carry their own names
+(*VULPTEREEN 327*, driven by Dud Bolt), and the pod kits load like the speeder kits (P3: the *CUSTOM ORD PEDROVIA*
+kit, named after Gasgano's pod). For pods the sixth upgrade is AIR BRAKE, and items that need a ramjet are hidden: pods
+have none.
 
 ### 4. In the race
 
-![Four views, each with its own abilities](docs/screenshots/free-mode/20-race-4-views.jpg)
+![Four views, each with its own abilities](docs/screenshots/0.11/20-race-4-views.jpg)
 
 **Each player races exactly what they picked:** pilot, vehicle, upgrade levels, abilities, crash ability and parts are
 written into that player's build when the race launches, the traits are applied at the start, and everything is
@@ -124,33 +153,83 @@ checked again in the race. Each view's ability cluster (bottom left) shows that 
 views are test pads that were connected but never joined: they race as AI-driven players. START asks twice when that
 would happen.)
 
-![Results](docs/screenshots/free-mode/21-results.jpg)
+![Results](docs/screenshots/0.11/21-results.jpg)
 
-**Results.** No AI racer uses a human's pilot any more: an AI that had your pilot gets another one, with its own car
-**and its own name** (earlier builds still showed the old name for that AI). **P1 can now press CONTINUE on this screen**: the
-game gives it to the last local player, so P1's pad used to do nothing here.
+**Results.** No AI racer uses a human's pilot: an AI that had your pilot gets another one, with its own car **and its
+own name**. **P1 can press CONTINUE on this screen**: the game gives it to the last local player, so P1's pad used to
+do nothing here.
 
-![HUD in side-by-side views: before the fix](docs/screenshots/free-mode/22-hud-side-by-side-before.jpg)
+### RESTART RACE in the pause menu
 
-**Being fixed: the HUD in half-width views.** With two players side by side (and in the 3- and 4-player views), the
-top bar with the timer, lap and position is shrunk to fit the narrow view and becomes hard to read on a TV. The fix
-keeps these readable (timer pinned left, lap and position pinned right, at full size) and is being tested.
+| | |
+|---|---|
+| ![Pause menu with RESTART RACE](docs/screenshots/0.11/23-restart-pause-menu.jpg) | ![RESTART RACE selected](docs/screenshots/0.11/24-restart-row.jpg) |
+| **RESTART RACE sits right under RESUME.** It is the game's own Retry row with the game's own "Restart Race" text, so it looks and sounds like every other row. All rows stay usable: moving the rows down used to leave them grey and the D-pad stopped at the first one. | **The game's description** ("Give it another go!") shows when the row is selected. Every player who paused can use it: P1 directly, a guest through the menu bridge (its A presses the row it has selected). |
+| ![The game's confirm dialog](docs/screenshots/0.11/25-restart-confirm.jpg) | ![The restarted race](docs/screenshots/0.11/26-restart-restarted.jpg) |
+| **A asks the game's own question** (ACCEPT / CANCEL). CANCEL goes back to the pause menu, nothing happens. B does not close this dialog for P1 (the game's dialog has no B shortcut): CANCEL is one D-pad press away. | **ACCEPT starts the same race again**: same track and grid, the timer, laps and positions reset, each player's pilot, vehicle, abilities, parts and traits applied again. Tested from P1's pause and from P2's pause, three restarts in a row. |
 
-![Race restarted](docs/screenshots/free-mode/23-restart-race.jpg)
+Only offered in an offline race SWGRCouch started (FREE MODE); never online, in the campaign or arcade, or on a network
+client. Settings: `PauseRestart*` in `docs/REFERENCE.md` §7.2 (`PauseRestart = false` removes the row).
 
-**Coming: RESTART RACE in the pause menu.** The game has its own restart call; triggered here from a running race, it
-goes straight back to the start of the same race (same track, same grid, every player's loadout checked again: this
-shot is the restarted race's start). The pause-menu entry is being added.
+**Guests' pause menus on the current game build.** A guest could move through its own pause menu but its A selected
+nothing (always after a restart; the game's own seamless travel leaves the guest's menu input dead). The menu bridge
+now presses the row the guest has selected, its B resumes or leaves Settings, and after a restart its A also works on
+Settings rows (`MenuBridgeGuestPauseMenu`, V-MB-10).
 
-### 5. Coming next
+![HUD in side-by-side views: default vs the opt-in layout](docs/screenshots/0.11/22-hud-fit-vs-readable.jpg)
 
-A visual redesign of the FREE MODE page, the race setup and the RACERS cards toward the look of the game's own
-menus (character select, vehicle select, the Multiplayer tab's poster tiles), RESTART RACE in the pause menu, and
-a readable HUD in half-width views.
+**HUD in half-width views: measured, not worth it.** The same race restarted once in each mode (2 players side by
+side): the opt-in `HudNarrowViews = "readable"` layout does not make the timer, lap and position any bigger. It only
+pulls the top bar together and shrinks the engine row. The default stays as in 0.10 (left); the narrow layout stays
+available as an opt-in if you prefer it on your TV (`docs/REFERENCE.md` §7.2).
+
+### 5. The 0.11 look
+
+Prefer the old pages? `UiStyle = "classic"` in `config_user.lua` brings back the 0.11 FREE MODE rows, the 0.11 RACE
+SETUP frame and the 0.11 RACERS cards (`cards.lua`); the new player colours stay (see *Configuration*). The Opponents
+row is part of the new MODE step only: with the classic pages, races use the `OpponentTier` saved in `settings.txt`.
 
 ---
 
-## What's new since 0.9.3
+## What's new in 0.12.0 (since 0.10.1)
+
+0.11 was not released on its own: its features are part of 0.12.0 (last group below).
+
+- **The FREE MODE pages in the game's own look (UI v2)**, drawn with the game's own art, fonts and layouts:
+  - **FREE MODE tab**: four posters (RACE card, START RACE, ADD PLAYERS, OPTIONS), the players strip (each pad's tag,
+    the head of its last pilot, what it can do) and a status pill for messages.
+  - **OPTIONS**, a page of its own: 2-player layout, split graphics, takedown cameras, name tags, keyboard as player 1,
+    network and the game's race builder. Each row has a help text; each setting also shows its default.
+  - **RACE SETUP**: the /RACE SETUP title, a step row that ticks off each choice, BACK at the bottom right. CLASS,
+    CONDITIONS and MODE are posters; PLANET has the planet discs and the planet's Arcade art (no video box); TRACK is
+    the run map in one frame.
+  - **RACERS cards** drawn like the game's Scenarios posters. VEHICLE shows the game's own model names, in the game's
+    language (*ARZ 41*, *JAKOBEAST*), and a studio render. With mouse + keyboard, START RACE and SAVE AND RETURN move
+    from P1's card to the bottom right.
+  - **Player colours** from the game's planet tones: P1 apricot, P2 teal, P3 lime, P4 Crait red (P-tags, cards,
+    players strip, the name tags in the race).
+  - The 0.11 look stays one switch away: `UiStyle = "classic"` (see *Configuration*).
+- **Opponents (the AI's strength) is back**: RACE SETUP > MODE > **Opponents**, TIER 1 (default) to TIER 6, for speeder
+  races. The AI race on that tier's build; every human keeps their own RACERS loadout. 0.10.1 ran every RACERS race on
+  TIER 1. Saved as `OpponentTier` in `settings.txt`.
+- **Pad B goes back on OPTIONS and in RACE SETUP.** Before the first race the game sends P1's B only to its own QUIT
+  GAME? prompt, with ACCEPT focused, where one more A quits the game. The mod now answers that prompt No and goes back
+  (`BackPromptAsBack`). On the FREE MODE posters, B is still the game's Exit Game (see *Known issues*).
+- **Hot-plugged pads**: a pad switched on while the game runs takes P1 only while P1's own pad is gone (for example a
+  Moonlight / Sunshine pad that reconnects). A second pad switched on next to a working P1 pad stays free for ADD
+  PLAYERS, and with *Keyboard is player 1* no pad takes P1 (`HotplugPadToP1`).
+- **Release defaults**: `Debug = false` and the research probes off (fewer log lines; set `Debug = true` in
+  `config_user.lua` for a bug report). A first install keeps UE4SS's console windows off (0.10.1 turned them on):
+  `install.sh --console` turns them on, `--quiet-console` off again. `install.sh` names the UE4SS Galactic Racer
+  Edition when UE4SS is missing, and warns when it finds UE4SS 3.0.1-1160, which does not boot on the current game.
+- From the 0.11 builds:
+  - **RESTART RACE** in the pause menu (any player who paused), with the game's own confirm dialog.
+  - **Guests' pause menus work on the current game build**: a guest's A selects the row it has selected, its B
+    resumes or backs out of Settings, also after a restart.
+  - **HUD in half-width views**: an opt-in narrow layout (`HudNarrowViews = "readable"`) was measured and does not
+    make the timer, lap and position bigger (see above); the default is unchanged.
+
+### Already in 0.10.1 (new since 0.9.3)
 
 - **FREE MODE**: the SPLIT SCREEN tab is renamed (the mod works for one player too).
 - **RACERS step**: pilot, then vehicle, then perks, then ready, one identical card per player; all perks unlocked
@@ -167,101 +246,174 @@ a readable HUD in half-width views.
   updated game the filter did not install, so **both cars obeyed pad 1**; this fixes it.
 - CLASS step trait texts no longer show raw markup; the installer keeps your UE4SS console setting on a re-install.
 
-**Coming next:** the HUD in half-width views, RESTART RACE in the pause menu, and the visual redesign (section 5).
-
 ## Status: tested live
 
 | Feature | 1 player | 2 players | 3 players | 4 players |
 |---|---|---|---|---|
+| UI v2 pages: FREE MODE tab, OPTIONS, RACE SETUP, RACERS cards | ✅ | ✅ | ✅ | ✅ |
+| Pad B goes back on OPTIONS and RACE SETUP (the game's QUIT GAME? prompt answered No) | ✅ | ✅ | — | — |
+| `UiStyle = "classic"` (the 0.11 pages) | ✅ | — | — | — |
+| Opponents: TIER 1 and TIER 4 races, 5 launches in a row from RACE SETUP | — | ✅ | — | — |
+| A pad switched on next to a working P1 pad stays free (P1 keeps its pad) | ✅ | — | — | — |
 | FREE MODE tab, race setup, game-only tracks | ✅ | ✅ | ✅ | ✅ |
 | RACERS step (pilot, vehicle, perks, pickers, ready) | ✅ | ✅ | ✅ | ✅ |
 | Loadouts applied and verified in the race | ✅ | ✅ | — | — |
 | Each pad drives only its own car (input filter, current game build) | — | ✅ | ✅ (0.9) | — |
 | P1 owns the menus after a race; P1 continues the results | — | ✅ | — | — |
+| RESTART RACE from the pause menu (P1 and a guest), loadouts applied again | not tested yet | ✅ | — | — |
+| A guest's own pause menu, Settings and the confirm dialog | — | ✅ | — | — |
 | Keyboard keys (crash fix) | ✅ | ✅ | — | — |
-| Podracers in the RACERS step | ✅ | ✅ | — | — |
+| Podracers in the RACERS step | ✅ | ✅ | — | ✅ |
 | A full podrace with loadouts, network races | not tested yet | | | |
 
+The UI v2 pages were checked at 1280x720, 1920x1080, 3840x2160 and 1280x800 (16:10). English, German and French were
+checked from a game start in that language. Japanese, Chinese (Simplified), Korean, Polish, Turkish and Arabic were
+switched in a running game: the game's texts on the mod's pages show in those scripts (Arabic right to left), but long
+localized track names were not checked that way. Opponents: a TIER 1 race gave the AI power level 0, no abilities and no parts; a
+TIER 4 race gave them power level 18 and 2 abilities each (TIER 2: power level 6, 1 ability); both players' own
+loadouts were in place in every race.
+
 ## Requirements
-- **STAR WARS Galactic Racer** on Steam, build CL 382493 (the October 2026 hotfix) or the launch build CL 381121.
-- **UE4SS Galactic Racer Edition** (open beta, 2026-10-08).
+- **STAR WARS Galactic Racer** on Steam, build CL 382493 (the October 2026 hotfix): 0.12.0 was tested on this build.
+  The native input filter also knows the launch build CL 381121, but 0.12.0 was not run on it.
+- **UE4SS Galactic Racer Edition** (open beta, 2026-10-08), in the with-UE4SS zip. UE4SS 3.0.1-1160 (the 0.9.0 and
+  0.9.1 zips) does not boot on the current game.
 - One pad per player (Xbox layout tested; DualShock through Steam Input or Moonlight works).
 - Windows, or Linux / Steam Deck with Proton (tested: GE-Proton 11-7 + Steam Linux Runtime 4).
 
 ## Install
 
 Download the latest release from the **Releases** page:
-- `SWGRCouch-0.10.1-with-UE4SS.zip`: mod + UE4SS Galactic Racer Edition (open beta, 2026-10-08) (easiest);
-- `SWGRCouch-0.10.1.zip`: mod only, if you already have that UE4SS build.
+- `SWGRCouch-0.12.0-with-UE4SS.zip`: mod + UE4SS Galactic Racer Edition (open beta, 2026-10-08) (easiest);
+- `SWGRCouch-0.12.0.zip`: mod only, if you already have that UE4SS build.
 
 ### Linux / Steam Deck (Steam + Proton)
 ```sh
-unzip SWGRCouch-0.10.1-with-UE4SS.zip && cd SWGRCouch-0.10.1-with-UE4SS
+unzip SWGRCouch-0.12.0-with-UE4SS.zip && cd SWGRCouch-0.12.0-with-UE4SS
 ./install.sh "$HOME/.local/share/Steam/steamapps/common/STAR WARS Galactic Racer"
 ```
 Then set the launch options in Steam (Properties > Launch options): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
 `install.sh` never deletes anything (edited files get a dated copy first) and keeps your `config_user.lua`,
-`settings.txt` and UE4SS console setting. `./install.sh --help` lists the options.
+`settings.txt` and UE4SS console setting. A first install leaves UE4SS's console windows off: add `--console` to turn
+the log console and the GUI console on (for a bug report), `--quiet-console` to turn them off again.
+`./install.sh --help` lists the other options.
+
+With the with-UE4SS zip, `install.sh` replaces the UE4SS core files such as `dwmapi.dll` and `UE4SS.dll` (a dated copy
+first) and keeps your other UE4SS files; `mods.txt` and `UE4SS-settings.ini` get the changes the mod needs. With the
+mod-only zip it uses the UE4SS already in the game; without one it stops and names the with-UE4SS zip. If it warns
+that the installed UE4SS is 3.0.1-1160, install from the with-UE4SS zip.
 
 ### Windows
 1. Open `<game>\Griffin\Binaries\Win64\` (the folder with `SWGR-Win64-Shipping.exe`).
 2. With the with-UE4SS zip: copy `ue4ss-build\dwmapi.dll` and the `ue4ss-build\ue4ss\` folder there.
 3. Copy `SWGRCouch\` into `ue4ss\Mods\` (so you get `ue4ss\Mods\SWGRCouch\Scripts\main.lua`), replacing old files.
 4. Copy the `ue4ss_signatures\*.lua` files into `ue4ss\UE4SS_Signatures\`.
-5. `ue4ss\Mods\mods.txt` must contain the line `SWGRCouch : 1`.
+5. `ue4ss\Mods\mods.txt` must contain the line `SWGRCouch : 1` (above the last line, `Keybinds : 1`).
 
-**Updating from 0.9.3:** install over it the same way. 0.9.3 on the current game build let one pad drive every car;
-0.10.1 fixes that.
+**Updating from 0.10.1:** install over it the same way. If your `config_user.lua` sets `CardW`, `CardGap`, `CardH`,
+`CardRowW`, `SetupCMapVideoW`, `SetupCMapBackground`, `SetupCMapMapW` or `SetupCMapMapH`, remove those lines: a value
+set there also replaces the new layout's own value.
 
 ### Check it works
-Start the game. `Griffin\Binaries\Win64\ue4ss\UE4SS.log` shows `SWGRCouch 0.10.1 loading` and
-`modules=42/42`, and the main menu has a **FREE MODE** tab. In a race with two pads, the log shows
+Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 0.12.0 loading` and `modules=46/46`, and the
+main menu has a **FREE MODE** tab with four posters. In a race with two pads, the log shows
 `native filter loaded: installed=1 reason=ok build=382493`.
+
+## Uninstall
+- **Linux / Steam Deck:** remove `WINEDLLOVERRIDES="dwmapi=n,b"` from the launch options: UE4SS and the mod no longer
+  load (the files can stay).
+- **Windows:** delete or rename `dwmapi.dll` in `<game>\Griffin\Binaries\Win64\`.
+- Every file `install.sh` changed has a dated copy next to it (`*.swgrcouch-<date>`). If you ran it with `--prefix`:
+  `install.sh --prefix <wine prefix> --net-off` removes the network override, and `--fastboot-ini-undo` turns the
+  Epic link setting in `GameUserSettings.ini` back on.
+- The Epic link setting in your game profile stays off after an uninstall. To play online again, put back the `Saved`
+  folder you copied before the install (see the warning at the top).
 
 ## Play
 1. Main menu > **FREE MODE** (LB / RB).
-2. Alone: **START RACE**, or **RACE: ...** to choose the class, planet, track, conditions and mode.
-3. With friends: **ADD PLAYERS**, then each friend presses **A** on their own pad.
-4. In RACERS, everybody picks pilot, vehicle and perks; P1 starts when everybody is READY.
-5. In the race, Start pauses (the pause menu belongs to whoever pressed it). On the results, any player's A continues.
+2. Alone: **START RACE**, or A on the **RACE** card (*CHOOSE RACE* the first time) to choose the class, planet, track,
+   conditions and mode.
+3. With friends: A on **ADD PLAYERS**, then A again within 5 seconds to confirm (the poster then reads *PADS ON*; the
+   pads stay on until the game restarts). Each friend presses **A** on their own
+   pad; the players strip shows who joined. A guest leaves with **B** (in RACERS: hold B).
+4. In RACE SETUP, **B** (or Backspace, or BACK) goes back one step; on CLASS it closes RACE SETUP. In RACERS,
+   everybody picks pilot, vehicle and perks, and B steps back a stage. P1 starts when everybody is READY (START RACE is
+   on P1's card with a pad, at the bottom right with mouse + keyboard).
+5. **OPTIONS** holds the 2-player layout, split graphics, takedown cameras, name tags, keyboard as player 1, network
+   and the game's race builder; **B**, Backspace or **BACK** returns to the posters. On the posters themselves, B is
+   the game's Exit Game (see *Known issues*). With *Keyboard is player 1*, P1 goes back with Backspace.
+6. In the race, Start pauses (the pause menu belongs to whoever pressed it; RESTART RACE is right under RESUME). On the
+   results, any player's A continues.
 
 ## Test it (and report)
-1. Boot: FREE MODE tab, `modules=42/42`.
-2. Solo race of each class; then 2-4 players.
-3. RACERS: change pilot, vehicle, perks with every pad; quick path A, A, A; START.
-4. In the race: your own abilities in your own HUD; every pad drives only its own car; pause from P1 and a guest.
-5. Results: P1 presses A; back in the menu, P1's pad drives the menu and Settings.
-6. Keyboard: arrows and Enter in the FREE MODE page and in RACERS.
+1. Boot: `SWGRCouch 0.12.0 loading` and `modules=46/46`; the FREE MODE tab shows four posters.
+2. OPTIONS: change each row, then press B (or Backspace): you are back on the posters, with no QUIT GAME? prompt left
+   on screen.
+3. A solo race of each class; then 2-4 players. In RACE SETUP, B steps back one step. Try MODE > Opponents on TIER 1
+   and on a higher tier.
+4. RACERS: change pilot, vehicle and perks with every pad; the quick path A, A, A; START (with a pad on P1's card;
+   move the mouse and START RACE / SAVE AND RETURN move to the bottom right).
+5. In the race: your own abilities in your own HUD; every pad drives only its own car; pause from P1 and from a guest;
+   RESTART RACE.
+6. Results: P1 presses A; back in the menu, P1's pad drives the menu and Settings.
+7. Keyboard: arrows, Enter and Backspace on the FREE MODE tab, OPTIONS, RACE SETUP and RACERS.
+8. Optional: `UiStyle = "classic"` in `config_user.lua`, restart the game: the 0.11 pages.
 
-When reporting, attach **`Griffin/Binaries/Win64/ue4ss/UE4SS.log`** (every mod line starts with `[SWGRCouch]`) and any
-`crash_*.dmp` next to it. The full list of checks with their log lines is [docs/REFERENCE.md](docs/REFERENCE.md) §9.
+When reporting, set `Debug = true` in `config_user.lua` first and attach **`Griffin/Binaries/Win64/ue4ss/UE4SS.log`**
+(every mod line starts with `[SWGRCouch]`) and any `crash_*.dmp` next to it. The full list of checks with their log
+lines is [docs/REFERENCE.md](docs/REFERENCE.md) §9.
 
 ## Configuration
-Never edit `config.lua`. Create `ue4ss/Mods/SWGRCouch/Scripts/config_user.lua` instead:
+Never edit `config.lua`. Create `ue4ss/Mods/SWGRCouch/Scripts/config_user.lua` instead, then restart the game:
 ```lua
 return {
-    SetupCampaignMap = true,     -- campaign-style planet carousel and run map (default true since 0.10)
+    UiStyle          = "v2",     -- "classic" brings back the 0.11 pages (FREE MODE rows, RACE SETUP frame, cards)
+    BackPromptAsBack = true,     -- false: pad B on OPTIONS / RACE SETUP opens the game's QUIT GAME? prompt again
     SetupPlayerFlow  = "cards",  -- "classic" brings back the 0.9 vehicle columns instead of RACERS
-    HotplugPadToP1   = "off",    -- a pad connected later takes P1 ("front" | "always" | "off")
+    HotplugPadToP1   = "off",    -- a pad switched on later never takes P1 ("front" | "always" | "off")
     SkipRaceIntro    = true,     -- skip the race intro cinematics
 }
 ```
-Every key is listed and explained in [docs/REFERENCE.md](docs/REFERENCE.md) §7.2 and in `Scripts/config.lua`.
+- `UiStyle = "classic"` is the way back to the 0.11 pages if the new ones give you trouble; the new player colours
+  stay.
+- `BackPromptAsBack = false` leaves the game's QUIT GAME? prompt on OPTIONS and RACE SETUP (the 0.11 behaviour).
+- **Opponents** is not a `config_user.lua` key: it is `OpponentTier` (1 to 6, default 1) in
+  `ue4ss/Mods/SWGRCouch/settings.txt`, with your other choices (2-player layout, network...). RACE SETUP > MODE >
+  Opponents changes it.
+- `Debug = true` adds the log lines a bug report needs.
+
+A layout key you set here (`CardW`, `CardH`, `SetupCMapVideoW`...) applies to both looks. Every key is explained in
+`Scripts/config.lua`, and most of them in [docs/REFERENCE.md](docs/REFERENCE.md) §7.2; the `settings.txt` keys are in
+§7.1.
 
 ## Known issues
+- **B on the FREE MODE posters is the game's Exit Game.** As on every main-menu tab, P1's B there opens the game's
+  QUIT GAME? prompt with ACCEPT focused: choose CANCEL. Only OPTIONS and RACE SETUP turn B into back
+  (`BackPromptAsBack`).
+- **The action bar at the bottom is the game's.** On OPTIONS and RACE SETUP it still reads *(B) Exit Game*, and
+  clicking Exit Game with the mouse there also goes back: to quit the game, return to the posters first. On TRACK it
+  shows *(A) Select* twice.
+- **Joining**: a guest's A press that joins can also click the poster P1's cursor is on. START ignores it
+  (`CardGuestClickGuardMs`, 150 ms); the RACE, ADD PLAYERS and OPTIONS posters, the OPTIONS rows and the
+  `UiStyle = "classic"` rows do not yet.
 - **P1 crashes out while others race**: P1's view can stay on a frozen crash camera instead of following a racer.
-- **Joining**: a guest's A press that joins can also click the row P1's cursor is on in the FREE MODE page.
 - With two wrecked guests, both may follow the same AI car.
 - Pads that are connected but not joined race as AI-driven players with their own view.
 - The game pauses itself after about a minute without any game input from any player (the game's own inactivity
   pause).
+- Languages other than English, German and French are only partly checked (see *Status*). A RACERS card text that
+  does not fit its box is logged as `text overflow` in `UE4SS.log`: please report those lines with the game's language.
+- After changing the game's language while it runs, restart the game: until then the RACE SETUP track names and the
+  CLASS description can keep the previous language.
 
 ## How it works (short)
 - **Players**: guests are extra UE local players, created after ADD PLAYERS and kept until the game exits.
-- **Race launch**: the game's own custom-race path, with the grid rewritten in memory; each human's pilot and loadout
-  are written into the launch build and checked again in the race.
-- **UI**: the game's own widgets, created from Lua; the RACERS cards are drawn by `cards.lua` from per-player view
-  models built by `racers.lua`.
+- **Race launch**: the game's own custom-race path, with the grid rewritten in memory. The race launches on the build
+  of the chosen Opponents tier; each human's pilot and loadout are written over it and checked again in the race.
+- **UI**: the pages are built on `theme.lua` from the game's own textures and fonts and a few of its widgets (the page
+  title, pills and panels, the campaign map); every focus target is an invisible game button under the painted look.
+  The RACERS cards are drawn by `cards2.lua` (`cards.lua` with `UiStyle = "classic"`) from per-player view models built
+  by `racers.lua`. `backprompt.lua` answers the game's QUIT GAME? prompt No on OPTIONS and RACE SETUP and goes back.
 - **Input**: a small native DLL (`SWGRCouch/native`, source included) gives each player's car its own pad.
 - **Per-player UI**: menus and messages the game makes for one player are re-routed to the right player; P1 gets the
   menus after a race (`feowner.lua`) and a catcher button on screens another player owns (`menubridge.lua`).
@@ -269,7 +421,8 @@ Every key is listed and explained in [docs/REFERENCE.md](docs/REFERENCE.md) §7.
 Details in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Build the native filter (optional)
-`SWGRCouch/native/inputfilter/build.sh` (mingw-w64) rebuilds `swgr_inputfilter.dll` from `inputfilter.c`.
+`SWGRCouch/native/inputfilter/build.sh` rebuilds `swgr_inputfilter.dll` from `inputfilter.c` with the system LLVM
+(`clang`, `lld-link`, `llvm-dlltool`); no Windows SDK is needed.
 
 ## Credits and licences
 - SWGRCouch: MIT (see `LICENSE`).

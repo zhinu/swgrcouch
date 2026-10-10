@@ -47,6 +47,11 @@
 -- VERIFY(V-MB-05): P2 pauses, EXIT TO MAIN MENU, A: "P2 A -> dialog WBP_Modal_C (Dialog:1) button 1/2 'Accept'
 --   (focused | desired focus | first button = accept): clicked" -> main menu; B instead: "button 2/2 'Cancel' (last
 --   button = cancel)" -> the dialog closes, P2's pause menu works again; D-pad: "P2 D-pad -> dialog ... button 2/2".
+-- VERIFY(V-MB-10) (0.11.0): P2 pauses, D-pad down to RESTART RACE, A: "[menubridge] P2 A -> WBP_PauseRacing_C
+--   Btn_RetryRace (owner focus): clicked (V-MB-01/02)" and the confirm dialog opens; A on RESUME resumes; no "takes P2's
+--   pad natively" line for the pause menu (Settings keeps it for A); B in Settings: "P2 B -> WBP_Settings_C: HandleBack()
+--   (V-MB-03)" and P2 is back on its pause menu. After RESTART RACE: "P2's native A / B did nothing on its own pause menu
+--   (world #N): ... bridged until the next world" and P2's A toggles a Settings row once.
 -- VERIFY(V-MB-06): back in the front end after a split race: "front-end profile card WBP_MP_ProfileCard: owner P2
 --   (UIManager owner = last local PC) -> P1 ... name 'Player 2' -> '<account name>'"; the top right shows P1's name.
 
@@ -211,9 +216,14 @@ local function top(now, force)
     return nil
 end
 
--- the screen's selected / focused CommonButton (buttons whose outer chain reaches the screen)
+-- the screen's selected / focused CommonButton (buttons whose outer chain reaches the screen). 0.11.0: the button the
+-- screen's OWNER has focused comes first: the pause menu keeps RESUME selected while its owner's d-pad moves the focus
+-- (live 2026-10-10, hotfix build: P2 on RESTART RACE, A, and the bridge clicked RESUME)
 local function selectedButton(screen)
-    local best, focused
+    local owner
+    pcall(function() owner = screen:GetOwningPlayer() end)
+    if not U.ok(owner) then owner = nil end
+    local best, focused, ownerF
     for _, b in ipairs(FindAllOf("CommonButtonBase") or {}) do
         local inside = false
         pcall(function()
@@ -225,14 +235,19 @@ local function selectedButton(screen)
             end
         end)
         if inside then
-            local sel, foc, vis = false, false, true
+            local sel, foc, vis, of = false, false, true, false
             pcall(function() sel = b:GetSelected() == true end)
             pcall(function() foc = b:HasAnyUserFocus() == true or b:HasFocusedDescendants() == true end)
             pcall(function() local v = b:GetVisibility(); vis = (v ~= 1 and v ~= 2) end)
+            if owner then
+                pcall(function() of = b:HasUserFocus(owner) == true or b:HasUserFocusedDescendants(owner) == true end)
+            end
+            if vis and of and not ownerF then ownerF = b end
             if vis and sel and not best then best = b end
             if vis and foc and not focused then focused = b end
         end
     end
+    if ownerF then return ownerF, "owner focus" end
     if best then return best, "selected" end
     if focused then return focused, "focused" end
     local okT, t = pcall(function() return screen:GetDesiredFocusTarget() end)
@@ -547,6 +562,43 @@ local function noteNative(e, p)
     U.log(TAG, "P%d's own %s takes P%d's pad natively (IMC_UI boosted while paused): not bridged (V-MB-04)", p, e.cls, p)
 end
 
+-- 0.11.0 (hotfix CL382493, live 2026-10-10): a guest's A never clicks a row of its OWN pause menu natively, IMC_UI
+-- boosted or not (its d-pad moves the focus; A on RESUME did not resume). Every pause-menu row closes or covers the
+-- menu (resume, a confirm dialog, a sub-screen), so the MenuBridgeWaitMs re-check (same screen still up and activated)
+-- never acts twice there: a guest's own pause menu is bridged whatever MenuBridgeGuestNative says. Its B too on the
+-- screens opened from it (live: P2 stuck in Settings, B ignored): B leaves the screen (HandleBack applies Settings
+-- first), so the same re-check covers it. A on in-place screens (Settings rows toggle) keeps the native-first rule.
+-- cfg.MenuBridgeGuestPauseMenu = false: the 0.10 behaviour.
+local function guestPauseMenu(e, what)
+    if opt("MenuBridgeGuestPauseMenu", true) == false then return false end
+    return what == "B" or (type(e.cls) == "string" and e.cls:find("^WBP_Pause") ~= nil)
+end
+
+-- A guest's press on its own pause menu also tells whether its native UI input works in this world: every row closes
+-- or covers the menu, so "still up after MenuBridgeWaitMs" = native did nothing. Live 2026-10-10: native in a race
+-- started from the front end, dead after RESTART RACE's seamless travel (the bridge clicked RESUME for P2). A dead
+-- guest gets its A bridged on its in-place screens too (Settings rows) until the next world.
+local function guestDead(p)
+    return opt("MenuBridgeGuestPauseMenu", true) ~= false and S.guestDead ~= nil and S.guestDead[p] == St.worldGen
+end
+
+local function guestProbe(e, p)
+    return p >= 2 and ownerP(e.w) == p and pausedNow() and type(e.cls) == "string" and e.cls:find("^WBP_Pause") ~= nil
+end
+
+local function noteGuestNative(p, acted)
+    S.guestDead = S.guestDead or {}
+    local dead = S.guestDead[p] == St.worldGen
+    if acted and dead then
+        S.guestDead[p] = nil
+        U.log(TAG, "P%d's native menu input acted again: its own screens are native-first again (V-MB-10)", p)
+    elseif not acted and not dead then
+        S.guestDead[p] = St.worldGen
+        U.log(TAG, "P%d's native A / B did nothing on its own pause menu (world #%s): its presses on its own screens "
+            .. "are bridged until the next world (V-MB-10)", p, tostring(St.worldGen))
+    end
+end
+
 -- may player p's press (what = "A" | "B") be bridged on screen e?
 local function bridgeable(e, p, what)
     local own = ownerP(e.w)
@@ -560,7 +612,8 @@ local function bridgeable(e, p, what)
     if e.shared then return what == "A" end              -- shared post-race screens: anyone's A (P2-owned in split)
     if own == p then                                     -- the owner: a guest is bridged, P1 works natively
         if p == 1 then return false end
-        if paused and opt("MenuBridgeGuestNative", "skip") == "skip" and pauseCall("guestUiNative", pcOf(p)) == true then
+        if paused and opt("MenuBridgeGuestNative", "skip") == "skip" and pauseCall("guestUiNative", pcOf(p)) == true
+            and not guestPauseMenu(e, what) and not guestDead(p) then
             noteNative(e, p)                             -- 0.7.2: native A/B already reach it (run I)
             return false
         end
@@ -603,7 +656,9 @@ function M.fastTick()
         S.pending = nil
         U.tryEvery("mb.scan", nil, TAG, scan, now, true)
         local e2 = top(now, true)
-        if e2 and e2.k == pd.k and stillUp(e2) then U.try(TAG, click, e2, pd.p, pd.what) end
+        local still = e2 ~= nil and e2.k == pd.k and stillUp(e2)
+        if pd.probe then noteGuestNative(pd.p, not still) end
+        if still then U.try(TAG, click, e2, pd.p, pd.what) end
         e = e2
     end
     local K = keys()
@@ -639,9 +694,9 @@ function M.fastTick()
             end)
             if e and not S.pending then
                 if a and not S.prevA[k] and bridgeable(e, lp.index, "A") then
-                    S.pending = { k = e.k, p = lp.index, what = "A", atMs = now }
+                    S.pending = { k = e.k, p = lp.index, what = "A", atMs = now, probe = guestProbe(e, lp.index) }
                 elseif b and not S.prevB[k] and not e.shared and bridgeable(e, lp.index, "B") then
-                    S.pending = { k = e.k, p = lp.index, what = "B", atMs = now }
+                    S.pending = { k = e.k, p = lp.index, what = "B", atMs = now, probe = guestProbe(e, lp.index) }
                 elseif dir ~= 0 and (S.prevD[k] or 0) == 0 and e.dialog and bridgeable(e, lp.index, "A") then
                     U.try(TAG, dialogMove, e, lp.index, dir)
                 end
@@ -702,6 +757,7 @@ end
 -- (at most 3 attempts per card instance: GetText / SetText build FTexts).  VERIFY(V-MB-06)
 local function feTick()
     if St.phase ~= "FRONTEND" and St.phase ~= "LAUNCHING" then return feStop("phase " .. tostring(St.phase)) end
+    if St.launchHold() then return end      -- 0.12.0: the main menu is being torn down (state.lua St.launchHold)
     if not enabled() or not opt("MenuBridgeProfileOwner", true) then return end
     local lps = U.localPlayers()
     if #lps < 2 or not U.ok(lps[1].pc) then return end
