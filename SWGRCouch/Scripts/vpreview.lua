@@ -1,11 +1,16 @@
--- vpreview.lua (0.7.2, 2026-10-07): a live 3D render of each RACE SETUP vehicle pick ("photo bays"), front end only.
--- Design: notes/research/vehicle-preview.md (§3 design, §4 recipe, §6 risks, §7 VERIFY V-VP-01..07). setup.lua drives
--- it (no init, no loop of its own): want() and brush() from renderColumns, tick() from its FAST pollNav while the
--- VEHICLES step shows, release()/releaseAll() when a column goes, the step is left, the setup closes or the menu is
--- replaced. No hooks, no FindAllOf, no soft pointers: every call below is a reflected UFunction / property
+-- vpreview.lua (0.7.2, 2026-10-07; 0.10.0 RACERS step, 2026-10-09): a live 3D render of each RACE SETUP vehicle pick
+-- ("photo bays"), front end only.
+-- Design: notes/research/vehicle-preview.md (§3 design, §4 recipe, §6 risks, §7 VERIFY V-VP-01..07); 0.10.0:
+-- notes/design/vehicle-step-v2.md §5.8 + RC-12 (keys per pad, modes, budgets, stats; VERIFY V-RC-10, V-RC-17).
+-- setup.lua drives it (no init, no loop of its own): want() and brush() from renderColumns (classic flow) or from
+-- racers.lua's view models (cards flow, + setMode()), tick() from its FAST pollNav while the VEHICLES / RACERS step
+-- shows, release()/releaseAll() when a player goes, the step is left, the setup closes or the menu is replaced. No
+-- hooks, no FindAllOf, no soft pointers: every call below is a reflected UFunction / property
 -- (work/runtime/UE4SS_ObjectDump.txt, signatures checked 2026-10-07).
 --
--- One bay per column, in the empty sky above the front-end sets (SetupPreviewX/Y/Z + (column - 1) * Spacing):
+-- One bay per key, in the empty sky above the front-end sets (SetupPreviewX/Y/Z + (key - 1) * Spacing). Keys: the
+-- classic columns pass their column (1..4), the RACERS cards ControllerId + 1 (1..4): a bay belongs to one pad and is
+-- never handed to another player when someone leaves. Per bay:
 --   * the model: GfnGameInstance.StaticVehicleClass (BP_StaticVehicleBase_C, an ACstStaticVehicle) spawned deferred
 --     with `preset` = the pick's PRE_* class: the game's own SpawnFrontEndVehicle path, the spawn builds the model.
 --     A new pick (after SetupPreviewDebounceMs) spawns a fresh actor (SetupPreviewRebuild "respawn": the unit count
@@ -15,9 +20,18 @@
 --     target gets display gamma 1, the tonemapper writes linear colour and the UI shows the right gamma;
 --   * an optional fill PointLight beside the camera (SetupPreviewFillLux at the model, no shadows, Movable).
 -- "Built" = CustomisationComponent:GetUnitContainerCount() > 0 and the yaw-0 bounds equal on two samples 100 ms
--- apart; then the camera is framed from the bounds, the show-only list and the framing are refreshed for 2.5 s (late
--- parts), the model turns about its bounds centre (SetupPreviewSpinDps) and CaptureScene() runs every
--- SetupPreviewCaptureMs (spin 0: at ready, +0.5 s, +2 s, +5 s, then every 5 s).
+-- apart; then the camera is framed from the bounds and the show-only list and the framing are refreshed for 2.5 s
+-- (late parts). Modes (setMode, per key; default "spin", the classic columns never set one):
+--   * "spin": the model turns about its bounds centre (SetupPreviewSpinDps) and is captured every
+--     SetupPreviewCaptureMs (spin 0: at ready, +0.5 s, +2 s, +5 s, then every 5 s);
+--   * "still": the model stays at SetupPreviewYaw and is captured in bursts of SetupPreviewStillBurst: at ready, once
+--     the late-part window is over, on a change to "still" and on recapture() (page shown again); then never until
+--     the pick changes. A burst, not one capture: Lumen GI / reflections, TSR and eye adaptation accumulate over
+--     captures (bAlwaysPersistRenderingState), so one capture looks noisier and darker than the turntable (RC-12).
+-- Budgets over all bays: at most SetupPreviewCaptureBudget CaptureScene() per tick (the due bay captured longest ago
+-- first: round robin), and at most one new pick built (spawn or in-place rebuild) per SetupPreviewSpawnGapMs (the
+-- oldest waiting pick first). stats() counts captures (per second over 10 s), spawns and bays per mode (V-RC-17).
+-- A card shows its render only once a capture of the applied pick has landed (2D card / previous render dimmed until).
 -- Column image: a scene capture's FinalColorLDR alpha is not 1, so the raw target in a UImage can be invisible: the
 -- target goes through an MID of an OPAQUE UI material (SetupPreviewMaterial, texture parameter
 -- SetupPreviewMaterialParam). Default M_UI_RetainerBox_ScreenSpace, the only opaque UI material of the game with a
@@ -57,6 +71,9 @@ local MID_TRANSIENT = 1                     -- EMIDCreationFlags::Transient (out
 local SHARED = "vpreview.actors"            -- shared variable C.MOD .. "." .. SHARED (main.lua's naming)
 local SETTLE_MS, SAMPLE_MS, LATE_MS = 300, 100, 2500
 local STATIC_CAPS = { 0, 500, 2000, 5000 }  -- ms after ready when the model does not spin
+local CAPS_WINDOW_MS = 10000                -- stats().capturesPerSec: captures of this window
+local CAPTURE_SLACK_MS = 10                 -- FAST ticks come a few ms early or late: without this slack a 66 ms cap at
+                                            --   33 ms ticks waits a third tick half of the time (~12 instead of 15/s)
 local DIM = 0.5                             -- alpha of the previous model's render while the new pick builds
 local ZERO_ROT = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 }
 
@@ -74,14 +91,19 @@ end
 
 local function int(name, default) return math.floor(num(name, default) + 0.5) end
 
-local bays = {}            -- [column] = bay (see newBay)
+local bays = {}            -- [key] = bay (see newBay); key = classic column or RACERS ControllerId + 1
+local modes = {}           -- [key] = "spin" | "still" (setMode; nil = "spin"); dropped with the bay
 local broken = nil         -- session-wide reason: 2D cards only
 local pendingRelease = nil -- markBroken inside a tick: everything goes at the end of that tick
 local recorded = ""        -- actor paths last written to the shared variable
 local orphans = nil        -- hot reload: the previous Lua state's actor paths (destroyed on the game thread)
 local lastTick = nil
+local lastApplyMs = nil    -- last build (spawn / in-place rebuild) of any bay: SetupPreviewSpawnGapMs counts from it
 local verbose = 0          -- per-pick lines at INFO for the first builds of the session, then dbg
-local stats = { spawns = 0, rebuilds = 0, ready = 0, failed = 0, captures = 0 }
+local stats = { spawns = 0, rebuilds = 0, ready = 0, failed = 0, captures = 0, gapWaits = 0, bursts = 0 }
+local capLog, capFirst, capSince = {}, 1, nil   -- capture times of the last CAPS_WINDOW_MS; start of this capture run
+
+local function modeOf(b) return modes[b.i] or "spin" end
 
 ---------------------------------------------------------------------------------------------------- hot reload
 local function sharedPut(v)
@@ -149,14 +171,18 @@ function M.persistShared(put) put(SHARED, recorded) end
 function M.restoreShared(get) adoptOrphans(get(SHARED), "restoreShared") end
 
 ---------------------------------------------------------------------------------------------------- spawning
+-- Bay origin of key i. 0.10.0: spacing 20000 (was 5000): the fill light sits 0.85 x d toward the previous bay with
+-- radius 3 x d, so at 15000 a pod's light still reached its neighbour's model (vehicle-step-v2.md §0.3 #7).
 local function origin(i)
-    return { X = num("SetupPreviewX", 0) + (i - 1) * num("SetupPreviewSpacing", 5000),
+    return { X = num("SetupPreviewX", 0) + (i - 1) * num("SetupPreviewSpacing", 20000),
              Y = num("SetupPreviewY", 60000), Z = num("SetupPreviewZ", 60000) }
 end
 
+-- shown: the target holds a capture (the card shows it); fresh: that capture is of the applied pick, made after it
+-- was ready (else the previous render, dimmed); burst: still captures left; due: a capture wanted this tick.
 local function newBay(i)
     return { i = i, O = origin(i), gen = St.worldGen, wk = U.key(U.world()), path = {}, state = "idle",
-             shown = false, everReady = false }
+             shown = false, everReady = false, fresh = false, burst = 0, due = false }
 end
 
 -- Deferred spawn (chasecam.spawnRig pattern). init(a) runs between BeginDeferredActorSpawnFromClass and
@@ -206,7 +232,7 @@ local function markBroken(why)
 end
 
 local function failBay(b, id, why)
-    b.state, b.applied, b.shown = "failed", id, false
+    b.state, b.applied, b.shown, b.fresh, b.burst, b.due = "failed", id, false, false, 0, false
     destroyActor(b, "veh")
     record()
     stats.failed = stats.failed + 1
@@ -238,7 +264,7 @@ local function ensureInfra(b)
     if not U.ok(krl) then return markBroken("KismetRenderingLibrary not found") end
     local ctx = U.gi()                                     -- the target's outer: never the world
     if not U.ok(ctx) then ctx = U.world() end
-    local w, h, fmt = int("SetupPreviewW", 640), int("SetupPreviewH", 360), int("SetupPreviewRtFormat", 6)
+    local w, h, fmt = int("SetupPreviewW", 960), int("SetupPreviewH", 540), int("SetupPreviewRtFormat", 6)
     local okR, rt = pcall(function()
         return krl:CreateRenderTarget2D(ctx, w, h, fmt, { R = 0.0, G = 0.0, B = 0.0, A = 1.0 }, false, false)
     end)
@@ -315,8 +341,10 @@ local function say(f, ...)
     if verbose <= 8 then U.log(TAG, f, ...) else U.dbg(TAG, f, ...) end
 end
 
--- The newest pick w of bay b goes into the model (tickBay debounces).
+-- The newest pick w of bay b goes into the model (M.tick debounces and spaces the builds: nextApply).
 local function apply(b, w, now)
+    local gap = lastApplyMs and math.floor(now - lastApplyMs) or nil
+    lastApplyMs = now                                      -- every attempt counts: ensureInfra spawns too
     if not ensureInfra(b) then return end
     local cls = V.presetClass(w.p)
     if not cls then return failBay(b, w.id, "preset class not resolvable: " .. tostring(w.p.classPath)) end
@@ -350,8 +378,10 @@ local function apply(b, w, now)
     if not okP then return markBroken("preset write ignored (preset reads " .. tostring(got) .. ")") end
     pcall(function() b.veh:K2_TeleportTo(b.O, ZERO_ROT) end)
     b.applied, b.state, b.since, b.sample, b.nextSample = w.id, "building", now, nil, 0
+    b.fresh, b.burst, b.lateBurst, b.modeChanged = false, 0, false, false
     verbose = verbose + 1
-    say("bay %d: %s %s (%s, archetype %d) (V-VP-%s)", b.i, w.id, how, tostring(w.p.name), w.arch, update and "02" or "01")
+    say("bay %d: %s %s (%s, archetype %d, %s, %s) (V-VP-%s, V-RC-17)", b.i, w.id, how, tostring(w.p.name), w.arch,
+        modeOf(b), gap and string.format("%d ms after the previous build", gap) or "first build", update and "02" or "01")
 end
 
 ---------------------------------------------------------------------------------------------------- readiness
@@ -399,7 +429,7 @@ end
 local function frame(b)
     local E, Cn = b.box.E, b.box.C
     local hHalf = math.rad(num("SetupPreviewFov", 30)) / 2
-    local vHalf = math.atan(math.tan(hHalf) / (num("SetupPreviewW", 640) / num("SetupPreviewH", 360)))
+    local vHalf = math.atan(math.tan(hHalf) / (num("SetupPreviewW", 960) / num("SetupPreviewH", 540)))
     local el, az = math.rad(num("SetupPreviewCamPitch", 12)), math.rad(num("SetupPreviewCamYaw", 210))
     local rh = math.sqrt(E.X * E.X + E.Y * E.Y)
     local rv = E.Z * math.cos(el) + rh * math.sin(el)
@@ -451,9 +481,38 @@ local function spinTo(b, yaw)
     pcall(function() b.veh:K2_TeleportTo(loc, { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }) end)
 end
 
+-- Capture times for stats().capturesPerSec (the window holds ~300 entries at 30 captures/s).
+local function noteCapture(now)
+    while capFirst <= #capLog and now - capLog[capFirst] > CAPS_WINDOW_MS do capFirst = capFirst + 1 end
+    if capFirst > #capLog then capSince = now end          -- a new run of captures: its rate counts from here
+    capLog[#capLog + 1] = now
+    if capFirst > 512 then
+        local keep = {}
+        for k = capFirst, #capLog do keep[#keep + 1] = capLog[k] end
+        capLog, capFirst = keep, 1
+    end
+end
+
+-- Only M.tick captures (the budget). A capture of a ready model puts the applied pick on the card (shown, fresh).
 local function capture(b, now)
-    if pcall(function() b.comp:CaptureScene() end) then stats.captures = stats.captures + 1 end
+    local ok, err = pcall(function() b.comp:CaptureScene() end)
     b.lastCap, b.capN = now, (b.capN or 0) + 1
+    if (b.burst or 0) > 0 then b.burst = b.burst - 1 end
+    if not ok then
+        U.logOnce("vpreview.capture." .. tostring(b.i), TAG, "bay %d: CaptureScene failed: %s", b.i, tostring(err))
+        return
+    end
+    stats.captures = stats.captures + 1
+    noteCapture(now)
+    if b.state == "ready" then b.shown, b.fresh = true, true end
+end
+
+-- RC-12: a still is a burst of SetupPreviewStillBurst captures on consecutive budget slots (Lumen GI / reflections,
+-- TSR and eye adaptation accumulate over captures; one or three captures do not converge).
+local function arm(b, why)
+    b.burst = math.max(1, int("SetupPreviewStillBurst", 8))
+    stats.bursts = stats.bursts + 1
+    U.dbg(TAG, "bay %d: still burst of %d capture(s) (%s)", b.i, b.burst, tostring(why))
 end
 
 local function becomeReady(b, box, now, how)
@@ -466,13 +525,14 @@ local function becomeReady(b, box, now, how)
     b.yaw = num("SetupPreviewYaw", 245) % 360
     spinTo(b, b.yaw)
     b.state, b.readyAt, b.prestreamAt, b.nextLate, b.capN = "ready", now, now, now + 500, 0
-    b.shown, b.everReady = true, true
-    capture(b, now)
+    b.everReady, b.fresh, b.lateBurst, b.modeChanged = true, false, false, false
+    if modeOf(b) == "still" then arm(b, "ready") else b.burst = 0 end
+    b.due = true                                           -- the first capture: this tick's budget (M.tick)
     stats.ready = stats.ready + 1
     local E = box.E
-    say("bay %d ready: %s, %s unit(s), %s bounds %.0fx%.0fx%.0f (r %.0f), camera %.0f uu, %d ms, %s (V-VP-01)", b.i,
-        tostring(b.applied), tostring(box.count), tostring(box.kind), 2 * E.X, 2 * E.Y, 2 * E.Z, box.r, b.dist or 0,
-        math.floor(now - b.since), how)
+    say("bay %d ready: %s, %s unit(s), %s bounds %.0fx%.0fx%.0f (r %.0f), camera %.0f uu, %d ms, %s, %s (V-VP-01)",
+        b.i, tostring(b.applied), tostring(box.count), tostring(box.kind), 2 * E.X, 2 * E.Y, 2 * E.Z, box.r,
+        b.dist or 0, math.floor(now - b.since), how, modeOf(b))
 end
 
 local function checkBuild(b, now)
@@ -513,17 +573,21 @@ local function remeasure(b)
 end
 
 -- A model that falls (physics on the static vehicle's root, vehicle-preview.md §6.8) is put back, physics off.
+-- true = it was put back.
 local function dropCheck(b, now)
-    if now < (b.nextDrop or 0) then return end
+    if now < (b.nextDrop or 0) then return false end
     b.nextDrop = now + 500
     local p = vec(function() return b.veh:K2_GetActorLocation() end)
-    if not p or p.Z >= b.pivot.Z - 50 then return end
+    if not p or p.Z >= b.pivot.Z - 50 then return false end
     U.logOnce("vpreview.drop", TAG, "bay %d: the model falls (z %.0f < %.0f): physics off, put back (V-VP-01)", b.i,
         p.Z, b.pivot.Z)
     pcall(function() b.veh.CstRootComponent:SetSimulatePhysics(false) end)
     spinTo(b, b.yaw)
+    return true
 end
 
+-- A ready bay: late-part refresh, prestream, drop check, then the mode decides whether a capture is due (b.due; the
+-- capture itself is M.tick's, within SetupPreviewCaptureBudget).
 local function runReady(b, now, dt)
     if not (U.ok(b.veh) and U.ok(b.comp)) then return failBay(b, b.applied, "a bay actor vanished") end
     local age = now - b.readyAt
@@ -536,26 +600,73 @@ local function runReady(b, now, dt)
         b.prestreamAt = now
         pcall(function() b.veh:PrestreamTextures(10.0, true, 0) end)
     end
-    dropCheck(b, now)
-    local dps, due = num("SetupPreviewSpinDps", 15), false
+    local still = modeOf(b) == "still"
+    if dropCheck(b, now) and still then arm(b, "put back") end
+    if b.modeChanged then                                  -- setMode: to the still yaw, or the turntable goes on
+        b.modeChanged = false
+        if still then
+            b.yaw = num("SetupPreviewYaw", 245) % 360
+            spinTo(b, b.yaw)
+            b.lateBurst = b.lateBurst or age > LATE_MS     -- this burst already has the late parts
+            arm(b, "mode still")
+        else
+            b.burst = 0
+        end
+    end
+    if still then
+        if age > LATE_MS and not b.lateBurst then          -- again once the parts built after "ready" are in the picture
+            b.lateBurst = true
+            arm(b, "late parts")
+        end
+        b.due = (b.burst or 0) > 0
+        return
+    end
+    local dps = num("SetupPreviewSpinDps", 15)
     if dps ~= 0 then
         b.yaw = (b.yaw + dps * dt / 1000) % 360
         spinTo(b, b.yaw)
-        local every = num("SetupPreviewCaptureMs", 50)
-        due = every <= 0 or now - (b.lastCap or 0) >= every
+        local every = num("SetupPreviewCaptureMs", 66)
+        b.due = every <= 0 or now - (b.lastCap or 0) >= every - CAPTURE_SLACK_MS
     else
         local at = STATIC_CAPS[(b.capN or 0) + 1]
-        if at then due = age >= at else due = now - (b.lastCap or 0) >= 5000 end
+        if at then b.due = age >= at else b.due = now - (b.lastCap or 0) >= 5000 end
     end
-    if due then capture(b, now) end
 end
 
 local function tickBay(b, now, dt)
-    local w = b.want
-    if w and w.id ~= b.applied and now - w.at >= int("SetupPreviewDebounceMs", 250) then apply(b, w, now) end
+    b.due = false
     if broken then return end
     if b.state == "building" then checkBuild(b, now)
     elseif b.state == "ready" then runReady(b, now, dt) end
+end
+
+-- The bay whose pick is built next: debounced (SetupPreviewDebounceMs), the oldest waiting pick first; nil while
+-- SetupPreviewSpawnGapMs has not passed since the previous build of any bay (one spawn hitch at a time, V-RC-17).
+local function nextApply(now)
+    local debounce, pick = int("SetupPreviewDebounceMs", 250), nil
+    for _, b in pairs(bays) do
+        local w = b.want
+        if w and w.id ~= b.applied and now - w.at >= debounce and (pick == nil or w.at < pick.want.at) then pick = b end
+    end
+    if pick and lastApplyMs and now - lastApplyMs < int("SetupPreviewSpawnGapMs", 300) then
+        if not pick.want.gapWait then
+            pick.want.gapWait = true
+            stats.gapWaits = stats.gapWaits + 1
+        end
+        return nil
+    end
+    return pick
+end
+
+-- What a card shows of bay b (render or 2D card, dimmed or not): a change re-renders the card.
+local function sig(b)
+    return b.state .. "|" .. tostring(b.shown) .. "|" .. tostring(b.fresh) .. "|" .. tostring(b.applied)
+end
+
+local function allKeys()
+    local keys = {}
+    for i in pairs(bays) do keys[i] = true end
+    return keys
 end
 
 ---------------------------------------------------------------------------------------------------- API (setup.lua)
@@ -567,10 +678,11 @@ function M.enabled()
     return true
 end
 
-function M.aspect() return num("SetupPreviewW", 640) / num("SetupPreviewH", 360) end
+function M.aspect() return num("SetupPreviewW", 960) / num("SetupPreviewH", 540) end
 
--- Column i shows preset entry p (vehicles.presets) of class entry cls. Idempotent: the build starts in tick() once
--- the pick has not changed for SetupPreviewDebounceMs.
+-- Key i (classic: the column; RACERS: ControllerId + 1) shows preset entry p (vehicles.presets) of class entry cls.
+-- Idempotent: the build starts in tick() once the pick has not changed for SetupPreviewDebounceMs (and at most one
+-- build per SetupPreviewSpawnGapMs over all bays).
 function M.want(i, p, cls)
     if not M.enabled() or type(p) ~= "table" or type(p.id) ~= "string" or type(cls) ~= "table" then return end
     local b = bays[i]
@@ -583,14 +695,48 @@ function M.want(i, p, cls)
     b.want = { id = p.id, p = p, arch = math.floor(tonumber(cls.arch) or 0), at = St.nowMs() }
 end
 
--- What column i shows: brush, "material" | "texture", alpha multiplier, aspect; nil = the 2D card. The previous
--- model stays (dimmed) while a new pick builds. The MID is made here, in the tick that puts it on the image: an
--- object only Lua knows (no UPROPERTY reference) may be garbage collected.
+-- Mode of key i's bay: "spin" (turntable, a capture every SetupPreviewCaptureMs) | "still" (SetupPreviewYaw, bursts
+-- of SetupPreviewStillBurst captures, then none until the pick changes). Cheap when unchanged (racers.lua sets it every
+-- FAST tick); kept for a key without a bay yet; dropped with the bay (release / releaseAll). Pure Lua: the turn and
+-- the burst happen in the next tick().
+function M.setMode(i, mode)
+    if mode ~= "spin" and mode ~= "still" then return end
+    local was = modes[i] or "spin"
+    if modes[i] == mode then return end
+    modes[i] = mode
+    local b = bays[i]
+    if b and was ~= mode then b.modeChanged = true end
+end
+
+-- The mode of a RACERS card's bay on `stage` ("pilot" | "vehicle" | "perks" | "ready"), by SetupPreviewSpinStage:
+-- "vehicle" spins on VEHICLE only, "all" on every stage, "none" never (stills only).
+function M.stageMode(stage)
+    local s = opt("SetupPreviewSpinStage", "vehicle")
+    if s == "all" then return "spin" end
+    if s == "none" then return "still" end
+    return stage == "vehicle" and "spin" or "still"
+end
+
+-- Every ready "still" bay captures a new burst (RC-12: the page was shown again). Pure Lua; returns the bay count.
+function M.recapture(why)
+    local n = 0
+    for _, b in pairs(bays) do
+        if b.state == "ready" and modeOf(b) == "still" then
+            arm(b, why or "recapture")
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- What key i shows: brush, "material" | "texture", alpha multiplier, aspect; nil = the 2D card. The previous
+-- model stays (dimmed) while a new pick builds, until the first capture of the new one. The MID is made here, in the
+-- tick that puts it on the image: an object only Lua knows (no UPROPERTY reference) may be garbage collected.
 function M.brush(i)
     if not M.enabled() then return nil end
     local b = bays[i]
     if not (b and b.shown and U.ok(b.rt)) then return nil end
-    local dim = (b.state == "ready" and b.want ~= nil and b.want.id == b.applied) and 1.0 or DIM
+    local dim = (b.state == "ready" and b.fresh and b.want ~= nil and b.want.id == b.applied) and 1.0 or DIM
     if opt("SetupPreviewBrush", "material") == "texture" then return b.rt, "texture", dim, M.aspect() end
     if not U.ok(b.mid) then
         b.mid = nil
@@ -611,38 +757,77 @@ function M.brush(i)
     return b.mid, "material", dim, M.aspect()
 end
 
--- FAST (setup.pollNav while the VEHICLES step shows). true = what a column shows changed (setup re-renders).
+-- FAST (setup.pollNav while the VEHICLES / RACERS step shows). Returns changed, keys: changed = what a card shows
+-- changed (setup / racers re-render), keys = {[key] = true} for each bay that changed or went (classic setup reads
+-- only the first value). Order: drop bays of another world, one build (spawn gap), every bay's build / ready tick,
+-- then the capture budget over the due bays.
 function M.tick()
-    if pendingRelease then M.releaseAll(pendingRelease); return true end
-    if next(bays) == nil then lastTick = nil; return false end
+    if pendingRelease then
+        local keys = allKeys()
+        M.releaseAll(pendingRelease)
+        return true, keys
+    end
+    if next(bays) == nil then lastTick = nil; return false, {} end
     local on, why = M.enabled()
-    if not on then M.releaseAll(why); return true end
+    if not on then
+        local keys = allKeys()
+        M.releaseAll(why)
+        return true, keys
+    end
     local now = St.nowMs()
     local dt = lastTick and math.max(0, math.min(200, now - lastTick)) or 33
     lastTick = now
-    local wk, changed = U.key(U.world()), false
+    local wk, keys, before = U.key(U.world()), {}, {}
     for i, b in pairs(bays) do
         if b.gen ~= St.worldGen or (b.wk ~= 0 and wk ~= 0 and b.wk ~= wk) then
-            bays[i], changed = nil, true                   -- another world: the old one took the actors with it
+            bays[i], keys[i] = nil, true                   -- another world: the old one took the actors with it
         else
-            local before = b.state .. "|" .. tostring(b.shown) .. "|" .. tostring(b.applied)
-            local ok, err = xpcall(tickBay, debug.traceback, b, now, dt)
-            if not ok then
-                U.dbg(TAG, "bay %d tick error: %s", b.i, tostring(err))
-                failBay(b, b.want and b.want.id or b.applied, "error: " .. tostring(err):match("^[^\n]*"))
-            end
-            if b.state .. "|" .. tostring(b.shown) .. "|" .. tostring(b.applied) ~= before then changed = true end
+            before[i] = sig(b)
+        end
+    end
+    local nb = nextApply(now)
+    if nb then
+        local ok, err = xpcall(apply, debug.traceback, nb, nb.want, now)
+        if not ok then
+            U.dbg(TAG, "bay %d build error: %s", nb.i, tostring(err))
+            failBay(nb, nb.want.id, "error: " .. tostring(err):match("^[^\n]*"))
+        end
+    end
+    for _, b in pairs(bays) do
+        local ok, err = xpcall(tickBay, debug.traceback, b, now, dt)
+        if not ok then
+            U.dbg(TAG, "bay %d tick error: %s", b.i, tostring(err))
+            failBay(b, b.want and b.want.id or b.applied, "error: " .. tostring(err):match("^[^\n]*"))
         end
     end
     if pendingRelease then
+        for i in pairs(bays) do keys[i] = true end
         M.releaseAll(pendingRelease)
-        changed = true
+        return true, keys
     end
-    return changed
+    -- capture budget: SetupPreviewCaptureBudget captures per tick, the due bay captured longest ago first
+    local due = {}
+    for _, b in pairs(bays) do
+        if b.due and b.state == "ready" then due[#due + 1] = b end
+    end
+    if #due > 0 then
+        table.sort(due, function(x, y)
+            local cx, cy = x.lastCap or -1, y.lastCap or -1
+            if cx ~= cy then return cx < cy end
+            return x.i < y.i
+        end)
+        for k = 1, math.min(#due, math.max(1, int("SetupPreviewCaptureBudget", 1))) do capture(due[k], now) end
+    end
+    local changed = next(keys) ~= nil
+    for i, b in pairs(bays) do
+        if sig(b) ~= before[i] then keys[i], changed = true, true end
+    end
+    return changed, keys
 end
 
--- Column i's bay goes (its player left). freeTarget: setup took the render off the column image first.
+-- Key i's bay goes (its player left). freeTarget: the caller took the render off its image first.
 function M.release(i, why, freeTarget)
+    modes[i] = nil
     local b = bays[i]
     if not b then return end
     bays[i] = nil
@@ -663,22 +848,44 @@ function M.releaseAll(why, freeTargets)
         if freeTargets and U.ok(b.rt) then pcall(function() U.cdo(KRL):ReleaseRenderTarget2D(b.rt) end) end
         b.rt, b.mid = nil, nil
     end
-    bays, lastTick = {}, nil
+    bays, lastTick, modes = {}, nil, {}
     record()
     if nb > 0 then
         U.log(TAG, "released (%s): %d bay(s), %d actor(s) destroyed; session %d spawn(s), %d rebuild(s), %d ready, "
-            .. "%d failed, %d capture(s) (V-VP-07)", tostring(why), nb, na, stats.spawns, stats.rebuilds, stats.ready,
-            stats.failed, stats.captures)
+            .. "%d failed, %d capture(s), %d still burst(s), %d build(s) spaced by the gap (V-VP-07, V-RC-17)",
+            tostring(why), nb, na, stats.spawns, stats.rebuilds, stats.ready, stats.failed, stats.captures,
+            stats.bursts, stats.gapWaits)
     end
 end
 
--- One line for diag / test commands.
+-- Counters for diag / test commands (V-RC-17), a new table per call: captures (session), capturesPerSec (the last
+-- 10 s; a run that started later counts from its start, at least 1 s), spawns, rebuilds, ready, failed, gapWaits
+-- (builds that waited for SetupPreviewSpawnGapMs), bursts (still bursts armed), bays, spin, still (bays per mode).
+function M.stats()
+    local now = St.nowMs()
+    local k = capFirst
+    while k <= #capLog and now - capLog[k] > CAPS_WINDOW_MS do k = k + 1 end
+    local n = #capLog - k + 1
+    local span = math.max(1000, math.min(CAPS_WINDOW_MS, now - (capSince or now)))
+    local s = { captures = stats.captures, capturesPerSec = n * 1000 / span, spawns = stats.spawns,
+                rebuilds = stats.rebuilds, ready = stats.ready, failed = stats.failed, gapWaits = stats.gapWaits,
+                bursts = stats.bursts, bays = 0, spin = 0, still = 0 }
+    for _, b in pairs(bays) do
+        local m = modeOf(b)
+        s.bays, s[m] = s.bays + 1, s[m] + 1
+    end
+    return s
+end
+
+-- One line for diag / test commands: bays as key=state:mode:pick.
 function M.status()
     local parts = {}
-    for i, b in pairs(bays) do parts[#parts + 1] = string.format("%d=%s:%s", i, b.state, tostring(b.applied)) end
+    for i, b in pairs(bays) do
+        parts[#parts + 1] = string.format("%s=%s:%s:%s", tostring(i), b.state, modeOf(b), tostring(b.applied))
+    end
     table.sort(parts)
-    return string.format("3D %s, bays {%s}, captures %d", broken and ("off: " .. broken) or "on",
-        table.concat(parts, " "), stats.captures)
+    return string.format("3D %s, bays {%s}, captures %d (%.1f/s), spawns %d", broken and ("off: " .. broken) or "on",
+        table.concat(parts, " "), stats.captures, M.stats().capturesPerSec, stats.spawns)
 end
 
 ---------------------------------------------------------------------------------------------------- lifetime

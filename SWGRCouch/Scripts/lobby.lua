@@ -253,7 +253,7 @@ function lobby.build(menu)
   local pc = menu:GetOwningPlayer()                   -- UWidget::GetOwningPlayer() -> Object
   local page = ui.make("SettingList", pc)
   if not page then
-    status("SPLIT SCREEN PAGE COULD NOT BE CREATED")
+    status("FREE MODE PAGE COULD NOT BE CREATED")
     return nil
   end
   local root, why = pageRoot(page)
@@ -1056,12 +1056,15 @@ function lobby.onKey(name)
 end
 
 -- Arrow / Enter / Space / Escape keybinds (cfg.LobbyNavKeyboard ~= "never"). UE4SS keybinds fire on the key-down
--- edge while the game window has focus, never consume the key, and run on the UE4SS input thread: the body only
--- schedules lobby.onKey on the game thread. Note: while a bound key is held (e.g. an arrow while steering), UE4SS
--- drops every other keybind event of that frame (F5-F9 included).
+-- edge while the game window has focus and never consume the key. They run on UE4SS's event-loop thread, so they go
+-- through keyq (0.10.0): the callback only bumps a counter and the FAST loop runs lobby.onKey on the game thread.
+-- 0.9.x called sched.run (ExecuteInGameThread) from there, which corrupted the shared hook lua_State
+-- (crash_2026_10_08_13_27_33). Note: while a bound key is held (e.g. an arrow while steering), UE4SS drops every
+-- other keybind event of that frame (F5-F9 included).
 function lobby.init()
   registerListeners()
   if opt("LobbyNavKeyboard", "always") == "never" or type(RegisterKeyBind) ~= "function" or Key == nil then return end
+  local keyq = require("keyq")
   local binds = {
     { Key.UP_ARROW, "up" }, { Key.DOWN_ARROW, "down" }, { Key.LEFT_ARROW, "left" }, { Key.RIGHT_ARROW, "right" },
     { Key.RETURN, "accept" }, { Key.SPACE, "accept" }, { Key.ESCAPE, "back" }, { Key.BACKSPACE, "back2" },
@@ -1069,12 +1072,7 @@ function lobby.init()
   local n = 0
   for _, b in ipairs(binds) do
     local key, name = b[1], b[2]
-    if key ~= nil then
-      local ok, err = pcall(RegisterKeyBind, key, function()
-        sched.run("lobby.key", function() lobby.onKey(name) end)
-      end)
-      if ok then n = n + 1 else U.warn(TAG, "RegisterKeyBind(%s) failed: %s", name, tostring(err)) end
-    end
+    if key ~= nil and keyq.bind(key, nil, "lobby." .. name, function() lobby.onKey(name) end) then n = n + 1 end
   end
   nav.kbBound = n > 0
   U.log(TAG, "lobby keyboard navigation: %d keybind(s) (arrows, Enter/Space, Escape guard, Backspace = setup BACK)", n)

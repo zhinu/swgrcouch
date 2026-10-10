@@ -87,6 +87,10 @@ set_ini() {
 install_mod() {
   local BIN="$GAME/Griffin/Binaries/Win64"
   [ -f "$BIN/SWGR-Win64-Shipping.exe" ] || { echo "no SWGR-Win64-Shipping.exe in $BIN" >&2; exit 1; }
+  # a re-install keeps the console choice of an existing UE4SS-settings.ini (2026-10-10: every re-install switched the
+  # windows back on); only a first install turns them on for the first boots
+  local HAD_SETTINGS=0
+  [ -f "$BIN/ue4ss/UE4SS-settings.ini" ] && HAD_SETTINGS=1
   if [ -f "$UE4SS_SRC/dwmapi.dll" ]; then
     # 1. UE4SS (existing files, e.g. an edited UE4SS-settings.ini or mods.txt, are kept). The core files are
     #    always replaced (dated copy first): an older UE4SS left in place does not boot on the hotfixed game.
@@ -158,6 +162,23 @@ install_mod() {
     sed -i '1i SWGRCouch : 1\r' "$MT"
   fi
   sed -i 's/^SplitScreenMod[[:space:]]*:[[:space:]]*1/SplitScreenMod : 0/' "$MT"
+  # BPModLoaderMod's Insert keybind calls ExecuteInGameThread from UE4SS's event-loop thread while its BeginPlay hook
+  # runs Lua on the game thread: the same cross-thread race as crash_2026_10_08_13_27_33. Off when no Blueprint mod
+  # (.pak in Content/Paks/LogicMods) needs it; mods.json carries the same switch.
+  if ! ls "$GAME/Griffin/Content/Paks/LogicMods/"*.pak >/dev/null 2>&1; then
+    sed -i 's/^BPModLoaderMod[[:space:]]*:[[:space:]]*1/BPModLoaderMod : 0/' "$MT"
+    local MJ="$BIN/ue4ss/Mods/mods.json"
+    if [ -f "$MJ" ] && grep -q '"BPModLoaderMod"' "$MJ"; then
+      backup "$MJ"
+      python3 -I - "$MJ" <<'PYEOF' || echo "mods.json: BPModLoaderMod left as it is" >&2
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for m in d:
+    if m.get("mod_name") == "BPModLoaderMod": m["mod_enabled"] = False
+open(p, "w").write(json.dumps(d, indent=4))
+PYEOF
+    fi
+  fi
   if grep -q '^ConsoleEnablerMod' "$MT"; then
     sed -i 's/^ConsoleEnablerMod[[:space:]]*:[[:space:]]*0/ConsoleEnablerMod : 1/' "$MT"
   else
@@ -171,8 +192,10 @@ install_mod() {
     # run I (2026-10-07): both windows off (the text console and the OpenGL debug GUI sat behind the fullscreen game;
     # the GUI's toggle key O is also the game's keyboard player-menu key); UE4SS.log keeps everything
     set_ini "$SI" ConsoleEnabled 0; set_ini "$SI" GuiConsoleEnabled 0; set_ini "$SI" GuiConsoleVisible 0
-  else
+  elif [ "$HAD_SETTINGS" = 0 ]; then
     set_ini "$SI" ConsoleEnabled 1; set_ini "$SI" GuiConsoleEnabled 1; set_ini "$SI" GuiConsoleVisible 1
+  else
+    echo "UE4SS: console windows left as they are (--quiet-console turns them off)"
   fi
   # the Galactic Racer Edition needs these two on the hotfixed game (an older settings file is kept, so set them here)
   set_ini "$SI" bForceGUObjectArrayForIteration true; set_ini "$SI" UseCache 0

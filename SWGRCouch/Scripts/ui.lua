@@ -127,9 +127,13 @@ end
 
 -- Route clicks of an existing WBP_Common_Btn_C (ours or one inside a game widget, e.g. the builder's Btn_Go) to
 -- fn(widget) through the same dispatch as our rows (BP_OnClicked post-hook, or the ClickMode poll).
-function ui.registerButton(w, id, fn)
+-- opts (optional table, 0.10.0): noClaim = true -> every click of this button is dispatched on its own: no
+-- ui.claimAction (the global LobbyNavDedupMs window would drop a fast A, A, A) and no lobby.consumedClick / noteClicked
+-- (the lobby's per-press bookkeeping of its own rows). The RACERS step's P1 input sink (vehicle-step-v2.md §5.7.3,
+-- §5.11) does its own attribution; VERIFY(V-RC-03): P1 A,A,A fast = 3 accepts.
+function ui.registerButton(w, id, fn, opts)
   if not U.ok(w) then return false end
-  St.ui.buttons[U.key(w)] = {id = id, fn = fn, widget = w}
+  St.ui.buttons[U.key(w)] = {id = id, fn = fn, widget = w, opts = type(opts) == "table" and opts or {}}
   if cfg.ClickMode == "poll" then
     U.try(TAG, function()
       -- Poll fallback [UI§3.4]: a selectable + toggleable button flips GetSelected() on every click.
@@ -141,12 +145,13 @@ function ui.registerButton(w, id, fn)
   return true
 end
 
--- Clickable row (WBP_Common_Btn_C). fn(widget) runs on the game thread when the button is clicked.
-function ui.button(pc, id, text, fn)
+-- Clickable row (WBP_Common_Btn_C). fn(widget) runs on the game thread when the button is clicked. opts: see
+-- ui.registerButton.
+function ui.button(pc, id, text, fn, opts)
   local w = ui.make("CommonBtn", pc)
   if not w then return nil end
   U.try(TAG, function() ui.setButtonText(w, text) end)
-  ui.registerButton(w, id, fn)
+  ui.registerButton(w, id, fn, opts)
   U.dbg(TAG, "button '%s' created (%s)", tostring(id), tostring(text))
   return w
 end
@@ -323,6 +328,11 @@ function ui.claimAction(src)
   return true
 end
 
+-- A registry entry made with opts.noClaim (ui.registerButton): its clicks skip the one-action-per-press dedup.
+local function noClaim(e)
+  return type(e.opts) == "table" and e.opts.noClaim == true
+end
+
 -- Register (once) the post-hook on WBP_Common_Btn_C:BP_OnClicked. A Blueprint-function hook needs the UFunction in
 -- memory: U.hook queues the request when the class is not loaded yet and U.retryPendingHooks() completes it.
 -- In "poll" mode the hook is still installed, but only logs (dispatch would double-fire with the poll).
@@ -355,7 +365,7 @@ function ui.onClicked(ctx)
     return
   end
   U.dbg(TAG, "click '%s'", tostring(e.id))
-  if type(e.fn) == "function" and ui.claimAction("click:" .. tostring(e.id)) then
+  if type(e.fn) == "function" and (noClaim(e) or ui.claimAction("click:" .. tostring(e.id))) then
     sched.now("click", e.fn, e.widget)
   end
 end
@@ -393,6 +403,12 @@ function ui.pollClicks()
       end
       if w:GetSelected() == true then              -- GetSelected() -> Bool
         w:SetIsSelected(false, false)              -- SetIsSelected(Bool InSelected, Bool bGiveClickFeedback)
+        -- 0.10.0 opts.noClaim (the RACERS P1 sink): every CommonUI click is one action; its owner attributes it
+        if noClaim(e) then
+          U.dbg(TAG, "poll click '%s' (noClaim)", tostring(e.id))
+          if type(e.fn) == "function" then e.fn(w) end
+          return
+        end
         -- the same press already ran this row through the lobby's own navigation (pad A edge / Enter): CommonUI's
         -- click on release is that press, not a second one (dedup by press, not by time)
         local okC, consumed = pcall(function() return U.mod("lobby").consumedClick(e.id) end)

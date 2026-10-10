@@ -20,6 +20,14 @@
 -- (WBP_PlanetSelector) with a row of planet chips as the control, then a single-planet run map (circuit rows, variant
 -- nodes, detail card). The lists below stay: S.items drives both presentations (S.view "cmap" | "list"), and any cmap
 -- failure falls back to the list for that step (cfg.SetupCampaignMap = false: the 0.8.0 lists only).
+-- 0.10.0 RACERS (notes/design/vehicle-step-v2.md §5.9; user 2026-10-09: "A chracter should be chosen, a kart then. and
+-- then we should be able to map out all the benefits and perks added to the kart"): with cfg.SetupPlayerFlow "cards"
+-- step 5 is RACERS, one card per local player, each on its own PILOT -> VEHICLE -> PERKS -> READY. racers.lua drives it
+-- (state machines, every input source, view models) and cards.lua draws it; this file builds the card row and the
+-- host of P1's input sink, hands the step to racers (enter / leave / poll / keys / players / page shown), gates START
+-- (READY, and RC-1: un-joined pads before the page closes), makes the race choice from the picks (the class's launch
+-- base build, c.setup.flow = "cards", pilots and loadouts per ControllerId) and persists them (LastRaceRacers).
+-- "classic", or a page whose cards cannot be built, keeps the VEHICLES columns below unchanged.
 --
 -- Verified signatures (runtime JMAP 2026-10-07, work/runtime/idx via /tmp query; UMG/CommonUI as in ui.lua):
 --   UImage:SetBrushFromTexture(Texture2D, Bool bMatchSize), SetBrushFromMaterial(MaterialInterface),
@@ -173,6 +181,7 @@ local function status(text)
 end
 
 local function ui() return U.mod("ui") end
+local function racers() return U.mod("racers") end         -- 0.10.0 RACERS step (lazy: G3 like this file)
 
 local function trackKey(track)
     local ok, n = pcall(function() return track:GetFName():ToString() end)
@@ -193,15 +202,18 @@ M.arcadeBg = arcadeBg
 M.trackKey = trackKey
 
 ---------------------------------------------------------------------------------------------------- state
--- W: widgets of the current lobby page instance (rebuilt with the page; forget() drops it).
+-- W: widgets of the current lobby page instance (rebuilt with the page; forget() drops it). 0.10.0: cardBox / cardRow /
+--    sinkHost (RACERS cards), cardsOk (racers.build succeeded), cardsBroken (this page keeps the classic columns).
 -- S: the flow. players[pnum] = {pnum, ctrlId, pc, preset (index), build (index), ready, row (1 vehicle, 2 build),
---    nav = {edges/repeat state}} - P1 is pnum 1 (CommonUI focus), guests come from join.joinedList().
+--    nav = {edges/repeat state}} - P1 is pnum 1 (CommonUI focus), guests come from join.joinedList(). These are the
+--    classic columns; in the cards flow racers.lua keeps the players (St.racers). cards: the shown step 5 is RACERS;
+--    startDormant: the un-joined pads the START window was armed for (RC-1).
 local W = nil
 local cmapCtx            -- helpers handed to cmap.build (assigned below the data section)
 local S = { active = false, step = nil, cls = nil, planets = {}, planet = nil, tracks = {}, track = nil, conds = {},
             cond = "", mode = nil, grid = 12, players = {}, items = {}, page = 0, hl = nil, lastFocus = nil,
             keepUntil = 0, keepNext = 0, startConfirmUntil = 0, kbStepAt = 0, builds = {}, presets = {},
-            pickMemory = {} }
+            pickMemory = {}, cards = false, startDormant = nil }
 
 local VBOX  = { "/Script/Griffin.FuseVerticalBox", "/Script/UMG.VerticalBox" }
 local HBOX  = { "/Script/Griffin.FuseHorizontalBox", "/Script/UMG.HorizontalBox" }
@@ -209,6 +221,7 @@ local SIZE  = { "/Script/Griffin.FuseSizeBox", "/Script/UMG.SizeBox" }
 local OVER  = { "/Script/Griffin.FuseOverlay", "/Script/UMG.Overlay" }
 local IMAGE = { "/Script/Griffin.FuseImage", "/Script/UMG.Image" }
 local SCROLL = { "/Script/UMG.ScrollBox" }
+local SCALE = { "/Script/Griffin.FuseScaleBox", "/Script/UMG.ScaleBox" }
 
 -- New native UMG widget with the page's WidgetTree as outer (what UWidgetTree::ConstructWidget does for non-user
 -- widgets). VERIFY(V-SET-01): widgets made with StaticConstructObject and added to the live page render and lay out.
@@ -417,6 +430,62 @@ local function makeColumn(i)
     return col
 end
 
+---------------------------------------------------------------------------------------------------- RACERS cards
+-- 0.10.0 (cfg.SetupPlayerFlow "cards"). The page gets the card row right after the classic columns, P1's sink host at
+-- the footer's right end and, once the page is complete, racers.build (cards.init + the sink). A failure at any of the
+-- three keeps the classic columns for this page (W.cardsBroken, logged once per page). VERIFY(V-RC-01)
+local function cardsWanted() return opt("SetupPlayerFlow", "cards") == "cards" end
+
+-- The cards serve this page (racers.build succeeded) / the shown step 5 is RACERS.
+local function cardsReady() return W ~= nil and W.cardsOk == true and not W.cardsBroken end
+local function cardsStep() return S.active == true and W ~= nil and S.step == "vehicles" and S.cards == true end
+
+local function cardsStage(what, fn)
+    if W.cardsBroken or not cardsWanted() then return end
+    local ok, err = pcall(fn)
+    if ok then return end
+    W.cardsBroken, W.cardsOk = true, false
+    U.err(TAG, "RACERS cards unavailable (%s: %s): this page keeps the classic VEHICLES columns (V-RC-01)", what,
+        tostring(err))
+end
+
+-- W.cardBox (CardRowW x CardH) > ScaleBox (ScaleToFit, DownOnly: an overflow guard only, the page cannot shrink the
+-- row, RC-15) > W.cardRow (the cards, centred: cards.init puts four collapsed card boxes into it).
+local function buildCardRow()
+    local box = sizeBox(opt("CardRowW", 3500), opt("CardH", 1320))
+    local sc = newW(SCALE)
+    pcall(function() sc:SetStretch(2); sc:SetStretchDirection(1) end)   -- EStretch ScaleToFit, EStretchDir. DownOnly
+    box:AddChild(sc)
+    local row = newW(HBOX)
+    local s = sc:AddChild(row)                              -- -> ScaleBoxSlot
+    if U.ok(s) then pcall(function() s:SetHorizontalAlignment(C.E.HAlign.Center); s:SetVerticalAlignment(1) end) end
+    vAdd(W.panel, box, pad(0, 0, 0, 8), C.E.HAlign.Center)
+    show(box, false)
+    W.cardBox, W.cardRow = box, row
+end
+
+-- P1's input sink (racers.lua, spec §5.7.3): five invisible focusable buttons on a canvas in this 96 x 96 su box,
+-- collapsed outside step 5.
+local function buildSinkHost()
+    local host = sizeBox(96, 96)
+    hAdd(W.footer, host, nil, pad(8, 0, 0, 0))
+    show(host, false)
+    W.sinkHost = host
+end
+
+local function buildRacers()
+    local r = racers().build({ tree = W.tree, pc = W.pc, newW = newW, row = W.cardRow, sinkHost = W.sinkHost,
+                               realMs = M.realMs, footer = { W.back, W.save, W.start } })
+    if r ~= true then error("racers.build returned " .. tostring(r)) end
+    W.cardsOk = true
+end
+
+-- racers.leave when the cards serve this page ("step <x>" keeps the visit: MODE and back; anything else ends it). Its
+-- render images let go of the targets before the bays are released, so it runs before releasePreviews.
+local function racersLeave(why)
+    if cardsReady() then U.try(TAG, function() racers().leave(why) end) end
+end
+
 ---------------------------------------------------------------------------------------------------- page skeleton
 local function buildWidgets(root)
     W.panel = newW(VBOX)
@@ -475,6 +544,8 @@ local function buildWidgets(root)
         hAdd(W.vehRow, col.box, 1, pad(i > 1 and 12 or 0, 0, 0, 0))
     end
     vAdd(W.panel, W.vehRow, pad(0, 0, 0, 8))
+    -- 0.10.0 RACERS: the card row (collapsed until step 5 shows in the cards flow)
+    cardsStage("card row", buildCardRow)
     -- footer
     W.footer = newW(HBOX)
     W.back = button("back", "< BACK", function() M.back() end)
@@ -483,17 +554,19 @@ local function buildWidgets(root)
     hAdd(W.footer, W.save, 1, pad(0, 0, 8, 0))
     W.start = button("start", "START RACE", function() M.finish(true) end)
     hAdd(W.footer, W.start, 1)
+    cardsStage("sink host", buildSinkHost)                 -- 0.10.0: P1's input sink, right end
     vAdd(W.panel, W.footer, pad(0, 4, 0, 4))
     W.status = label("")
     vAdd(W.panel, W.status, pad(0, 2, 0, 0))
     ui().addRow(root, W.panel, 0, 0)
+    cardsStage("racers.build", buildRacers)                -- 0.10.0: cards.init + the sink, on the complete page
 end
 
 -- lobby.build: once per lobby page. false = the flow is unavailable (lobby falls back to the dev panel).
 function M.build(root, pc, page)
     if W and W.pageKey == U.key(page) and U.ok(W.panel) then return not W.broken end
     W = { pageKey = U.key(page), page = page, pc = pc, tree = page.WidgetTree, cyclers = {}, opts = {}, cols = {},
-          focusables = {} }
+          focusables = {}, cardsOk = false, cardsBroken = false }
     textCache, imgCache = {}, {}
     M._resetVideoFlags()                                   -- address-keyed like the caches above (new page)
     local ok, err = pcall(buildWidgets, root)
@@ -504,8 +577,9 @@ function M.build(root, pc, page)
         return false
     end
     show(W.panel, false)
-    U.log(TAG, "race setup page built (%d option rows, %d focusable widgets, campaign views: %s)", #W.opts,
-        #W.focusables, CM and CM.status() or "not loaded")
+    U.log(TAG, "race setup page built (%d option rows, %d focusable widgets, campaign views: %s, step 5: %s)", #W.opts,
+        #W.focusables, CM and CM.status() or "not loaded", W.cardsOk and "RACERS cards"
+        or (cardsWanted() and "classic columns (cards unavailable)" or "classic columns"))
     return true
 end
 
@@ -514,6 +588,9 @@ function M.available() return W ~= nil and not W.broken and U.ok(W.panel) end
 -- New menu instance (ui.forgetAll -> lobby.resetNav): our widgets died with the old page.
 function M.forget()
     if S.active then M.stopVideo("menu replaced") end
+    -- 0.10.0: the cards died with the page. Also when they failed on it (racers.build after cards.init, or the step
+    -- entry): racers / cards must not keep that page's sink and card widgets for the next page
+    if cardsWanted() then pcall(function() racers().forget() end) end
     releasePreviews("menu replaced", false)                  -- the old page's images die with it
     if CM then pcall(CM.forget) end
     M._resetVideoFlags()
@@ -526,7 +603,7 @@ end
 -- when the setup closes. VERIFY(V-SET-02): OpenUrl("./Movies/MEDIA_PlanetEstablish_*.bk2") + Play() shows the movie
 -- through M_UI_MediaPlayer_Video_Mat on our image; fallback cfg.SetupVideo = false (planet still image).
 local video = { player = nil, mat = nil, saved = false, prevUrl = "", prevLoop = false, url = nil, matOn = {} }
-function M._resetVideoFlags() video.matOn = {} end     -- M.build / M.forget are defined above `video`
+function M._resetVideoFlags() video.matOn = {}; video.pending = nil end  -- M.build / M.forget are above `video`
 
 local function videoObjects()
     if not U.ok(video.player) then video.player = U.obj("/Game/Movies/UI_BinkMediaPlayer.UI_BinkMediaPlayer") end
@@ -534,18 +611,14 @@ local function videoObjects()
     return U.ok(video.player) and U.ok(video.mat)
 end
 
--- true when the movie was started (img, default the media image, then shows the video material). 0.9.0: the
--- material flag is per image (cmap's planet view shows the movie on its own image).
-local function playVideo(url, img)
-    if opt("SetupVideo", true) == false or not videoObjects() then return false end
-    img = img or W.media
-    local function ensureMaterial()
-        local k = U.key(img)
-        if video.matOn[k] then return end
-        if pcall(function() img:SetBrushFromMaterial(video.mat) end) then video.matOn[k] = true end   -- (MaterialInterface)
-        imgCache[k] = "<video>"
-    end
-    if video.url == url then ensureMaterial(); return true end
+local function ensureMaterial(img)
+    local k = U.key(img)
+    if video.matOn[k] then return end
+    if pcall(function() img:SetBrushFromMaterial(video.mat) end) then video.matOn[k] = true end   -- (MaterialInterface)
+    imgCache[k] = "<video>"
+end
+
+local function openVideo(url, img)
     local ok = pcall(function()
         local p = video.player
         if not video.saved then
@@ -564,12 +637,37 @@ local function playVideo(url, img)
         return false
     end
     video.url = url
-    ensureMaterial()
+    ensureMaterial(img)
     U.dbg(TAG, "video: %s", url)
     return true
 end
 
+-- true when the movie was started or queued (img, default the media image, then shows the video material). 0.9.0:
+-- the material flag is per image (cmap's planet view shows the movie on its own image). 0.10.0: while a movie is
+-- already up, a new URL waits until the selection has been still for cfg.SetupVideoSettleMs (scrolling the planet
+-- carousel opened 2-3 Bink files a second); M.videoTick (pollNav) opens it.
+local function playVideo(url, img)
+    if opt("SetupVideo", true) == false or not videoObjects() then return false end
+    img = img or W.media
+    if video.url == url then video.pending = nil; ensureMaterial(img); return true end
+    local settle = tonumber(opt("SetupVideoSettleMs", 250)) or 0
+    if settle > 0 and video.url ~= nil then
+        video.pending = { url = url, img = img, at = M.realMs() + settle }
+        ensureMaterial(img)
+        return true
+    end
+    return openVideo(url, img)
+end
+
+function M.videoTick()
+    local p = video.pending
+    if p == nil or M.realMs() < p.at then return end
+    video.pending = nil
+    if video.url ~= p.url and U.ok(p.img) then openVideo(p.url, p.img) end
+end
+
 function M.stopVideo(why)
+    video.pending = nil
     if not video.saved then return end
     video.saved = false
     video.url = nil
@@ -667,7 +765,9 @@ local function variantHint(internal)
     return table.concat(out, " · ")
 end
 
-local function dedupeTracks(list, cls, planet)
+-- ranked (0.10.0, a track set is active): group by layout without the display name (it folded "Sebulba's
+-- Challenge" into the tour's "Debris Dunes" pod layout) and let the pool rank win (Quick Race / Quick Podrace first).
+local function dedupeTracks(list, cls, planet, ranked)
     if opt("SetupTrackDedupe", true) == false then         -- fallback: every TrackDef the game returns
         local byName = {}
         for _, e in ipairs(list) do byName[e.name] = (byName[e.name] or 0) + 1 end
@@ -679,7 +779,9 @@ local function dedupeTracks(list, cls, planet)
     end
     local groups, order = {}, {}
     for _, e in ipairs(list) do
-        local g = table.concat({ e.name, string.upper(e.internal or ""), tostring(e.rev), tostring(e.p2p),
+        local first = e.name
+        if ranked then first = ((e.internal or "") == "") and (e.key or e.name) or "" end   -- no InternalName: own row
+        local g = table.concat({ first, string.upper(e.internal or ""), tostring(e.rev), tostring(e.p2p),
             tostring(e.mines) }, "|")
         if not groups[g] then groups[g] = {}; order[#order + 1] = g end
         local l = groups[g]
@@ -689,6 +791,7 @@ local function dedupeTracks(list, cls, planet)
     for _, g in ipairs(order) do
         local l = groups[g]
         table.sort(l, function(a, b)
+            if ranked and (a.rank or 9) ~= (b.rank or 9) then return (a.rank or 9) < (b.rank or 9) end
             local sa, sb = variantScore(a), variantScore(b)
             if sa ~= sb then return sa < sb end
             if #a.conds ~= #b.conds then return #a.conds > #b.conds end
@@ -722,22 +825,207 @@ end
 
 -- Tracks the game offers for (class, planet): GfnGameInstance.Events:GetQuickplayTracksForVehicleAndPlanet, the
 -- native filter the dev panel uses. nil when the call failed (unknown), {} when the planet has none for the class.
+---------------------------------------------------------------------------------------------------- track pools
+-- 0.10.0 (notes/research/track-whitelist.md). GetQuickplayTracksForVehicleAndPlanet is the dev panel's helper with no
+-- shipping filter: every loaded TrackDef of the planet whose VehicleTypeTag fits comes back (Prologue slices,
+-- "COR [LOOP B - SHORT 01]", campaign _ACT2 copies, shakedown SHK_PRE_*, time-trial TT_*, boss arenas, untagged pod
+-- tracks in the SPEEDER lists). The setup offers what the game itself offers, read from the game instance's own
+-- data assets (native UPROPERTYs, hard references, no Blueprint call):
+--   QR    GfnGameInstance.PvpInstantActionDef.Tracks[].track        "Quick Race" (speeders, 61 tracks)
+--   QRP   GfnGameInstance.PvpPlaneInstantActionDef.Tracks[].track   "Quick Podrace" (6 tracks)
+--   TOUR  GfnGameInstance.PvpRunDef.Tour.Planets[].Tracks[].track   Multiplayer Tour
+--   PTOUR GfnGameInstance.PvpPlaneRunDef.Tour.Planets[].Tracks[]    Podracing Tour
+--   ARC   GfnGameInstance.ArcadeDef.ArcadeEvents[].TrackDef          Arcade (precision courses excluded)
+-- cfg.SetupTrackSet: "quickrace" (QR+QRP) | "arcade" (+ARC, default) | "game" (+both tours) | "all" (0.9.x lists).
+-- The class comes from the pool (speeder pool -> Landspeeder/Bike/Skimmer, pod pool -> Podracer), the pool rank wins
+-- the dedupe (the Quick Podrace TrackDef over its "memory" twin). TRACK_POOLS is the generated fallback (hotfix
+-- CL382493 paks, identical before the hotfix) for when the pools cannot be read.
+-- VERIFY(V-TRK-01): "track pools 'arcade': 77 TrackDef(s) (game data)" on the first setup open.
+local POOL_SETS = {
+    quickrace = { QR = 1, QRP = 1 },
+    arcade    = { QR = 1, QRP = 1, ARC = 3 },
+    game      = { QR = 1, QRP = 1, TOUR = 2, PTOUR = 2, ARC = 3 },
+}
+-- TRACK_POOLS letters: Q Quick Race, q Quick Podrace, T Multiplayer Tour, t Podracing Tour, A / a Arcade race
+-- track (speeder / pod).
+local POOL_LETTERS = { Q = { "QR", "speeder" }, q = { "QRP", "pod" }, T = { "TOUR", "speeder" },
+                       t = { "PTOUR", "pod" }, A = { "ARC", "speeder" }, a = { "ARC", "pod" } }
+local TRACK_POOLS = {
+    TRAK_BGL_PLANE_FWD = "a", TRAK_BGL_PLANE_FWD_PDay = "qt", TRAK_COR_Loop_A_FWD = "QTA",
+    TRAK_COR_Loop_A_FWD_MINES = "QT", TRAK_COR_Loop_A_REV = "QT", TRAK_COR_Loop_A_SHORT_02 = "QTA",
+    TRAK_COR_Loop_A_SHORT_02_MINES = "QT", TRAK_COR_Loop_B_FWD = "QTA", TRAK_COR_Loop_B_FWD_MINES = "QT",
+    TRAK_COR_Loop_B_REV = "QT", TRAK_COR_P2P_FWD = "QT", TRAK_COR_P2P_FWD_MINES = "QT", TRAK_COR_P2P_REV = "QT",
+    TRAK_COR_P2P_SHORT_05 = "QTA", TRAK_COR_PLANE_FWD_Pday = "t", TRAK_DAL_LOOP_A_FWD = "QT",
+    TRAK_DAL_LOOP_A_FWD_MINES = "QT", TRAK_DAL_LOOP_A_SHORT_01 = "QTA", TRAK_DAL_LOOP_A_SHORT_06 = "QTA",
+    TRAK_DAL_LOOP_B_FWD = "QTA", TRAK_DAL_LOOP_B_FWD_MINES = "QT", TRAK_DAL_LOOP_B_REV = "QTA",
+    TRAK_DAL_LOOP_B_SHORT_03 = "QT", TRAK_DAL_P2P_FWD = "QTA", TRAK_DAL_P2P_FWD_MINES = "QT",
+    TRAK_DAL_P2P_SHORT_05 = "QTA", TRAK_DAL_PLANE_FWD_Pday = "qta", TRAK_HSK_LOOP_A_FWD = "QT",
+    TRAK_HSK_LOOP_A_FWD_MINES = "QTA", TRAK_HSK_LOOP_A_FWD_MP_PLANE = "t", TRAK_HSK_LOOP_A_REV = "QTA",
+    TRAK_HSK_LOOP_B_FWD = "QT", TRAK_HSK_LOOP_B_FWD_MINES = "QT", TRAK_HSK_LOOP_B_FWD_PDAY_PLANE = "t",
+    TRAK_HSK_LOOP_B_REV = "QTA", TRAK_HSK_LOOP_B_SHORT_02 = "QTA", TRAK_HSK_LOOP_B_SHORT_02_MINES = "T",
+    TRAK_HSK_P2P_FWD = "QTA", TRAK_HSK_P2P_FWD_MINES = "QT", TRAK_HSK_P2P_REV = "QT",
+    TRAK_HSK_P2P_SPEC_SHORT_01 = "QTA", TRAK_HSK_P2P_SPEC_SHORT_02 = "QT", TRAK_INSTA_COR_PLANE_FWD = "qa",
+    TRAK_INSTA_COR_PLANE_REV = "qa", TRAK_INSTA_DAL_PLANE_REV = "a", TRAK_MAS_LOOP_A_FWD = "QT",
+    TRAK_MAS_LOOP_A_FWD_HARD = "QT", TRAK_MAS_LOOP_A_FWD_MINES = "QT", TRAK_MAS_LOOP_A_REV = "QTA",
+    TRAK_MAS_LOOP_A_REV_HARD = "QT", TRAK_MAS_LOOP_A_SHORT_02 = "QTA", TRAK_MAS_LOOP_A_SHORT_02_HARD = "QT",
+    TRAK_MAS_LOOP_B_FWD = "QT", TRAK_MAS_LOOP_B_FWD_HARD = "QT", TRAK_MAS_LOOP_B_FWD_MINES = "QT",
+    TRAK_MAS_LOOP_B_FWD_MP_PLANE = "t", TRAK_MAS_LOOP_B_REV = "QT", TRAK_MAS_LOOP_B_REV_HARD = "QT",
+    TRAK_MAS_LOOP_B_SHORT_01 = "QTA", TRAK_MAS_P2P_FWD = "QT", TRAK_MAS_P2P_FWD_MINES = "QT",
+    TRAK_MAS_P2P_SHORT_03 = "QT", TRAK_MAS_P2P_SHORT_03_MINES = "QT", TRAK_MAS_PLANE_FWD_Pday = "a",
+    TRAK_MP_COR_Loop_A_FWD_PLANE = "t", TRAK_MP_COR_Loop_B_FWD_PLANE = "t", TRAK_MP_COR_P2P_FWD_PLANE = "t",
+    TRAK_MP_COR_P2P_REV_PLANE = "t", TRAK_MP_COR_PLANE_FWD_Pday = "t", TRAK_MP_DAL_LOOP_B_FWD_PLANE = "t",
+    TRAK_MP_DAL_P2P_FWD_PLANE = "t", TRAK_MP_DAL_PLANE_REV = "qt", TRAK_MP_HSK_P2P_FWD_PLANE = "t",
+    TRAK_MP_MAS_P2P_FWD_PLANE = "t", TRAK_MP_SPA_Loop_A_FWD_PLANE = "t", TRAK_SHK_COR_P2P_REV = "A",
+    TRAK_SHK_DAL_LOOP_A_FWD = "A", TRAK_SHK_MAS_P2P_RollingStart_FWD_01 = "A",
+    TRAK_SHK_MAS_P2P_RollingStart_FWD_02 = "A", TRAK_SPA_Loop_A_FWD = "QTA", TRAK_SPA_Loop_A_FWD_MINES = "QT",
+    TRAK_SPA_Loop_A_REV = "QT", TRAK_SPA_Loop_A_SHORT_01 = "A", TRAK_SPA_Loop_A_SHORT_01_MINES = "QT",
+    TRAK_SPA_Loop_B_FWD = "QTA", TRAK_SPA_Loop_B_FWD_MINES = "QTA", TRAK_SPA_Loop_B_P2P = "QTA",
+    TRAK_SPA_Loop_B_P2P_MINES = "QT", TRAK_SPA_Loop_B_SHORT_02 = "QT", TRAK_SPA_PLANE_FWD_PDay = "qta",
+    TRAK_WHP_LOOP_A_FWD_ARC = "A", TRAK_WHP_LOOP_A_FWD_MP = "T", TRAK_WHP_PLANE_FWD = "a",
+}
+local poolCache = {}   -- set name -> { [TrackDef key] = { speeder = {rank, conds}, pod = {rank, conds} } }
+
+local function poolEntry(P, key, grp, rank)
+    local e = P[key] or {}
+    P[key] = e
+    local g = e[grp]
+    if not g then g = { rank = rank, conds = {} }; e[grp] = g elseif rank < g.rank then g.rank = rank end
+    return g
+end
+
+-- Arcade pod events run 1-2 pods (time trials, team races of 2). Live 2026-10-09 (V-TRK-08): an 8-pod race on
+-- TRAK_WHP_PLANE_FWD crashed at PRERACE (AV null+0x1e0 at SWGR+0x3ad7857, crash_2026_10_09_18_51_15). Arcade-only pod
+-- tracks are therefore left out unless cfg.SetupTrackArcadePods (the Quick Podrace and Podracing Tour pods race 6-8).
+local function arcadePodsWanted() return opt("SetupTrackArcadePods", false) == true end
+
+local function staticPools(set)
+    local P = {}
+    for key, letters in pairs(TRACK_POOLS) do
+        for ch in letters:gmatch(".") do
+            local spec = POOL_LETTERS[ch]
+            local rank = spec and set[spec[1]]
+            if rank and not (ch == "a" and not arcadePodsWanted()) then poolEntry(P, key, spec[2], rank) end
+        end
+    end
+    return P
+end
+
+local function poolAdd(P, t, grp, rank, tagContainer)
+    if not U.ok(t) then return end
+    local key = trackKey(t)
+    if key == "" then return end
+    local g = poolEntry(P, key, grp, rank)
+    if tagContainer then
+        pcall(function()
+            local tags = tagContainer.GameplayTags                       -- FGameplayTagContainer +0x0
+            for i = 1, tags:GetArrayNum() do
+                local s = U.str(tags[i].TagName)
+                if s ~= "" and s ~= "None" then g.conds[s] = true end
+            end
+        end)
+    end
+end
+
+local function poolAddSetups(P, arr, grp, rank)       -- TArray<FPvpTrackSetup {track, Weight, TrackConditionsOverride}>
+    for i = 1, arr:GetArrayNum() do
+        local st = arr[i]
+        poolAdd(P, st.track, grp, rank, st.TrackConditionsOverride)
+    end
+end
+
+local function trackPools(setName)
+    if poolCache[setName] ~= nil then return poolCache[setName] end
+    local set, P, n = POOL_SETS[setName], {}, 0
+    local gi = U.gi()
+    if not U.ok(gi) then return nil end                 -- transient: no cache, the next call tries again
+    local ok, err = pcall(function()
+        if set.QR then poolAddSetups(P, gi.PvpInstantActionDef.Tracks, "speeder", set.QR) end
+        if set.QRP then poolAddSetups(P, gi.PvpPlaneInstantActionDef.Tracks, "pod", set.QRP) end
+        for _, r in ipairs({ { "TOUR", "PvpRunDef", "speeder" }, { "PTOUR", "PvpPlaneRunDef", "pod" } }) do
+            if set[r[1]] then
+                local planets = gi[r[2]].Tour.Planets
+                for i = 1, planets:GetArrayNum() do poolAddSetups(P, planets[i].Tracks, r[3], set[r[1]]) end
+            end
+        end
+        if set.ARC then
+            local evs = gi.ArcadeDef.ArcadeEvents
+            for i = 1, evs:GetArrayNum() do
+                local ev = evs[i]
+                if U.ok(ev) and tonumber(ev.Category) ~= 4 then        -- EArcadeEventCategories::Precision
+                    local pod = U.str(ev.VehicleTypeTag.TagName):find("^Vehicle%.Special") ~= nil
+                    if not pod or arcadePodsWanted() then
+                        poolAdd(P, ev.TrackDef, pod and "pod" or "speeder", set.ARC, nil)
+                    end
+                end
+            end
+        end
+    end)
+    for _ in pairs(P) do n = n + 1 end
+    local source = "game data"
+    if not ok or n == 0 then
+        P, n, source = staticPools(set), 0, "static table, game data unreadable: " .. tostring(err)
+        for _ in pairs(P) do n = n + 1 end
+        U.warn(TAG, "track pools '%s': game data unreadable (%s); using the static whitelist", setName, tostring(err))
+    end
+    U.log(TAG, "track pools '%s': %d TrackDef(s) (%s) (V-TRK-01)", setName, n, source)
+    poolCache[setName] = P
+    return P
+end
+
+-- The set in effect: nil = no filter ("all" or an unknown value).
+local function trackSetName()
+    local s = tostring(opt("SetupTrackSet", "arcade"))
+    return POOL_SETS[s] and s or nil
+end
+
 local function queryTracks(cls, planet)
-    local ck = tostring(cls.arch) .. "|" .. planet.key
+    local setName = trackSetName()
+    local ck = tostring(setName or "all") .. "|" .. tostring(cls.arch) .. "|" .. planet.key
     if trackCache[ck] then return trackCache[ck] end
     local va, pla = V.archetypeObj(cls), U.obj(planet.path)
     if not (va and U.ok(pla)) then return nil end
+    local P = setName and trackPools(setName) or nil
+    if setName and not P then return nil end            -- game instance not ready: unknown for now (not cached)
     local list = nil
     local ok, err = pcall(function()
-        local raw = U.arrayToTable(U.gi().Events:GetQuickplayTracksForVehicleAndPlanet(va, pla))
+        local events = U.gi().Events
+        local raw = U.arrayToTable(events:GetQuickplayTracksForVehicleAndPlanet(va, pla))
         list = {}
-        for i = 1, #raw do if U.ok(raw[i]) then list[#list + 1] = readTrack(raw[i]) end end
+        if not P then
+            for i = 1, #raw do if U.ok(raw[i]) then list[#list + 1] = readTrack(raw[i]) end end
+            return
+        end
+        local grp = (cls.arch == 1) and "pod" or "speeder"
+        if grp == "pod" then                            -- 9 pod tracks have no VehicleTypeTag: only in the speeder lists
+            local car = V.archetypeObj(V.classByArch(0))
+            if car then
+                local more = U.arrayToTable(events:GetQuickplayTracksForVehicleAndPlanet(car, pla))
+                for i = 1, #more do raw[#raw + 1] = more[i] end
+            end
+        end
+        local seen = {}
+        for i = 1, #raw do
+            local t = raw[i]
+            local k = U.ok(t) and trackKey(t) or nil
+            local pe = k and P[k] and P[k][grp]
+            if pe and not seen[k] then
+                seen[k] = true
+                local e = readTrack(t)
+                e.rank = pe.rank
+                if opt("SetupTrackPoolConds", true) ~= false and next(pe.conds) ~= nil then
+                    local keep = {}
+                    for _, c in ipairs(e.conds) do if pe.conds[c] then keep[#keep + 1] = c end end
+                    if #keep > 0 then e.conds = keep end
+                end
+                list[#list + 1] = e
+            end
+        end
     end)
     if not ok then
         U.warn(TAG, "track list for %s on %s unavailable: %s", cls.key, planet.key, tostring(err))
         return nil
     end
-    list = dedupeTracks(list, cls, planet)
+    list = dedupeTracks(list, cls, planet, setName ~= nil)
     trackCache[ck] = list
     return list
 end
@@ -751,6 +1039,27 @@ local function trackLabel(e)
     if e.dup and e.hint then s = s .. "  ·  " .. e.hint end
     if #flags > 0 then s = s .. "  ·  " .. table.concat(flags, " · ") end
     return s
+end
+
+-- Test helper (testcmd lua, 0.10.0): every class x planet track list of the current set, one log line each
+-- (V-TRK-02..06). Returns the number of lists logged.
+function M.dumpTrackLists()
+    local n = 0
+    for _, cls in ipairs(V.CLASSES) do
+        for _, p in ipairs(PLANETS) do
+            local l = queryTracks(cls, p)
+            if l and #l > 0 then
+                local t = {}
+                for _, e in ipairs(l) do
+                    t[#t + 1] = tostring(e.key) .. " = " .. trackLabel(e) .. " [" .. table.concat(e.conds or {}, ",") .. "]"
+                end
+                U.log(TAG, "track list %s / %s (set %s): %d: %s", cls.key, p.key, tostring(trackSetName() or "all"), #l,
+                    table.concat(t, " | "))
+                n = n + 1
+            end
+        end
+    end
+    return n
 end
 
 local function planetsFor(cls)
@@ -811,8 +1120,10 @@ local function cmapFailed(step, why)
 end
 
 ---------------------------------------------------------------------------------------------------- rendering
+-- racers: step 5 in the cards flow (0.10.0)
 local STEP_TITLE = { class = "STEP 1/5  CLASS", planet = "STEP 2/5  PLANET", track = "STEP 3/5  TRACK",
-                     cond = "STEP 3/5  CONDITIONS", mode = "STEP 4/5  MODE", vehicles = "STEP 5/5  VEHICLES" }
+                     cond = "STEP 3/5  CONDITIONS", mode = "STEP 4/5  MODE", vehicles = "STEP 5/5  VEHICLES",
+                     racers = "STEP 5/5  RACERS" }
 
 local function crumb()
     local parts = {}
@@ -823,7 +1134,8 @@ local function crumb()
         if S.cond ~= "" then parts[#parts + 1] = prettyCond(S.cond) end
     end
     if S.mode and S.step == "vehicles" then parts[#parts + 1] = S.mode.label end
-    return (STEP_TITLE[S.step] or "") .. "      " .. table.concat(parts, "  >  ")
+    local title = (S.step == "vehicles" and S.cards) and STEP_TITLE.racers or STEP_TITLE[S.step]
+    return (title or "") .. "      " .. table.concat(parts, "  >  ")
 end
 
 local function setInfo(lines)
@@ -1253,17 +1565,35 @@ function M.focus(target)
     return ok
 end
 
+-- 0.10.0: step 5 as RACERS (racers.enter: the players, their cards and previews) -> P1's focus target (the sink), or
+-- nil when the cards cannot start: racers left, and this page uses the classic columns from now on.
+local function enterCards()
+    local ok, t = U.try(TAG, function() return racers().enter(S.cls, S.planet) end)
+    if ok and U.ok(t) then return t end
+    racersLeave("cards failed")
+    W.cardsBroken, S.cards = true, false
+    U.err(TAG, "RACERS step could not start (%s): this page uses the classic VEHICLES columns (V-RC-01)",
+        ok and "no focus target" or "error")
+    return nil
+end
+
 function M.showStep(step)
     if not W or not STEPS[step] and step ~= "vehicles" then return end
-    if step ~= "vehicles" then releasePreviews("step " .. step) end   -- the bays exist only in the VEHICLES step
+    if step ~= "vehicles" then
+        racersLeave("step " .. step)                       -- 0.10.0: the cards' images first, then their bays
+        releasePreviews("step " .. step)                   -- the bays exist only in the VEHICLES step
+    end
     S.step, S.page, S.lastFocus, S.previewed, S.focusMode = step, 0, nil, nil, nil
     local veh = (step == "vehicles")
+    S.cards = veh and cardsWanted() and cardsReady()       -- 0.10.0: step 5 = RACERS (cards flow)
     -- 0.9.0: PLANET / TRACK in cmap's campaign views when usable, else the lists (S.items drives both)
     S.view = (CM and not veh and CM.usable(step)) and "cmap" or "list"
     if CM then pcall(CM.setView, S.view == "cmap" and step or nil) end
     if S.view == "cmap" and step == "track" then M.stopVideo("run map") end   -- the run map has no video area
     show(W.body, not veh and S.view == "list")
-    show(W.vehRow, veh)
+    show(W.vehRow, veh and not S.cards)
+    show(W.cardBox, veh and S.cards)
+    show(W.sinkHost, veh and S.cards)
     show(W.gridCy.box, step == "mode")
     showRow(W.save, veh)
     showRow(W.start, veh)
@@ -1273,9 +1603,16 @@ function M.showStep(step)
     if veh then
         M.stopVideo("vehicles step")
         S.builds = V.builds(S.cls.arch)
-        renderColumns()
-        target = W.cols[1].vehCy.m
-        S.startConfirmUntil = 0
+        S.startConfirmUntil, S.startDormant = 0, nil
+        if S.cards then target = enterCards() end
+        if not S.cards then                                -- classic, or the cards failed just now
+            show(W.cardBox, false)
+            show(W.sinkHost, false)
+            show(W.vehRow, true)
+            renderColumns()
+            target = W.cols[1].vehCy.m
+        end
+        setText(W.crumb, crumb())
     else
         local sel = STEPS[step]() or 1
         if S.view == "cmap" and #S.items == 0 then           -- nothing to show: the list (with its message), map kept
@@ -1353,23 +1690,45 @@ end
 
 ---------------------------------------------------------------------------------------------------- choice output
 -- The race choice consumed by launch.start (same fields as builder.capture) + c.setup:
---   {classKey, arch, modeKey, single, grid ("max"|"native"), maxRacers, players = {[pnum] = {presetId, buildPath}}}
+--   {classKey, arch, modeKey, single, grid ("max"|"native"), maxRacers, flow ("cards" | "classic"),
+--    players = {[pnum] = {presetId, buildPath}}}
+-- 0.10.0 cards flow: c.build = the class's launch base (perkapply.launchBase: VBD_000_1Mastiff / _Plane, with
+-- PerkLaunchBase "pilot" P1's style build) and players = racers.choicePlayers(): {[pnum] = {ctrlId, pilotId, presetId,
+-- buildPath (the base build, for LastRaceVehicles), loadout, code}}.
 function M.makeChoice()
     if not (S.cls and S.planet and S.track and S.mode) then return nil, "CHOOSE CLASS, PLANET, TRACK AND MODE" end
     local b = S.builds[(S.players[1] or {}).build or 1]
+    local build, players = nil, nil
+    if S.cards then
+        local okP, r = U.try(TAG, function() return racers().choicePlayers() end)
+        players = (okP and type(r) == "table") and r or {}
+        local p1 = players[1]
+        local okB, base = U.try(TAG, function()
+            return U.mod("perkapply").launchBase(S.cls.arch, p1 and p1.pilotId or nil)
+        end)
+        if okB and U.ok(base) then
+            build = base
+        else
+            U.warn(TAG, "RACERS: no launch base build for %s: the class's first build is used", tostring(S.cls.key))
+        end
+    end
     local c = { archetype = V.archetypeObj(S.cls), gameMode = U.obj(S.mode.path), planet = U.obj(S.planet.path),
-                track = S.track.obj, build = V.buildObj(b), debugBuild = nil, condition = S.cond or "" }
+                track = S.track.obj, build = build or V.buildObj(b), debugBuild = nil, condition = S.cond or "" }
     if not U.ok(c.gameMode) then c.gameMode = nil end
     if not U.ok(c.planet) then c.planet = nil end
     local builder = U.mod("builder")
     if not builder.isValid(c) then return nil, "RACE INCOMPLETE (CLASS, MODE, TRACK OR BUILD NOT FOUND)" end
     c.setup = { classKey = S.cls.key, arch = S.cls.arch, modeKey = S.mode.key, single = S.mode.single,
-                grid = S.mode.grid, maxRacers = S.grid, players = {} }
-    for _, e in ipairs(S.order or localPlayers()) do
-        local p = S.players[e.pnum]
-        if p and p.arch == S.cls.arch then
-            local pr, pb = V.presets(S.cls.arch)[p.preset], S.builds[p.build]
-            c.setup.players[e.pnum] = { presetId = pr and pr.id or nil, buildPath = pb and pb.path or nil }
+                grid = S.mode.grid, maxRacers = S.grid, flow = S.cards and "cards" or "classic", players = {} }
+    if S.cards then
+        c.setup.players = players
+    else
+        for _, e in ipairs(S.order or localPlayers()) do
+            local p = S.players[e.pnum]
+            if p and p.arch == S.cls.arch then
+                local pr, pb = V.presets(S.cls.arch)[p.preset], S.builds[p.build]
+                c.setup.players[e.pnum] = { presetId = pr and pr.id or nil, buildPath = pb and pb.path or nil }
+            end
         end
     end
     c.label = builder.describe(c)
@@ -1377,7 +1736,7 @@ function M.makeChoice()
 end
 
 -- Optional settings keys (config.lua cfg.Defaults must define them; without a default they are simply not saved).
-local KEY_GRID, KEY_VEH = "LastRaceMaxRacers", "LastRaceVehicles"
+local KEY_GRID, KEY_VEH, KEY_RACERS = "LastRaceMaxRacers", "LastRaceVehicles", "LastRaceRacers"
 
 function M.persistExtras(c)
     if type(c) ~= "table" or type(c.setup) ~= "table" then return end
@@ -1390,6 +1749,51 @@ function M.persistExtras(c)
         end
         settings.set(KEY_VEH, table.concat(parts, ";"))
     end
+    -- 0.10.0 cards flow: every pad's pilot, vehicle and loadout by ControllerId (LastRaceRacers, racers.persist)
+    if c.setup.flow == "cards" then U.try(TAG, function() racers().persist(c) end) end
+end
+
+-- 0.10.0: is build what a cards race persists as its build (LastRaceBuild) for class arch? The class's zero base, or
+-- with cfg.PerkLaunchBase "pilot" one of the Instant Action style builds (perkdata STYLES[].build).
+local function cardsBase(build, arch)
+    local path = U.pathOf(build)
+    if path == "" then return false end
+    local okB, base = pcall(function() return U.mod("perkapply").basePath(arch) end)
+    if okB and path == base then return true end
+    if opt("PerkLaunchBase", "zero") == "pilot" then
+        local okD, D = pcall(U.mod, "perkdata")
+        if okD and type(D) == "table" and type(D.STYLES) == "table" then
+            for _, st in pairs(D.STYLES) do
+                if st.build == path then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- 0.10.0: s.flow = "cards" and s.players from LastRaceRacers (§7.1: per ControllerId) for the pads present now (P1 =
+-- ControllerId 0, the joined guests in view order) when the cards flow is on, the key is not empty and the choice
+-- launches on a cards base build. Entries are class-checked (pilot, preset); the loadout code is decoded and validated
+-- where it is used (racers.restore, perkapply). A pad without an entry gets no pick (launch: a fresh card's defaults).
+-- V-RC-25: quit + relaunch, the lobby's START RACE replays every pad's picks.
+local function racersFromSettings(s, c, cls)
+    if opt("SetupPlayerFlow", "cards") ~= "cards" then return end
+    local text = settings.get(KEY_RACERS)
+    if type(text) ~= "string" or text == "" or not cardsBase(c.build, cls.arch) then return end
+    local okP, entries = pcall(function() return racers().parseRacers(text) end)
+    if not okP or type(entries) ~= "table" then return end
+    local okL, Pm = pcall(U.mod, "pilots")
+    local base, players = U.pathOf(c.build), {}
+    for _, e in ipairs(localPlayers()) do
+        local r = entries[e.ctrlId]
+        if r then
+            local pilot = r.pilot
+            if pilot and not (okL and Pm.allowed(pilot, cls.arch)) then pilot = nil end
+            local preset = (r.preset and V.presetById(cls.arch, r.preset)) and r.preset or nil
+            players[e.pnum] = { ctrlId = e.ctrlId, pilotId = pilot, presetId = preset, buildPath = base, code = r.code }
+        end
+    end
+    s.flow, s.players = "cards", players
 end
 
 -- c.setup for a choice made elsewhere (dev panel, settings.txt): mode/class from the objects, grid = class limit,
@@ -1412,6 +1816,12 @@ function M.deriveSetup(c)
             if V.presetById(cls.arch, id) then
                 s.players[tonumber(pnum)] = { presetId = id, buildPath = path ~= "" and path or nil }
             end
+        end
+    end
+    if cls then                                            -- 0.10.0: a cards race's picks replace the columns' ones
+        local okR, err = pcall(racersFromSettings, s, c, cls)
+        if not okR then
+            U.warn(TAG, "LastRaceRacers not usable (%s): the race replays without the RACERS picks", tostring(err))
         end
     end
     return s
@@ -1439,6 +1849,8 @@ local function preselect()
                 mem[1].buildPath = mem[1].buildPath or U.pathOf(c.build)
             end
         end
+        -- 0.10.0: the RACERS cards' session memory (pilot, preset, loadout per ControllerId) from the same race
+        if cardsReady() then U.try(TAG, function() racers().restore(s) end) end
         if S.cls and S.planet then
             for _, e in ipairs(queryTracks(S.cls, S.planet) or {}) do
                 local hit = U.key(e.obj) ~= 0 and U.key(e.obj) == U.key(c.track)
@@ -1453,9 +1865,14 @@ end
 
 function M.isActive() return S.active == true and W ~= nil end
 
--- The setup widget P1's CommonUI focus is on (or should return to), for join.lua's GameAndUI focus target.
+-- The setup widget P1's CommonUI focus is on (or should return to), for join.lua's GameAndUI focus target. RACERS:
+-- P1's input sink.
 function M.focusTarget()
     if not M.isActive() then return nil end
+    if cardsStep() then
+        local ok, t = pcall(function() return racers().sink() end)
+        if ok and U.ok(t) then return t end
+    end
     if U.ok(S.lastFocus) then return S.lastFocus end
     if U.ok(S.focusTarget) then return S.focusTarget end
     return nil
@@ -1481,6 +1898,7 @@ function M.close(why)
     if not S.active then return end
     S.active = false
     M.stopVideo(why)
+    racersLeave(why)                                         -- 0.10.0: the visit ends (cards' images, then their bays)
     releasePreviews(why)                                     -- SAVE / START RACE / BACK / tab left / phase change
     if CM then pcall(CM.setView, nil) end
     if W then show(W.panel, false) end
@@ -1489,32 +1907,65 @@ function M.close(why)
     U.log(TAG, "race setup closed (%s)", tostring(why))
 end
 
--- SAVE (start=false) or START RACE (start=true).
+-- The START gate's warning: "P2, P3 NOT READY: START AGAIN TO RACE ANYWAY", "PAD 3 IS NOT JOINED: START AGAIN FOR AN
+-- AI CAR", or both.
+local function gateText(waiting, dormant)
+    local what = {}
+    if #waiting > 0 then what[#what + 1] = table.concat(waiting, ", ") .. " NOT READY" end
+    if dormant then what[#what + 1] = dormant end
+    local tail = "START AGAIN TO RACE ANYWAY"
+    if #waiting == 0 then tail = dormant:find("^PADS ") and "START AGAIN FOR AI CARS" or "START AGAIN FOR AN AI CAR" end
+    return table.concat(what, " · ") .. ": " .. tail
+end
+
+-- SAVE (start=false) or START RACE (start=true). START gates, one 5 s window of real time (kept from 0.9.x): every
+-- joined guest READY (RACERS: on the READY stage, racers.readyState; classic: the READY toggle) and, 0.10.0 RC-1, no
+-- connected pad left un-joined (join.dormantText), checked here before the page closes: launch.start would refuse the
+-- first START after the setup closed and drop everybody into the lobby. A second START inside the window (the same
+-- un-joined pads) races anyway: launch.start({acceptDormant = true}) skips its own refusal and parks those pads (an AI
+-- car in their view). VERIFY(V-RC-18, V-RC-35)
 function M.finish(start)
     if not S.active or S.step ~= "vehicles" then return end
+    local acceptDormant = false
     if start then
         local now, waiting = M.realMs(), {}
-        for i = 2, #(S.order or {}) do
-            local p = S.players[S.order[i].pnum]
-            if p and not p.ready then waiting[#waiting + 1] = "P" .. p.pnum end
+        if cardsStep() then
+            local ok, _, w = U.try(TAG, function() return racers().readyState() end)
+            if ok and type(w) == "table" then waiting = w end
+        else
+            for i = 2, #(S.order or {}) do
+                local p = S.players[S.order[i].pnum]
+                if p and not p.ready then waiting[#waiting + 1] = "P" .. p.pnum end
+            end
         end
-        if #waiting > 0 and now > S.startConfirmUntil then
-            S.startConfirmUntil = now + 5000
-            status(table.concat(waiting, ", ") .. " NOT READY: START AGAIN TO RACE ANYWAY")
+        local dormant = nil
+        pcall(function() dormant = U.mod("join").dormantText() end)
+        local again = now <= S.startConfirmUntil and (dormant == nil or dormant == S.startDormant)
+        if (#waiting > 0 or dormant) and not again then
+            S.startConfirmUntil, S.startDormant = now + 5000, dormant
+            status(gateText(waiting, dormant))
             return
         end
+        acceptDormant = dormant ~= nil
     end
     local c, why = M.makeChoice()
     if not c then status(why); return end
     U.mod("builder").adoptExternal(c, "race setup")
     M.persistExtras(c)
     local parts = {}
-    for pnum, p in pairs(c.setup.players) do parts[#parts + 1] = string.format("P%d=%s", pnum, tostring(p.presetId)) end
+    for pnum, p in pairs(c.setup.players) do
+        local s = string.format("P%d=%s", pnum, tostring(p.presetId))
+        if p.ctrlId ~= nil then                            -- RACERS: ControllerId, pilot and kit too
+            s = s .. string.format("(c%s %s kit %s)", tostring(p.ctrlId), tostring(p.pilotId),
+                tostring(type(p.loadout) == "table" and p.loadout.kit or "?"))
+        end
+        parts[#parts + 1] = s
+    end
     table.sort(parts)
-    U.log(TAG, "race set: %s | grid %s (%s) | %s", c.label, tostring(c.setup.maxRacers), tostring(c.setup.grid),
-        table.concat(parts, " "))
+    U.log(TAG, "race set: %s | grid %s (%s) | %s | %s", c.label, tostring(c.setup.maxRacers), tostring(c.setup.grid),
+        tostring(c.setup.flow), table.concat(parts, " "))
     M.close(start and "start" or "save")
-    if start then U.mod("launch").start() end
+    if start then U.mod("launch").start({ acceptDormant = acceptDormant }) end
 end
 
 function M.setStatus(text)
@@ -1573,6 +2024,9 @@ local function gamepadInput()
     if not ok then return true end
     return tonumber(t) ~= 0
 end
+
+-- 0.10.0 (racers.lua): P1 uses a pad (true also when unknown); a move of P1's sink focus is a direction only then.
+function M.p1Gamepad() return gamepadInput() end
 
 local function cyclerOf(w)
     for id, cy in pairs(W.cyclers) do
@@ -1682,6 +2136,7 @@ end
 
 -- P1's pad B = one step back (the setup's own PADK had no B: B only reached the game's main-menu Back). Not with
 -- KeyboardIsP1: pad 0's B then belongs to a guest (it arrives on P1's PC); P1 uses Backspace (onKey "back2").
+-- 0.10.0 RACERS: P1's back on the card (racers.onP1Back: the stage before; at the first stage the double-back rule).
 local p1BPrev = false
 local function pollP1Back(p1)
     local down = ui().keyDown(p1, C.KEY.B)
@@ -1689,7 +2144,7 @@ local function pollP1Back(p1)
     pcall(function() kbp1 = require("settings").get("KeyboardIsP1") == true end)
     if down and not p1BPrev and not kbp1 then
         pcall(function() U.mod("lobby").armBackGuard() end)   -- the game may also open its Back prompt
-        M.back()
+        if cardsStep() then racers().onP1Back() else M.back() end
     end
     p1BPrev = down
 end
@@ -1703,7 +2158,16 @@ function M.pollNav()
         if S.step == st then U.try(TAG, M.showStep, st) end
     end
     if S.view == "cmap" and CM then U.tryEvery("setup.cmap", nil, TAG, CM.tick) end
+    if video.pending then U.try(TAG, M.videoTick) end
     local p1 = U.p1()
+    if cardsStep() then
+        -- 0.10.0 RACERS: racers.poll replaces the focus poll, the guests' columns and the preview tick (guests' pads,
+        -- P1's sink and accept, timers, previews, renders, the status line); P1's B stays a source, read first so its
+        -- edge state is current on every tick of the step
+        if U.ok(p1) then U.try(TAG, pollP1Back, p1) end
+        if cardsStep() then U.tryEvery("setup.racers", nil, TAG, function() racers().poll(p1) end) end
+        return
+    end
     if U.ok(p1) then
         local f = focusedWidget(p1)
         if f ~= S.lastFocus then onFocus(f) end
@@ -1719,9 +2183,11 @@ function M.pollNav()
     end
 end
 
--- FAST loop (lobby.keepFocus): re-give P1's focus for a moment after each step change.
+-- FAST loop (lobby.keepFocus): re-give P1's focus for a moment after each step change. RACERS: racers keeps P1's
+-- focus on the sink for the whole step while P1 uses a pad.
 function M.keepFocus()
     if not M.isActive() then return end
+    if cardsStep() then U.tryEvery("setup.racers.keep", nil, TAG, function() racers().keepFocus() end); return end
     local now = M.realMs()
     if now > S.keepUntil or now < S.keepNext then return end
     S.keepNext = now + 200
@@ -1730,9 +2196,11 @@ function M.keepFocus()
     if U.ok(S.focusTarget) then ui().focus(S.focusTarget, p1) end
 end
 
--- Keyboard (lobby.onKey through UE4SS keybinds): left/right step the focused value row, Backspace = BACK.
+-- Keyboard (lobby.onKey through UE4SS keybinds): left/right step the focused value row, Backspace = BACK. RACERS:
+-- every key is P1's on the card (racers.onKey: arrows, Enter / Space, Backspace).
 function M.onKey(name)
     if not M.isActive() then return end
+    if cardsStep() then U.try(TAG, function() racers().onKey(name) end); return end
     if name == "back2" then M.back(); return end
     local p1 = U.p1()
     local f = S.lastFocus or focusedWidget(p1)
@@ -1748,14 +2216,80 @@ function M.onKey(name)
     if not focusedWidget(p1) and U.ok(S.focusTarget) then ui().focus(S.focusTarget, p1) end
 end
 
--- lobby.onPageShown("lobby") (the page came back, e.g. from Settings): the step's focus again.
+-- lobby.onPageShown("lobby") (the page came back, e.g. from Settings): the step's focus again. RACERS: every card's
+-- render caches cleared (a Slate rebuild may reset what a Blueprint applied, V-RC-06), a still burst for the still
+-- previews, the focus on the sink.
 function M.onPageShown()
-    if M.isActive() and U.ok(S.focusTarget) then M.focus(S.focusTarget) end
+    if not M.isActive() then return end
+    if cardsStep() then
+        local ok, t = U.try(TAG, function() return racers().onPageShown() end)
+        if ok and U.ok(t) then M.focus(t) end
+        return
+    end
+    if U.ok(S.focusTarget) then M.focus(S.focusTarget) end
 end
 
--- Players joined / left while the VEHICLES step is open.
+-- Players joined / left while the VEHICLES step is open (RACERS: a joiner's card at the first stage, a leaver's card
+-- and bay go, its picks stay in memory).
 function M.onPlayers()
-    if M.isActive() and S.step == "vehicles" then U.try(TAG, renderColumns) end
+    if not (M.isActive() and S.step == "vehicles") then return end
+    if cardsStep() then U.try(TAG, function() racers().onPlayers() end) else U.try(TAG, renderColumns) end
+end
+
+-- Test helper (test.cmd lua, only with cfg.TestCommands; vehicle-step-v2.md §10): a fresh setup visit straight to a
+-- step with these picks. spec = {class = vehicles.CLASSES key ("Car" default, "Bike", "Skimmer", "Plane"), planet =
+-- PLANETS key ("Mastiff" default = JAKKU, "Beagle" = TATOOINE, ...), track = TrackDef key (default: the planet's
+-- first track for the class), mode = MODES key ("race" default, "fullgrid", "mixed", "eliminator"), step = the step
+-- to show ("vehicles" default)}. The track's default condition and the class's full grid are taken. -> summary text.
+-- Example: lua return require("setup").debugJump{class = "Car", planet = "Mastiff", step = "vehicles"}
+function M.debugJump(spec)
+    if cfg.TestCommands ~= true then return "debugJump: needs cfg.TestCommands = true" end
+    spec = type(spec) == "table" and spec or {}
+    local cls = V.classByKey(spec.class or "Car")
+    if not cls then return "debugJump: unknown class " .. tostring(spec.class) end
+    local planet = nil
+    for _, p in ipairs(PLANETS) do
+        if p.key == (spec.planet or "Mastiff") then planet = p end
+    end
+    if not planet then return "debugJump: unknown planet " .. tostring(spec.planet) end
+    local step = spec.step or "vehicles"
+    if not STEPS[step] and step ~= "vehicles" then return "debugJump: unknown step " .. tostring(step) end
+    if M.isActive() then M.close("debug jump") end            -- a new visit: every card starts at its first stage
+    if not M.open() then
+        return string.format("debugJump: the setup did not open (page %s, phase %s, launch pending %s)",
+            M.available() and "ok" or "unavailable", tostring(St.phase), tostring(St.launch.pending))
+    end
+    local tracks = queryTracks(cls, planet)
+    if not tracks or #tracks == 0 then
+        return string.format("debugJump: no track for %s on %s (setup open on CLASS)", cls.key, planet.key)
+    end
+    local track = tracks[1]
+    if spec.track then
+        track = nil
+        for _, e in ipairs(tracks) do
+            if e.key == spec.track then track = e end
+            for _, a in ipairs(e.alts or {}) do
+                if a.key == spec.track then track = e end
+            end
+        end
+        if not track then return "debugJump: track " .. tostring(spec.track) .. " not offered (setup open on CLASS)" end
+    end
+    local mode = M.modeByKey(spec.mode or "race")
+    local fits = false
+    for _, m in ipairs(modesFor(cls, track)) do
+        if m == mode then fits = true end
+    end
+    if not fits then
+        return "debugJump: mode " .. tostring(spec.mode or "race") .. " not offered (setup open on CLASS)"
+    end
+    S.cls, S.planet, S.tracks, S.track, S.mode = cls, planet, tracks, track, mode
+    S.cond = track.conds[1] or ""
+    S.gridTouched = false
+    S.grid = math.max(humansCount(), V.maxRacers(cls))
+    M.showStep(step)
+    return string.format("debugJump: %s / %s / %s%s / %s -> step %s%s (%s)", cls.key, planet.key, tostring(track.key),
+        S.cond ~= "" and (" [" .. S.cond .. "]") or "", mode.key, tostring(S.step),
+        S.step == "vehicles" and (S.cards and " RACERS" or " classic") or "", tostring(St.menu.visible))
 end
 
 return M

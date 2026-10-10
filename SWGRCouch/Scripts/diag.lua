@@ -330,10 +330,12 @@ local function dumpSetup()
   local s = c.setup
   out("setup: race '%s' setup=%s", b(c.label), type(s) == "table" and "yes" or "no (dev panel / settings.txt)")
   if type(s) == "table" then
-    out("  class=%s mode=%s single=%s grid=%s maxRacers=%s", b(s.classKey), b(s.modeKey), b(s.single), b(s.grid),
-      b(s.maxRacers))
+    out("  class=%s mode=%s single=%s grid=%s maxRacers=%s flow=%s", b(s.classKey), b(s.modeKey), b(s.single),
+      b(s.grid), b(s.maxRacers), b(s.flow))
     for pnum, p in pairs(s.players or {}) do
-      out("  P%s model=%s build=%s", b(pnum), b(p.presetId), b(p.buildPath))
+      -- 0.10.0 cards flow (racers.choicePlayers): ControllerId, pilot and the loadout code as persisted
+      out("  P%s model=%s build=%s%s", b(pnum), b(p.presetId), b(p.buildPath), p.ctrlId ~= nil
+        and string.format(" ctrlId=%s pilot=%s loadout=%s", b(p.ctrlId), b(p.pilotId), b(p.code)) or "")
     end
   end
   local gp = St.launch.gridPatch
@@ -455,6 +457,59 @@ local function dumpVpreview()
     b(cfg.SetupPreviewMaterialParam), b(cfg.SetupPreviewW), b(cfg.SetupPreviewH), b(cfg.SetupPreviewRtFormat),
     b(cfg.SetupPreviewCaptureSource), b(cfg.SetupPreviewFov), b(cfg.SetupPreviewSpinDps), b(cfg.SetupPreviewCaptureMs),
     b(cfg.SetupPreviewFillLux), b(cfg.SetupPreviewExposure), b(cfg.SetupPreviewShowOnly), b(cfg.SetupPreviewCaptureOnly))
+  -- 0.10.0 (vehicle-step-v2.md §5.8): spacing, budgets over all bays, still bursts, RACERS spin stage (V-RC-17)
+  out("  cfg 0.10.0: spacing %s uu, capture budget %s/tick, spawn gap %s ms, still burst %s, spin stage %s, "
+    .. "prebuild %s ms", b(cfg.SetupPreviewSpacing), b(cfg.SetupPreviewCaptureBudget), b(cfg.SetupPreviewSpawnGapMs),
+    b(cfg.SetupPreviewStillBurst), b(cfg.SetupPreviewSpinStage), b(cfg.SetupPreviewPrebuildMs))
+end
+
+-- 0.10.0 RACERS step (vehicle-step-v2.md §5.7, §5.5, §5.8): racers.status() (each card's stage and picks, P1 input
+-- counters), perkapply.status() (base-build patch, last launch's per-player apply, race-world verify + traits) and the
+-- preview counters (captures per second, spawns, bays per mode), then the step's config (V-RC-01..35).
+local function dumpRacers()
+  local function status(name, fnName)
+    local ok, m = pcall(require, name)
+    if not (ok and type(m) == "table" and type(m[fnName]) == "function") then return name .. ": module not loaded" end
+    local okS, s = pcall(m[fnName])
+    if not okS then return name .. "." .. fnName .. "() failed: " .. tostring(s) end
+    return tostring(s)
+  end
+  out("racers: flow=%s; %s", b(cfg.SetupPlayerFlow), status("racers", "status"))
+  out("  perkapply: %s", status("perkapply", "status"))
+  out("  previews: %s", status("vpreview", "status"))
+  local okV, vp = pcall(require, "vpreview")
+  if okV and type(vp) == "table" and type(vp.stats) == "function" then
+    local okS, s = pcall(vp.stats)
+    if okS and type(s) == "table" then
+      out("  preview stats: %s capture(s), %.1f/s over 10 s, %s spawn(s), %s rebuild(s), %s ready, %s failed, %s build(s) "
+        .. "spaced by the gap, %s still burst(s); bays %s (spin %s, still %s)", b(s.captures),
+        tonumber(s.capturesPerSec) or 0, b(s.spawns), b(s.rebuilds), b(s.ready), b(s.failed), b(s.gapWaits),
+        b(s.bursts), b(s.bays), b(s.spin), b(s.still))
+    end
+  end
+  local function list(v)
+    if type(v) ~= "table" then return b(v) end
+    local parts = {}
+    for i = 1, #v do parts[#parts + 1] = tostring(v[i]) end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  out("  cfg cards: p1Input=%s dirGuard=%s clickGuard=%s backTap=%s backConfirm=%s row=%sx%s pad=%s w=%s gap=%s "
+    .. "frame=%s highlight=%s detail=%s thumbs=%s diamond=%s backdrop=%s glyphs=%s sounds=%s pulse=%s "
+    .. "builds/renders/loads=%s/%s/%s big=%s stages pilot=%s perks=%s", b(cfg.CardP1Input), b(cfg.CardP1DirGuardMs),
+    b(cfg.CardGuestClickGuardMs), b(cfg.CardBackTapMaxMs), b(cfg.CardP1BackConfirmMs), b(cfg.CardRowW), b(cfg.CardH),
+    b(cfg.CardPad), list(cfg.CardW), list(cfg.CardGap), b(cfg.CardFrame), b(cfg.CardHighlight), b(cfg.CardDetail),
+    b(cfg.CardThumbMask), b(cfg.CardDiamond), b(cfg.CardBackdrop), b(cfg.CardGlyphs), b(cfg.CardSounds),
+    b(cfg.CardStartPulse), b(cfg.CardBuildsPerTick), b(cfg.CardRendersPerTick), b(cfg.CardLoadsPerTick),
+    b(cfg.CardLoadBigBytes), b(cfg.PilotStage), b(cfg.PerkStage))
+  out("  cfg pilots: unique=%s shareShade=%s p1=%s extras=%s podRivals=%s podAged=%s seatCheck=%s", b(cfg.PilotUnique),
+    b(cfg.PilotShareShade), b(cfg.PilotP1Default), list(cfg.PilotExtras), b(cfg.PilotPodRivals), b(cfg.PilotPodAged),
+    b(cfg.PilotSeatCheck))
+  -- launchBase: the V-RC-27 fallback selector (perkapply.launchBase, setup's cards base check)
+  out("  cfg perks: parts=%s traits=%s flaws=%s uniqueFamily=%s apply=%s traitsApplied=%s racerStyle=%s verify=%s "
+    .. "lateFallback=%s ramjet=%s critMalf=%s podRamjet=%s hideInert=%s launchBase=%s", b(cfg.PerkPartSlots),
+    b(cfg.PerkTraitSlots), b(cfg.PerkFlaws), b(cfg.PerkUniqueFamily), b(cfg.PerkApply), b(cfg.PerkTraits),
+    b(cfg.PerkSetRacerStyle), b(cfg.PerkVerify), b(cfg.PerkLateFallback), b(cfg.PerkRamjet), b(cfg.PerkCritMalfunctions),
+    b(cfg.PerkPodRamjet), b(cfg.PerkHideInert), b(cfg.PerkLaunchBase))
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -482,6 +537,7 @@ function M.dump()
   section("menubridge", dumpMenubridge)
   section("subsplit", dumpSubsplit)
   section("vpreview", dumpVpreview)
+  section("racers", dumpRacers)
   out("===== end diag =====")
 end
 

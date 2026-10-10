@@ -3,3 +3,4 @@ ue4ss-build/
 SWGRCouch/settings.txt
 SWGRCouch/Scripts/config_user.lua
 *.bak*
+SWGRCouch/native/inputfilter/build/

@@ -1,17 +1,20 @@
-# SWGRCouch: couch split-screen and self-hosted races for STAR WARS: Galactic Racer
+# SWGRCouch: FREE MODE (solo or couch split screen) and self-hosted races for STAR WARS: Galactic Racer
 
-UE4SS Lua mod, version 0.8.0 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE 5.7.4
-shipping, Denuvo, project codename Griffin), UE4SS `v3.0.1-1160-g3f4037d2`.
+UE4SS Lua mod, version 0.10.1 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE 5.7.4
+shipping, Denuvo, project codename Griffin; hotfix build CL 382493), UE4SS Galactic Racer Edition (open beta, 2026-10-08).
+The main-menu tab was called SPLIT SCREEN until 0.10.1; it is now **FREE MODE** (the mod is for one player too).
 
 > **Status: first live runs done (2026-10-06, session A, Proton GE-Proton11-7, UE4SS v3.0.1-1160 + the custom
 > signatures in `mod/ue4ss_signatures/`); first 2-player race done (2026-10-07, session B); 0.4.0 tested live (2026-10-07, run E).** All modules load, the
-> SPLIT SCREEN tab and the lobby work, pad 2 joined P2, the race ran with two views. What the runs changed is in
+> FREE MODE tab and the lobby work, pad 2 joined P2, the race ran with two views. What the runs changed is in
 > [§1.1](#11-first-live-run-findings-2026-10-06), [§1.2](#12-after-the-first-2-player-race-040-2026-10-07) and
 > [§1.3](#13-after-run-e-050-2026-10-07); the 0.5.0 changes of §1.3 are **not tested in the game yet** (live-test order:
 > §9, Session F). 0.7.0 (per-player messages and danger visuals after run H, [§1.6](#16-after-run-h-070-2026-10-07))
 > was tested live in run I (§9 "Run-I results"). 0.8.0 (subtitles per player, 3D vehicle cards, pause phase 2,
 > [§1.7](#17-080-2026-10-07-subtitles-per-player-3d-vehicle-cards-pause-phase-2)) is **not tested in the game yet**
-> (checks: §9 "0.8.0 checks"). The rest was written from static
+> (checks: §9 "0.8.0 checks"). 0.10.0 (RACERS step, keybind crash fix, P1 menus after a race, game-only tracks,
+> [§1.9](#19-0100-2026-10-10-racers-step-crash-fix-p1-menus-after-a-race-game-only-tracks)) **ran live on 2026-10-10**
+> (three sessions on the hotfix build CL382493, §9 "Session R"). The rest was written from static
 > research (reflection tables, Blueprint listings, shipped configs, the UE4SS source). Each runtime assumption in the
 > code carries a `-- VERIFY(V-<AREA>-<nn>)` comment. The [runtime test checklist](#9-runtime-test-checklist) at the end lists every id,
 > how to check it, and which `config_user.lua` switch to try when it fails. The binding design is
@@ -19,15 +22,16 @@ shipping, Denuvo, project codename Griffin), UE4SS `v3.0.1-1160-g3f4037d2`.
 
 ## 1. What the mod does
 
-- **SPLIT SCREEN tab.** A fifth tab appears in the main menu: *Campaign · Scenarios · Arcade · Multiplayer ·
-  SPLIT SCREEN*. You can reach it with the bumpers or the mouse, or press F5.
+- **FREE MODE tab.** A fifth tab appears in the main menu: *Campaign · Scenarios · Arcade · Multiplayer ·
+  FREE MODE*. You can reach it with the bumpers or the mouse, or press F5.
 - **Lobby page in that tab.** Up to 4 local players join with their own pads (press A or Start). The page has the
   split-screen options (2P layout, split graphics preset, takedown cameras, name tags, keyboard-is-P1), the network
   mode (offline / host / join) and a START RACE button.
 - **RACE SETUP flow (0.4.0).** CHOOSE RACE walks through **class → planet (with the planet's video) → track
-  (+ conditions) → mode (+ grid size) → vehicles**, where every local player picks their own vehicle model and build
-  in their own column with their own pad (§3.3). The game's developer race builder
-  (`WBP_FE_QuickRace_Custom_Widget`) stays available as the **ADVANCED** row. The last race is remembered.
+  (+ conditions) → mode (+ grid size) → racers**. Since 0.10.0 every local player picks a pilot, a vehicle and the
+  whole loadout (abilities, parts, upgrades, racer style, traits; everything unlocked) on an identical card with their
+  own pad (§3.3); `SetupPlayerFlow = "classic"` gives the 0.4.0-0.9.x vehicle columns back. The game's developer
+  race builder (`WBP_FE_QuickRace_Custom_Widget`) stays available as the **ADVANCED** row. The last race is remembered.
 - **Full grid.** Single-class races are filled to the class limit (12 speeders / 8 podracers, players included), all
   AI in the chosen class (the first race had 5 cars: 2 players + 3 AI, one of them a skimmer).
 - **Real grid slots.** Guests exist as player controllers *before* the mod calls the game's
@@ -41,7 +45,7 @@ shipping, Denuvo, project codename Griffin), UE4SS `v3.0.1-1160-g3f4037d2`.
   keyboard/mouse and pad 1 only P1). Guests are named **Player 2..4** instead of P1's Steam name. Cars show coloured `P1`..`P4` name tags (blue, red, green, yellow). Any player can pause. While two or more
   views are on screen, a lighter graphics preset is applied, and it is restored in the menu. A pad that disconnects
   mid-race hands its car to the AI and gets it back on reconnect.
-- **After the race** you return to the SPLIT SCREEN tab with the same players joined and the same race selected, so
+- **After the race** you return to the FREE MODE tab with the same players joined and the same race selected, so
   START RACE again is a rematch. On any other tab the guests stay in memory but are ignored (one view, no joining);
   they are never removed (§1.1, `GuestRemoval`).
 - **Restart the game before the game's own online Multiplayer** once pads were added (ADD PLAYERS): guest local
@@ -54,8 +58,8 @@ shipping, Denuvo, project codename Griffin), UE4SS `v3.0.1-1160-g3f4037d2`.
   networking. A fallback chain (relisten, then servertravel, then AI takeover) covers the case where the game's
   launch travel does not carry the clients.
 
-Not covered: the PvP Tour layer (sponsors, side bets, shop), XP and progression, and character selection. Official
-online play does **not** work while the network override `Engine.ini` is installed (§2.4).
+Not covered: the PvP Tour layer (sponsors, side bets, shop), XP and progression. Pilots are chosen in the RACERS step
+(0.10.0, §3.3). Official online play does **not** work while the network override `Engine.ini` is installed (§2.4).
 
 ### 1.1 First live run findings (2026-10-06)
 Logs: `state/runs/20261006-2329-session-A/UE4SS-run*.log` (run2 = crash), dump `crash_2026_10_06_22_02_41*.dmp`.
@@ -213,6 +217,36 @@ and stays hidden in guest HUDs (per-player portrait not built, V-SUB-09); the de
 (`M_UI_RetainerBox_ScreenSpace`) adds the game's diegetic-screen look (warp lines, radial mask, twinkle): compare with
 `M_ThumbnailMask` (V-VP-03); pause phase 2 is untested beyond 2 players.
 
+### 1.9 0.10.0 (2026-10-10): RACERS step, crash fix, P1 menus after a race, game-only tracks
+User request (2026-10-09): "A character should be chosen, a kart then. and then we should be able to map out all the
+benefits and perks added to the kart (all unlocked just for this mod)", "kart are horrible p1 and p2 are not similar".
+Design: `notes/design/vehicle-step-v2.md` (titled 0.11.0, shipped as 0.10.0). **Run live on 2026-10-10**: three
+sessions on the hotfix build CL382493 (UE4SS Galactic Racer Edition, 1280x720, 4 pads), 0 error lines, no crash (§9
+"Session R", `notes/research/live-run-racers-facts.md`).
+
+| Part | What it does |
+|---|---|
+| RACERS (step 5 of RACE SETUP, §3.3) | replaces the VEHICLES columns. Every player (P1 and each guest) gets the same card and moves through **PILOT → VEHICLE → PERKS → READY** with their own pad. PILOT: the pilot's full body over the racer-style art, the style's 3 traits, the signature vehicle and a roster of head shots (a pilot another player holds is dimmed with that player's tag). VEHICLE: the live 3D render, MODEL and LIVERY rows, DRIVEN BY, a SIGNATURE chip. PERKS: the whole kart on one board, everything unlocked (no save, no unlock touched): loadout kit, 4 d-pad abilities + the crash ability, 6 part slots, 6 upgrade bars 0-10 with POWER and ENERGY, racer style and 3 traits, a detail card. READY: the pick, a READY stamp in the player's colour and the loadout as icons. The picks are saved per pad (`LastRaceRacers`) |
+| in the race | each human races the chosen pilot, vehicle and loadout: upgrade levels, abilities, crash ability and parts are written into that player's build at the launch, the traits are applied at the race start, and everything is checked again in the race (`[perkapply]` lines). An AI that had a human's pilot gets another pilot, car and name |
+| crash fix (keybinds) | 0.9.x could crash on a keyboard key (crash_2026_10_08_13_27_33): UE4SS runs keybinds on its own thread, and the key's action touched the game's Lua state from there. Keys are now queued (`keyq.lua`) and their actions run on the game thread; Ctrl+F11 / `couch reload` exist only with `AllowHotReload = true` (§5) |
+| P1 menus after a race (`feowner.lua`) | after a split race the main menu, Settings and the other front-end screens belonged to the last guest: that guest drove them, P1's pad did nothing and the tabs showed keyboard glyphs. They are now made for P1. The Multiplayer tab is hidden while guests exist (`FrontEnd*`, §7.2) |
+| game-only tracks | the setup lists only the tracks the game itself offers (`SetupTrackSet = "arcade"`: Quick Race, Quick Podrace and the Arcade's race tracks), no debug, prologue or campaign copies, and only the conditions the game gives each track (`SetupTrackPoolConds`) |
+| also | the input filter DLL knows both game builds (CL381121 and the hotfix CL382493; the log says `build=`); a re-install keeps your UE4SS console setting (§2.2); 3D previews: one 960x540 target, bays 20000 units apart, one capture budget over all bays; the campaign planet arc and run map (§1.8) are on by default again (`SetupCampaignMap`; the public 0.9.3 had them off) |
+
+Still limited:
+- **P1's pad on the results screen of a split race: fixed after the first runs (0.10.1, V-MB-09).** The screen belongs
+  to the last local player and P1's A reached none of P1's input objects (V-MB-08 failed); menubridge now puts an
+  invisible plain Button with P1's focus on that screen, Slate delivers P1's A to it, and the bridge clicks CONTINUE
+  (verified live 2026-10-10, `MenuBridgeP1Catcher`).
+- Connected but un-joined pads: the first START warns (`PADS 3, 4 ARE NOT JOINED: START AGAIN FOR AI CARS`); a second
+  START within 5 s races them as AI-driven players with their own views (a guest slot cannot be removed, §3.2).
+- The game pauses itself after about 60 s without game input from any local player (the game's inactivity auto-pause,
+  not the mod); resume and steer.
+- Hot reload is off by default: restart the game after `install.sh` or a `config_user.lua` change (§2.5).
+- Not run live yet: a podrace with loadouts (pods were checked on the cards only), the classic fallback
+  (`SetupPlayerFlow = "classic"`), the 960x540 target (the tests ran 640 x 360 at 720p), the UI sounds, P1's double
+  back to MODE, a guest leaving between SAVE and START (§9 "Session R").
+
 ## 2. Install (Lutris, Proton, Steam in the prefix)
 
 ### 2.1 Prerequisites
@@ -254,8 +288,11 @@ anything; run `install.sh --help` for every option. It does the following:
 3. `mods.txt`: adds `SWGRCouch : 1` at the top (it must stay above the `Keybinds : 1` line), forces
    `SplitScreenMod : 0` (it would call CreatePlayer/RemovePlayer behind our back), and makes sure
    `ConsoleEnablerMod : 1` is there (the `couch` console command needs it).
-4. `UE4SS-settings.ini`: turns on the log window for the first boots (`ConsoleEnabled`, `GuiConsoleEnabled`,
-   `GuiConsoleVisible` = 1). With options it also sets the engine-version override and the game-thread method (§2.3).
+4. `UE4SS-settings.ini`: a first install (no ini there yet) turns on the log windows for the first boots
+   (`ConsoleEnabled`, `GuiConsoleEnabled`, `GuiConsoleVisible` = 1). A re-install keeps the console setting of the
+   existing ini (0.10.0; before, every re-install switched the windows back on: `UE4SS: console windows left as they
+   are`); `--quiet-console` turns both windows off. With options it also sets the engine-version override and the
+   game-thread method (§2.3).
    A copy of the ini is saved first as `UE4SS-settings.ini.swgrcouch-<date>`.
 5. With `--prefix`: appends `mod/config/Engine.ini` to the prefix's user `Engine.ini` (§2.4), between marker lines,
    and only once. A dated copy of the old file is saved first. The user config folder is
@@ -281,7 +318,7 @@ anything; run `install.sh --help` for every option. It does the following:
 | `[General] DefaultFNameToStringMethod` | `Conv_NameToString` | only if the FName::ToString scan fails |
 | `[General] bUseUObjectArrayCache` | keep `false` (shipped) | — |
 | `[Hooks] HookProcessInternal`, `HookProcessLocalScriptFunction`, `HookEngineTick`, `HookLoadMap`, `HookInitGameState`, `HookProcessConsoleExec` | keep `1` (shipped) | Blueprint hooks, game-thread scheduling, LoadMap/InitGameState hooks and the console all need them |
-| `[General] EnableHotReloadSystem` | keep `0` | the mod reloads itself with Ctrl+F11; `1` would add Ctrl+R (reloads **all** mods) |
+| `[General] EnableHotReloadSystem` | keep `0` | the mod reloads itself with Ctrl+F11 (only with `AllowHotReload = true`, §2.5); `1` would add Ctrl+R (reloads **all** mods) |
 
 - **If the AOB scans still fail** after the version override, add per-game signature files in `ue4ss/UE4SS_Signatures/`
   (see `notes/research/ue4ss-api.md` §14). Done for this build: `mod/ue4ss_signatures/` (installed into
@@ -306,11 +343,15 @@ anything; run `install.sh --help` for every option. It does the following:
   checks for the driver line itself, not only the markers.
 
 ### 2.5 Hot reload and updating
-- **Ctrl+F11** (or console `couch reload`) runs `RestartCurrentMod()` from the game thread. The mod re-reads every
-  script and hands its state over through UE4SS shared variables: joined guests, hosting/connection state, gfx values to
-  restore, takeover records, the pending return to the tab. It works in the lobby and mid-race (V-CORE-11).
-- To deploy edited scripts, re-run `install.sh` (it overwrites `Scripts/`) and press Ctrl+F11 in the game.
-- `config.lua` changes need Ctrl+F11 or a restart; `settings.txt` is read at boot.
+- **Ctrl+F11** (or console `couch reload`) runs `RestartCurrentMod()` from the game thread. **0.10.0: off by default**
+  (`AllowHotReload = false`): UE4SS closes the old Lua state while other threads may still use it, which can crash the
+  game (RE-UE4SS #1445). `AllowHotReload = true` in `config_user.lua` turns the key and the command on. The mod re-reads
+  every script and hands its state over through UE4SS shared variables: joined guests, hosting/connection state, gfx
+  values to restore, takeover records, the pending return to the tab, the RACERS launch patch. It works in the lobby
+  and mid-race (V-CORE-11).
+- To deploy edited scripts, re-run `install.sh` (it overwrites `Scripts/`) and restart the game (Ctrl+F11 only with
+  `AllowHotReload = true`).
+- `config.lua` changes need a restart (or Ctrl+F11 with `AllowHotReload = true`); `settings.txt` is read at boot.
 
 ### 2.5b Turning the mod off
 Rename `ue4ss/Mods/SWGRCouch/enabled.txt` (for example to `enabled.txt.off`) and restart the game; rename it back to
@@ -346,7 +387,7 @@ settings / brightness / gamma. A first boot (or a save problem) still shows them
   `epic: profile bUseEosLinking true -> false`, `menu: main menu reached X s after arming`, `stopped (…)`. F9 prints a
   `fastboot:` line with the same state.
 
-## 3. Using the SPLIT SCREEN tab
+## 3. Using the FREE MODE tab
 
 ### 3.1 The lobby page
 Open the main menu and go right with the bumpers past Multiplayer, or press **F5**. The page is a column of the game's
@@ -358,7 +399,7 @@ ignored once: it may be the one that answers the game's "Exit game?" prompt.
 
 | Row | Shows | A / click |
 |---|---|---|
-| header | `SPLIT SCREEN` | — |
+| header | `FREE MODE` | — |
 | P1..P4 cards | `P1  READY  (pad 1)` · `P2  READY  B = leave` · `--  press A to join (pad 3)` · `P3  CONTROLLER DISCONNECTED` · `--  ADD PLAYERS (BELOW) TO JOIN WITH PADS` | not focusable |
 | add players | `ADD PLAYERS (PADS) >` · `PADS ON (UNTIL GAME RESTART)` | press twice within 5 s: creates guest slots for the plugged-in pads (kept until the game exits; restart before online play) |
 | remote (online only) | `ONLINE: 3 remote players (2 machines)` / `CONNECTED TO 10.8.0.1:7777` | not focusable |
@@ -423,17 +464,43 @@ on the right):
    rows with the video in the media area, and track rows with flags, laps, conditions and the track's Arcade tile.
 4. **MODE**: RACE (single class, **full grid**), FULL GRID RACE (the game's grid), MIXED CLASS RACE and ELIMINATOR
    (speeders only). The `GRID: 12 RACERS (10 AI)` row sets the grid size (left/right).
-5. **VEHICLES**: one column per local player, titled with the view the player will get (`P1 · TOP`, `P2 · BOTTOM`).
-   Each player picks a **model** (the game's presets, including the pilots' liveries) and a **build** (performance
-   tier). P1 uses the `[<][MODEL][>]` / `[<][BUILD][>]` rows; every guest uses **their own pad**: d-pad up/down picks the
-   row, left/right changes it, **A = READY** (B still leaves). **START RACE** launches (if a guest is not READY, the
-   first press says so and a second press within 5 s starts anyway); **SAVE AND RETURN** goes back to the lobby with
-   the race chosen.
+5. **RACERS** (0.10.0, crumb `STEP 5/5 RACERS`): one identical card per player, P1 and every joined guest, side by
+   side, headed by the player's tag and the view the player will get (`P2 TOP RIGHT`). Each player goes through
+   **PILOT → VEHICLE → PERKS → READY** on their own, with their own pad:
+   - **PILOT**: the pilot (full body), their racer style with its 3 traits and their signature vehicle; left/right moves
+     through the class's roster. Pilots are unique per player: a pilot another player holds is dimmed with that
+     player's tag and skipped.
+   - **VEHICLE**: the live 3D render of the pick, the **MODEL** and **LIVERY** rows (the pilot's signature vehicle and
+     livery preselected), DRIVEN BY and a SIGNATURE chip.
+   - **PERKS**: the whole loadout on one board, **everything unlocked** for every player: the LOADOUT kit (the pilot's
+     style kit, MAX POWER, TIER 1-6 and every other style kit: 27 kits; any edit makes it `CUSTOM · FROM <kit>`), 4
+     abilities on the d-pad slots (45 abilities in 8 families) plus the crash ability, 6 part slots (316 parts in 12
+     categories, flaws and pod traits included), 6 upgrade bars 0-10 with `POWER n / 60` and `ENERGY`, the racer style
+     (21 styles) and 3 traits (41). Left/right changes the slot under the cursor (kit, ability variant, part tier,
+     upgrade level, style, trait). A on the kit row goes to READY, A on an upgrade goes to the next row, A on any other
+     slot opens a picker with categories (left/right = category, up/down = item, A = equip, B = cancel).
+   - **READY**: the pick, a READY stamp and the loadout as icons. P1's card has **START RACE** and **SAVE AND RETURN**;
+     a guest's card reads `READY · WAITING FOR P1`.
+
+   Controls on every card: d-pad **up/down** = row, **left/right** = change (on the stage strip at the top: change the
+   stage), **A** = next / pick, **B** = back. A guest's B: a tap = back, held 1 s or longer (`LeaveHoldMs`; about
+   1.2 s in practice) = leave the game (un-join; the pad keeps its picks). **Quick path:** A, A, A from a fresh card =
+   READY with the pilot's signature vehicle and style kit. **START RACE** needs every joined guest on READY (otherwise
+   the first START names who is not ready, and a second START within 5 s races with their current picks). With pads
+   that are connected but not joined, the first START warns (`PADS 3, 4 ARE NOT JOINED: START AGAIN FOR AI CARS`) and a
+   second START within 5 s races: those pads race as AI-driven players with their own views. Picks are remembered per
+   pad and per class, and the last race's picks are saved per pad in `settings.txt` (`LastRaceRacers`), so they come
+   back after a restart. `SetupPlayerFlow = "classic"` brings back the 0.9.x vehicle columns: one column per player
+   with a **model** and a **build** row (P1: `[<][MODEL][>]` / `[<][BUILD][>]`; guests on their own pad, **A = READY**).
 
 Controls for P1: d-pad/stick up/down + A (CommonUI focus; the mouse works too); left/right on a `[<][...][>]` row
 changes the value; **`< BACK`** steps back (pad B is the game's own "Exit game?" Back, so BACK is a button). Keyboard:
-arrows, Enter/Space, **Backspace = BACK**. Reopening the setup pre-selects the current race, so A five times replays
-it. After a race, START RACE in the lobby is a rematch with the same choices (also each player's vehicle).
+arrows, Enter/Space, **Backspace = BACK**. On a RACERS card P1's pad works like a guest's (an invisible focus target
+turns P1's d-pad and A into card moves); P1 steps back with up (to the stage strip) and left, and at PILOT a second
+back within 3 s goes to MODE (`CardP1BackConfirmMs`; the footer `< BACK` goes there at once). After a race P1's B is
+back on the card too (the hints then show B). Reopening the setup pre-selects the current race and every pad's picks,
+so A through the steps replays it (RACERS: A, A, A on every card, then P1's A on START RACE). After a race, START RACE
+in the lobby is a rematch with the same choices (also each player's pilot, vehicle and loadout).
 
 Grid: humans count inside the grid. RACE fills it to `SetupMaxRacers` (12) / `SetupMaxRacersPlane` (8) with AI of
 the chosen class (`SetupGridMode`); the mode asset is patched in memory only and restored in the menu.
@@ -486,7 +553,9 @@ saved in `settings.txt` (`LastRaceMaxRacers`, `LastRaceVehicles`).
   countdown and the elimination / knock-out messages show once in every half. The last-life red, the ramjet blue and the full-screen danger effects follow each
   player in its own half (the game draws one player's over the whole screen). Every part has its own switch (§7.2
   "UX split"); they act only while a split race runs.
-- After the results you are back on the SPLIT SCREEN tab: same players, same race. START RACE again = rematch.
+- After the results you are back on the FREE MODE tab: same players, same race. START RACE again = rematch. Known
+  results screen of a split race: every player's A continues it; P1's A goes through menubridge's catcher button
+  (V-MB-09, §1.9). The main menu and Settings after the race are P1's again (`feowner.lua`).
 
 ## 4. Network races (listen server, direct IP, WireGuard)
 
@@ -503,7 +572,7 @@ saved in `settings.txt` (`LastRaceMaxRacers`, `LastRaceVehicles`).
    machine. The mod never appends `?port=`; the host's lobby reminds you with `HOST MUST BE STARTED WITH -port=N`.
 
 ### 4.2 Host
-1. SPLIT SCREEN tab → `NETWORK: HOST` → **START HOSTING** (Ctrl+F7). The front end reloads as a listen server
+1. FREE MODE tab → `NETWORK: HOST` → **START HOSTING** (Ctrl+F7). The front end reloads as a listen server
    (`open L_FrontEnd?listen`). Joined guests stay and the tab reopens. Status `HOSTING ON PORT 7777: 0 REMOTE PLAYERS`;
    `LISTEN FAILED` means the reload did not listen (check the log).
 2. Local guests join with their pads as usual, before or after hosting starts.
@@ -532,22 +601,24 @@ saved in `settings.txt` (`LastRaceMaxRacers`, `LastRaceVehicles`).
 
 ## 5. Debug keys and console
 
-UE4SS keybinds see the **keyboard only** and only while the game window has focus. Every action runs on the game
-thread. The lobby also binds the arrows, Enter, Space and Escape (`LobbyNavKeyboard = "never"` turns that off); while
+UE4SS keybinds see the **keyboard only** and only while the game window has focus. UE4SS calls them on its own
+event-loop thread; 0.9.x ran the key's action from there and could crash the game (crash_2026_10_08_13_27_33). Since
+0.10.0 a key press is only queued (`keyq.lua`) and its action runs on the game thread at the next FAST tick (≤ 33 ms).
+The lobby also binds the arrows, Enter, Space and Escape (`LobbyNavKeyboard = "never"` turns that off); while
 one of those keys is held (e.g. steering with the arrows), UE4SS drops the other keybinds of that moment.
 
 | Key | Action |
 |---|---|
-| F5 | select the SPLIT SCREEN tab / show the lobby |
+| F5 | select the FREE MODE tab / show the lobby |
 | F6 / F7 | join the next guest (with no free slot: press F6 twice within 2 s to create one without a pad, kept until the game exits) / un-join the last guest (in a race, F7 hands the guest's car to the AI; the local player is kept) |
 | F8 | flip the 2P layout (saved; live in a race) |
-| F9 | diagnostics dump to `UE4SS.log` (core, players, split, gfx, race, takeovers, HUD, clock, present, names, setup, input isolation incl. the native filter's counters ~0.7 s later, wreck: race timeout / timeout byte / every racer's wreck-finish-health state / each local view's camera / slow-mo / P1's spectate CSM states) |
+| F9 | diagnostics dump to `UE4SS.log` (core, players, split, gfx, race, takeovers, HUD, clock, present, names, setup, input isolation incl. the native filter's counters ~0.7 s later, wreck: race timeout / timeout byte / every racer's wreck-finish-health state / each local view's camera / slow-mo / P1's spectate CSM states; 0.10.0 ends with `racers`: each card's stage and picks, P1's sink counters, the perkapply status, the preview stats) |
 | Ctrl+F5 | launch the last race now (front end) |
 | Ctrl+F6 | force takeover now for every PC without a car (host/offline, race only) |
 | Ctrl+F7 | start / stop hosting |
 | Ctrl+F8 | connect / disconnect |
 | Ctrl+F9 | network dump (net mode, driver, flow, remote humans) |
-| Ctrl+F11 | restart the mod (hot reload, §2.5) |
+| Ctrl+F11 | restart the mod (hot reload, §2.5). 0.10.0: registered only with `AllowHotReload = true` (default `false`: UE4SS's restart of a Lua state other threads still use can crash the game; restart the game instead) |
 
 Keys used by the bundled mods are avoided: F10/Tilde open the console (ConsoleEnablerMod), plus INS, Ctrl+J/H/O/R/Y/U/I,
 Ctrl+Num5-9 and F3.
@@ -556,7 +627,8 @@ Console (open with Tilde or F10; **it did not open in session B**: F9 covers eve
 `couch recipe` (recipe racers with model and bot flag, which humans got a slot) · `couch input` (input isolation) ·
 `couch net` · `couch tab` · `couch join` · `couch leave` · `couch layout` · `couch launch` · `couch takeover`
 · `couch host` · `couch connect [addr[:port]]` · `couch disconnect` · `couch gfx <auto|performance|quality|off>` ·
-`couch set <Key> <value>` (writes `settings.txt`; same guards as the lobby) · `couch reload`.
+`couch set <Key> <value>` (writes `settings.txt`; same guards as the lobby) · `couch reload` (only with
+`AllowHotReload = true`; otherwise it answers `hot reload is off (cfg.AllowHotReload = false): restart the game`).
 
 ## 6. Logs to collect
 
@@ -575,10 +647,13 @@ project. Per run:
 
 Useful grep: `grep -E '\[SWGRCouch\]\[(main|phase|net|launch|takeover)\]|ERROR|WARN' UE4SS.log`; split-race UX and
 pause (0.7.0): `grep -E '\[SWGRCouch\]\[(uxsplit|pause|hud)\]' UE4SS.log`. Press **F9** at these points: menu,
-countdown, mid-race, paused, results (0.7.0: the dump ends with the `uxsplit` and `pause` sections). Run **`couch recipe`** right after a launch; launch also logs it by
-itself. Press **Ctrl+F9** on both machines after every network step. The boot banner is the first mod line:
-`[SWGRCouch][main] SWGRCouch 0.5.0 loading: EngineTickAvailable=… ProcessEventAvailable=… GT=… UE=5.7 settings=…`, then
-`[SWGRCouch][main] started: loops fast=… main=… slow=…`.
+countdown, mid-race, paused, results (0.10.0: the dump ends with the `uxsplit`, `pause`, `menubridge`, `subsplit`,
+`vpreview` and `racers` sections). Run **`couch recipe`** right after a launch; launch also logs it by
+itself. Press **Ctrl+F9** on both machines after every network step. RACERS step and its launch (0.10.0):
+`grep -E '\[SWGRCouch\]\[(racers|cards|perkapply|vpreview|feowner)\]' UE4SS.log`. The boot banner is the first mod line:
+`[SWGRCouch][main] SWGRCouch 0.10.0 loading: EngineTickAvailable=… ProcessEventAvailable=… GT=… UE=5.7 settings=…`, then
+`[SWGRCouch][main] started: loops fast=… main=… slow=… (33/250/1000 ms), modules=42/42, phase=BOOT` (0.10.0 loads 42
+modules; a lower first number means a module failed to load).
 
 ## 7. Configuration
 
@@ -593,7 +668,7 @@ There are two files, and neither should be edited in `Scripts/config.lua` itself
   ```
   Top-level keys replace the defaults of `config.lua`. The type must match, and a selector must be one of its listed
   values; otherwise the key is ignored with a `WARN config_user.lua` line. `Defaults` is merged key by key. A broken
-  file is logged and ignored. Apply with Ctrl+F11 or a restart.
+  file is logged and ignored. Apply with a restart (Ctrl+F11 only with `AllowHotReload = true`, §2.5).
 
 ### 7.1 `settings.txt` keys (defaults = `config.Defaults`)
 | Key | Default | Values |
@@ -608,7 +683,8 @@ There are two files, and neither should be edited in `Scripts/config.lua` itself
 | `Port` | `7777` | host port; a non-7777 host must be started with `-port=<n>` |
 | `LastRaceArchetype`, `LastRaceGameMode`, `LastRacePlanet`, `LastRaceTrack`, `LastRaceBuild`, `LastRaceDebugBuild`, `LastRaceCondition` | empty | written by RACE SETUP / the builder (object paths, condition tag); a path that no longer resolves clears the choice |
 | `LastRaceMaxRacers` | `0` | RACE SETUP grid size, players included (`0` = the class limit) |
-| `LastRaceVehicles` | empty | RACE SETUP picks: `1=PRE_Car_Orca@<build path>;2=PRE_Car_Mako@...` |
+| `LastRaceVehicles` | empty | RACE SETUP picks: `1=PRE_Car_Orca@<build path>;2=PRE_Car_Mako@...` (classic columns; still written in the RACERS flow) |
+| `LastRaceRacers` | empty | 0.10.0 RACERS picks per pad: `<ControllerId>=<pilot>@<preset>@<loadout code>;...`, e.g. `0=DA_Racer_DarkEnigma@PRE_Car_Beluga_Protagonist@v1,k:pilot,...`; written on SAVE AND RETURN / START RACE (a pad not in that race keeps its entry), restored per pad for the race's class; a loadout code that does not decode gives the pilot's style kit (logged once) |
 
 ### 7.2 `config.lua` keys
 The VERIFY column names the check (§9) whose failure the switch answers.
@@ -636,6 +712,7 @@ The VERIFY column names the check (§9) whose failure the switch answers.
 | `SubsystemLookup` | `"sbl"` | `"sbl"` (SubsystemBlueprintLibrary) \| `"findfirst"` | V-CORE-06 |
 | `LoopErrorLogEveryMs` | `5000` | a failing loop logs at most one error line per period | — |
 | `DiagPeriodicMs` | `0` | > 0: F9 dump at that interval | — |
+| `AllowHotReload` | `false` | 0.10.0: Ctrl+F11 / `couch reload` (`RestartCurrentMod`). Off: UE4SS's `lua_close` of a Lua state other threads still use can crash the game (RE-UE4SS #1445); restart the game instead | V-CORE-11 |
 
 **Tab / lobby / builder**
 | Key | Default | Meaning | VERIFY |
@@ -679,7 +756,7 @@ The VERIFY column names the check (§9) whose failure the switch answers.
 | `GuestRemoval` | `"never"` | `"never"` (guests kept until the game exits). `"launch"` / `"always"` are **crash reproducers**: every RemovePlayer crashes at the next control-mapping rebuild; they are ignored (ERROR in the log) unless `GuestRemovalUnsafe = true` | V-JOIN-11, V-JOIN-12 |
 | `GuestRemovalUnsafe` | `false` | `true` = really remove guests with `GuestRemoval = "launch"` / `"always"` (expect the crash) | V-JOIN-12 |
 | `JoinButtons` | `"a_or_start"` | `"a_or_start"` \| `"start"` (A never joins: use when P1's A leaks to a guest) | V-JOIN-06 |
-| `LeaveHoldMs` | `1000` | KeyboardIsP1: pad 1's guest leaves by holding Start | V-JOIN-09 |
+| `LeaveHoldMs` | `1000` | KeyboardIsP1: pad 1's guest leaves by holding Start. In RACE SETUP step 5 (RACERS, or the classic VEHICLES columns) every guest leaves by holding B this long (a shorter B is that guest's back / un-ready) | V-JOIN-09, V-RC-04 |
 | `JoinFocusTrick` | `"none"` | `"none"` \| `"userfocus"` \| `"viewport"` \| `"gameandui"` (GameAndUI input mode on P1 while the lobby shows) when guest pads are not seen in the menu | V-JOIN-03 |
 | `JoinInputModeReapplyMs` | `0` | `"gameandui"`: also re-apply every N ms | V-JOIN-03 |
 | `DeviceDetectMode` | `"hook"` | `"hook"` (`OnUserInputDeviceChanged` + edge-only poll watchdog) \| `"both"` \| `"poll"` | V-JOIN-10 |
@@ -758,12 +835,12 @@ the half of the player it is for.
 | `NoWreckMethod` | `"build"` | `"noWreck"`: `"build"` (UseHealth off on the local humans' vehicle builds; AI still wreck) \| `"cvar"` (`Race.InfiniteHealth 1`: nobody wrecks) \| `"topup"` (health refilled before a wrecking crash; also the safety net of the others) | V-WD-08 |
 | `WreckSlowMo` | `"game"` | crash slow-mo slows the whole world: `"game"` (0.5.0 default: on any local human's wreck, both views; emulated when the game's crash-cam slow-mo does not run) \| `"last"` (off while 2+ local humans race, and 3 s after a wreck) \| `"off"` while split (`CrashCamera.SlowMoEnabled 0`, a stale dilation reset to 1.0) | V-WD-14, V-WD-16 |
 | `WreckSlowMoEmulate` / `WreckSlowMoWaitMs` | `true` / `350` | `"game"`: no dilation below 1 within this time of a human wreck -> `CinematicTimeDilation` 1 -> 0.1 -> 0.8 -> 1 over 2.4 s real time (stops when another writer appears, on race end, clear and photo mode); `false` = the game's own only | V-WD-16 |
-| `WreckView` | `"car"` | after the wreck camera: `"car"` (guests: the game's spectate is ended, the view follows a MOVING racing car's chase camera) \| `"carAll"` (P1 too) \| `"native"` (the game's spectate camera) | V-WD-05/07/18 |
+| `WreckView` | `"native"` | 0.7.2 (run J): default `"native"` (the game's own spectate renders in a guest's half and follows AI racers). After the wreck camera: `"car"` (guests: the game's spectate is ended, the view follows a MOVING racing car's chase camera) \| `"carAll"` (P1 too) \| `"native"` (the game's spectate camera) | V-WD-05/07/18 |
 | `WreckCarCam` | `"auto"` | 0.6.0 `chasecam.lua` (run G: an AI pod as view target put the camera inside its engine): `"auto"` (a local human's car through its own live chase camera; another car through its own camera only while the placement check reads "chase", else through a chase rig) \| `"rig"` (every watched car through the rig) \| `"car"` (0.5.1, unchecked) | V-WD-19/20 |
 | `WreckCarCamMinDistUU` / `WreckCarCamBehindUU` | `300` / `150` | placement check: a camera closer than this to the watched car = "inside"; not at least this far behind it along its heading = "front" (2 bad samples of 4 -> rig) | V-WD-19 |
 | `WreckRigBackUU` / `WreckRigUpUU` / `WreckRigPitch` / `WreckRigFov` | `900` / `260` / `10` / `85` | the chase rig: an engine `CameraActor` this far behind / above the watched car, looking down this many degrees, this FOV; attached to the car (moves with it every frame), re-used, destroyed when the race view is cleared | V-WD-20 |
 | `WreckCrashCamHoldMs` | `4000` | the pawn's crash camera put back as the view this long after a human wreck (`0` = none; guests: see `CrashCamWreckHold`) | V-WD-18 |
-| `CrashCamGuest` | `"car"` | 0.5.1 `crashcam.lua`, a guest's crash (no wreck): `"car"` (0.6.0 default, run G: the guest's view follows its own pod through the tumble, emulated slow-mo; the game's crash camera rendered BLACK for P2 even with a valid shot, 3400 uu away, no fade) \| `"auto"` (the game's crash camera while it passes the checks, else the own car; cannot detect that black) \| `"keep"` (probes only) \| `"off"` | V-CC-02 |
+| `CrashCamGuest` | `"auto"` | 0.5.1 `crashcam.lua`, a guest's crash (no wreck); 0.7.2 (run J): default `"auto"` again (the crash camera's letterbox is cleared, `CrashCamLetterboxFix`). `"car"` (0.6.0 default, run G: the guest's view follows its own pod through the tumble, emulated slow-mo; the game's crash camera rendered BLACK for P2 even with a valid shot, 3400 uu away, no fade) \| `"auto"` (the game's crash camera while it passes the checks, else the own car; cannot detect that black) \| `"keep"` (probes only) \| `"off"` | V-CC-02 |
 | `CrashCamPlayers` | `"guests"` | `"guests"` \| `"all"` (P1 too) | V-CC-01 |
 | `CrashCamLearn` / `CrashCamModeCheck` | `true` / `true` | a crash camera found unusable once sends that player's later crashes to the car at once / a null `InitialCameraMode` counts as "no shot" | V-CC-02 |
 | `CrashCamBadMs` / `CrashCamMaxDistUU` / `CrashCamStuckMs` | `150` / `15000` / `9000` | unusable this long -> car / farther than this from the car = unusable / a crash camera still the view this long -> car | V-CC-02 |
@@ -774,7 +851,7 @@ the half of the player it is for.
 | `WreckTargetStaticMs` / `WreckViewReapplyMs` / `WreckViewBlendSec` | `4000` / `1500` / `0.0` | `"car"`: still watched car replaced after / view put back at most every / blend time | V-WD-05 |
 | `WreckFadeRead` | `true` | read `FadeAmount` / `bEnableFading` of the wrecked player's camera manager (custom properties); `false` = blind `StopCameraFade` only | V-WD-15 |
 | `WreckCinematic` | `"end"` | wrecked while another human races: end its single-player failed-event cinematic \| `"keep"` | V-WD-06 |
-| `WreckSpectateTarget` | `"human"` | whom a wrecked player watches: `"human"` (the other local human, then the leader) \| `"leader"` \| `"ai"` (an AI car first) | V-WD-07 |
+| `WreckSpectateTarget` | `"ai"` | whom a wrecked player watches (0.7.1: default `"ai"`): `"human"` (the other local human, then the leader) \| `"leader"` \| `"ai"` (an AI car first) | V-WD-07 |
 | `WreckSpectateWaitMs` | `800` | the game's spectate not running this long after the wreck: asked for again | V-WD-04 |
 | `WreckViewGuard` | `"auto"` | `"auto"`: the wrecked view's camera is checked every 33 ms; unusable (no target, NaN/origin, too far from its car) for `WreckCamBadMs` -> fallback view \| `"force"`: always the fallback view \| `"off"` | V-WD-04/05 |
 | `ViewGuard` | `true` | run G, `viewguard.lua`: a still-racing local player whose view is another player's DNF cinematic (`BP_PlayerFailedCam_C`) is put back on their own car (FAST loop, race phases, paused in photo mode) \| `false` = the game's behaviour | V-VG-01 |
@@ -836,7 +913,11 @@ the half of the player it is for.
 | `SetupInRaceOverridePrerace` | `false` | also on PRERACE for a human it never reached (the car exists already: may respawn it) | V-SET-11 |
 | `SetupCardPortraits` | `true` | VEHICLES cards show the livery owner's portrait for pilot-livery presets | V-SET-07 |
 | `SetupVideo` / `SetupVideoVolume` | `true` / `-1` | planet video in the media area / its volume (`-1` untouched) | V-SET-02 |
+| `SetupVideoSettleMs` | `250` | 0.10.0: a new planet video opens once the selection is still this long (`0` = at once) | — |
 | `SetupTatooine` / `SetupAskCondition` | `true` / `true` | Tatooine for podracers / ask the conditions when a track has several | — |
+| `SetupTrackSet` | `"arcade"` | 0.10.0, which tracks the setup offers (the game's own lists, `notes/research/track-whitelist.md`): `"quickrace"` (Quick Race + Quick Podrace pools) \| `"arcade"` (+ the Arcade's race tracks) \| `"game"` (+ Multiplayer Tour + Podracing Tour) \| `"all"` (every TrackDef the dev filter returns: the 0.9.x lists, Prologue, debug and campaign copies included) | V-TRK-01..06 |
+| `SetupTrackArcadePods` | `false` | 0.10.0: also offer the Arcade's pod tracks (The Galactic League Championship, Sebulba's Challenge); the game races them with 1-2 pods, and 8 pods on TRAK_WHP_PLANE_FWD crashed at PRERACE | V-TRK-08 |
+| `SetupTrackPoolConds` | `true` | 0.10.0: offer only the conditions the game's pool gives a track (no MEMORY conditions on pods, Scorching only on the `_HARD` Jakku tracks) | — |
 | `SetupTrackDedupe` | `true` | one row per track layout with display names, REVERSE / variants marked (`false`: every TrackDef, duplicates marked) | V-SET-12 |
 | `SetupDebugBuilds` / `SetupAllBuilds` | `false` / `false` | also list the DEBUG tiers / every quick-race build | — |
 | `SetupListMax` / `SetupListMaxH` | `16` / `520` | option rows (paged) / list height | — |
@@ -845,13 +926,15 @@ the half of the player it is for.
 **3D vehicle cards (`vpreview.lua`, 0.8.0)**: front end only. Each VEHICLES column gets a "photo bay" in the sky above
 the menu sets (a static model + a scene capture + a fill light), built after the pick settles and released when the
 step is left, the setup closes or the player leaves. A failure that would hit every model turns it off for the session
-(2D cards, reason logged once); a model that fails keeps its 2D card.
+(2D cards, reason logged once); a model that fails keeps its 2D card. 0.10.0: the RACERS cards use the same bays (one
+per pad, keyed by ControllerId + 1; "spin" on VEHICLE, "still" bursts on the other stages) under one capture budget and
+spawn gap for all bays; the new defaults below apply to the classic columns too.
 | Key | Default | Meaning | VERIFY |
 |---|---|---|---|
 | `SetupPreview3D` | `true` | live 3D render of each pick; `false` = the 0.7.1 2D cards (+ badge) | V-VP-09 |
 | `SetupPreviewX` / `SetupPreviewY` / `SetupPreviewZ` | `0` / `60000` / `60000` | bay 1 origin (uu): empty sky on the far +Y side, ~44° above every main-menu camera | V-VP-05 |
-| `SetupPreviewSpacing` | `5000` | uu between two columns' bays (> 0) | V-VP-10 |
-| `SetupPreviewW` / `SetupPreviewH` | `640` / `360` | render target size (px, > 0); card aspect = W/H | V-VP-03 |
+| `SetupPreviewSpacing` | `20000` | uu between two bays (> 0). 0.10.0: was 5000; the fill light (radius 3 x the camera distance) reached a pod's neighbour model | V-VP-10, V-RC-17 |
+| `SetupPreviewW` / `SetupPreviewH` | `960` / `540` | render target size (px, > 0); card aspect = W/H. 0.10.0: was 640 x 360; one size for 1-4 cards (tests at 720p may set 640 x 360 in `config_user.lua`) | V-VP-03 |
 | `SetupPreviewRtFormat` | `6` | render target format: 6 RGBA16f (linear, right gamma); try 3 (RGBA8 sRGB), then 2 (RGBA8) if washed out or too dark | V-VP-03 |
 | `SetupPreviewCaptureSource` | `2` | 2 FinalColorLDR; 7 BaseColor = unlit last resort | V-VP-03 |
 | `SetupPreviewFov` | `30` | capture horizontal FOV (°, > 0) | V-VP-04 |
@@ -859,7 +942,7 @@ step is left, the setup closes or the player leaves. A failure that would hit ev
 | `SetupPreviewYaw` | `245` | model start yaw (°): front three-quarter view | V-VP-04 |
 | `SetupPreviewFrame` | `1.05` | framing margin (camera distance multiplier, > 0; larger = smaller model) | V-VP-04 |
 | `SetupPreviewSpinDps` | `15` | turntable speed (°/s, either sign); 0 = static (captures at ready, +0.5 s, +2 s, +5 s, then every 5 s) | V-VP-06 |
-| `SetupPreviewCaptureMs` | `50` | min ms between two captures of a spinning bay (0 = every FAST tick) | V-VP-06 |
+| `SetupPreviewCaptureMs` | `66` | min ms between two captures of a spinning bay (>= 0; 0 = every FAST tick; ~15/s at 33-ms ticks). 0.10.0: was 50 | V-VP-06 |
 | `SetupPreviewFillLux` | `60` | fill light above the camera: lux at the model (0 = none) | V-VP-04 |
 | `SetupPreviewExposure` / `SetupPreviewEV` | `"inherit"` / `8` | `"inherit"` (the front end's own exposure) \| `"fixed"` (clamped to EV100 `SetupPreviewEV`) | V-VP-04 |
 | `SetupPreviewShowOnly` | `true` | capture only the bay's model (`false`: every primitive in view) | V-VP-01 |
@@ -872,6 +955,11 @@ step is left, the setup closes or the player leaves. A failure that would hit ev
 | `SetupCardBadges` / `SetupCardBadgeSize` | `true` / `44` | manufacturer badge top left of every vehicle card (2D and 3D) / its size (px, > 0) | V-VP-08 |
 | `SetupCardInsetH` | `72` | height (px, > 0) of the livery owner's portrait inset next to a 3D render | V-VP-08 |
 | `SetupCardRowW` | `1400` | width budget (px, > 0) of the VEHICLES row: 16:9 cards get lower when n columns would not fit (4 players: 187 px) | V-VP-10 |
+| `SetupPreviewCaptureBudget` | `1` | 0.10.0: `CaptureScene()` calls per FAST tick over all bays, the due bay captured longest ago first (> 0; 1 = ~30 captures/s in total, 7.5/s each with 4 spinning) | V-RC-17 |
+| `SetupPreviewSpawnGapMs` | `300` | 0.10.0: a new pick is built (spawn / in-place rebuild) at most once per this many ms over all bays, the oldest waiting pick first (> 0) | V-RC-17 |
+| `SetupPreviewStillBurst` | `8` | 0.10.0: captures per still (at ready, after the late parts, on a page re-show; > 0): Lumen GI, TSR and eye adaptation settle over captures | V-RC-17 |
+| `SetupPreviewSpinStage` | `"vehicle"` | 0.10.0, RACERS stages whose bay spins: `"vehicle"` \| `"all"` \| `"none"` (stills everywhere) | V-RC-17 |
+| `SetupPreviewPrebuildMs` | `600` | 0.10.0, RACERS PILOT stage: the pilot's signature vehicle is built (still) once the pilot pick was unchanged this long (>= 0; 0 = no prebuild) | V-RC-10 |
 | `SetupCampaignMap` | `true` | 0.9.0 campaign views for PLANET and TRACK (`false`: the 0.8.0 lists; no campaign widget is built) | V-CMAP-12 |
 | `SetupCMapPlanetNav` / `SetupCMapTrackView` | `"chips"` / `"map"` | `"list"` = that step's 0.8.0 list | V-CMAP-05 / 08 |
 | `SetupCMapAreaW`/`H`, `SetupCMapArcScale`, `SetupCMapPlanetY` | `3500`/`1080`, `0.85`, `330` | planet view area (su, clipped), scale of the campaign's 7200-su arc, selected planet's centre below the area top | V-CMAP-06 |
@@ -881,6 +969,51 @@ step is left, the setup closes or the player leaves. A failure that would hit ev
 | `SetupCMapSounds` | `true` | the campaign map's UI sounds (open, planet accept) | — |
 | `SetupCMapMapW`/`H`, `SetupCMapPlanetX`, `SetupCMapPlanetScale`, `SetupCMapPlanetName` | `3500`/`1200`, `1180`, `0.62`, `false` | run map box (the 3840x1500 map scales to fit), big planet position and scale, its own 84-pt name | V-CMAP-08 |
 | `SetupCMapCardW`, `SetupCMapNodeMax` | `980`, `40` | detail card width; most variants on one map (more: the list) | V-CMAP-08 |
+
+**Race setup: RACERS step (`racers.lua`, `cards.lua`, `pilots.lua`, `perks.lua`, `perkapply.lua`, 0.10.0)**: step 5 of
+RACE SETUP (§3.3), one card per pad; binding spec `notes/design/vehicle-step-v2.md`. Sizes are Slate units (1 su = 1 px
+at 3840x2160). `GuestPilots`, `SetupPerPlayerBuild*`, `SetupCard*` and `SetupInRaceOverride*` keep their meaning in the
+classic flow.
+| Key | Default | Meaning | VERIFY |
+|---|---|---|---|
+| `SetupPlayerFlow` | `"cards"` | `"cards"` (the RACERS cards) \| `"classic"` (the 0.9.x VEHICLES columns, unchanged; also used for one page when the cards cannot be built) | V-RC-01, V-RC-28 |
+| `PilotStage` / `PerkStage` | `true` / `true` | PILOT / PERKS stage shown (`false`: the pilot defaults / the pilot's style kit are used) | — |
+| `CardP1Input` | `"sink"` | P1's pad: `"sink"` (5 invisible buttons as a plus with explicit navigation rules: a move onto a neighbour = one direction, focus back on the centre) \| `"geometric"` (the plus without explicit rules) \| `"ring"` (the 5 buttons wired as a ring: the index change is the direction, no re-focus = one navigation tick per press) | V-RC-02, V-RC-30 |
+| `CardP1DirGuardMs` | `50` | a P1 sink direction within this many ms of the same direction on a guest pad is dropped and logged (>= 0; 0 = off) | V-RC-07 |
+| `CardGuestClickGuardMs` | `150` | P1's sink accept is dropped while a guest's A is down or had an edge within this many ms (>= 0) | V-RC-07 |
+| `CardBackTapMaxMs` | `600` | a guest's B is "back" on release when held shorter (> 0); held `LeaveHoldMs` (1 s) = leave (join.lua) | V-RC-04 |
+| `CardP1BackConfirmMs` | `3000` | P1 at PILOT: a second back within this window goes to MODE (> 0) | V-RC-08 |
+| `CardRowW` / `CardH` / `CardPad` | `3500` / `1320` / `32` | card row width / card height / inner padding (su, > 0). Lower `CardH` if the page is shorter than measured: the row cannot shrink against the page | V-RC-15 |
+| `CardW` / `CardGap` | `{ 1720, 1720, 1140, 845 }` / `{ 0, 60, 40, 40 }` | card width / gap between the cards (su) for 1, 2, 3, 4 players (4 numbers; widths >= 1, gaps >= 0) | V-RC-15 |
+| `CardFrame` | `"darkpanel"` | `"darkpanel"` (`WBP_DarkPanel` as the card's bottom layer) \| `"solid"` (a plain image in `CardPanelColour`) | V-RC-06 |
+| `CardPanelColour` | `{ R = 0.012983, G = 0.036889, B = 0.048172, A = 0.90 }` | panel colour (#1E363E at 0.9, the game's panel; a colour table) | V-RC-06 |
+| `CardHighlight` | `"pill"` | `"pill"` (`WBP_ButtonBacker` pills) \| `"solid"` (solid images) | V-RC-06 |
+| `CardDetail` | `"game"` | detail panel: `"game"` (`WBP_Character_Ability`: title + rich text) \| `"plain"` (two text blocks, markup stripped) | V-RC-06 |
+| `CardThumbMask` | `"mid"` | head shots: `"mid"` (squircle material instance of `M_UI_CharacterProfilePicture`) \| `"plain"` (the transparent head shot on a squircle backer) | V-RC-06 |
+| `CardDiamond` | `"disc"` | ability diamond: `"disc"` (the mod's discs) \| `"hud"` (`MI_HUD_Abilities_BG` behind it) | V-RC-06 |
+| `CardBackdrop` | `true` | racer-style art behind the pilots | — |
+| `CardGlyphs` | `"xbox"` | hint glyphs: `"xbox"` (the game's Xbox pad images) \| `"text"` | V-RC-01 |
+| `CardSounds` | `"match"` | `"match"` (guests' navigation ticks + everybody's accept sounds) \| `"accept"` (accept sounds only) \| `"off"` | V-RC-30 |
+| `CardStartPulse` | `true` | everybody READY: P1's START RACE row pulses | — |
+| `CardBuildsPerTick` / `CardRendersPerTick` / `CardLoadsPerTick` | `1` / `2` / `3` | per FAST tick (> 0): card shells / stage panels / pickers built; dirty cards rendered; small textures loaded | V-RC-16 |
+| `CardLoadBigBytes` | `1048576` | a texture of at least this many bytes is "big": one per FAST tick (full bodies 2.7 MB, style backdrops 4.1 MB, no mips; > 0) | V-RC-16 |
+| `PilotUnique` / `PilotShareShade` | `true` / `false` | a pilot is held by one human at a time (cycling skips the others') / with `PilotUnique`, several humans may still race SHADE | V-RC-09 |
+| `PilotP1Default` | `"shade"` | P1's first pilot: `"shade"` \| `"favourite"` (`PvpFlowComponent.DefaultPilot`, when valid) | V-PIL-08 |
+| `PilotExtras` | `{ "DA_Racer_Mentor" }` | extra pilots (SEBULBA in the Skimmer class); `false` = none | V-RC-09 |
+| `PilotPodRivals` / `PilotPodAged` | `false` / `false` | podracers: also the 11 speeder rivals / the 5 Aged pilots | — |
+| `PilotSeatCheck` | `"log"` | in the race: `"log"` (`PlayerState.Pilot` compared with the pick) \| `"refresh"` (also written + `SynchronousRefreshPilot`) \| `"off"` | V-RC-23 |
+| `PerkPartSlots` / `PerkTraitSlots` | `6` / `3` | part slots on the board and in the launch build (1..10) / trait slots (1..4); an override outside is clamped | V-RC-19 |
+| `PerkFlaws` | `true` | FLAWS category in the part pickers | — |
+| `PerkUniqueFamily` | `true` | an ability family in one slot only (a picker swap moves it) | V-RC-13 |
+| `PerkApply` | `"full"` | `"full"` (zero base build, affix slots raised in memory for the launch call, every field written and read back, traits at PRERACE) \| `"passives"` (parts + traits as passives at PRERACE only) \| `"off"` (the classic build) | V-RC-19, V-RC-21 |
+| `PerkTraits` | `true` | traits applied as passives at PRERACE (`Server_ApplyPassive`) | V-RC-22 |
+| `PerkSetRacerStyle` | `false` | also write `PlayerState.RacerStyle` (its traits might then apply twice) | — |
+| `PerkVerify` | `true` | PRERACE / RACING check of each human's build and abilities | V-RC-21 |
+| `PerkLateFallback` | `true` | parts lost in the travel are re-applied as passives (flaws skipped) | V-PRK-06 |
+| `PerkRamjet` / `PerkCritMalfunctions` | `"keep"` / `"keep"` | speeders' ramjet / critical malfunctions: `"keep"` (the base build's) \| `"on"` \| `"off"` | — |
+| `PerkPodRamjet` | `false` | podracers get the ramjet (`RamjetInstalled = true`); `false` = the game's own "Memory Pod [No Ramjet]", ramjet items hidden on pods | V-RC-32 |
+| `PerkHideInert` | `true` | items for a system the car lacks (ramjet / critical malfunctions) are hidden; `false` = shown dimmed, tagged NO RAMJET / NO CRITICAL MALFUNCTIONS | V-RC-32 |
+| `PerkLaunchBase` | `"zero"` | launch build of a cards race: `"zero"` (`VBD_000_1Mastiff` / `_Plane`: no abilities, no parts, PL 0) \| `"pilot"` (speeders launch on P1's style build `VBD_PvP_IA_*`, PL 26-31: the fallback before `PerkApply = "off"` when the AI scale with the launch build; pods keep the zero base) | V-RC-27 |
 
 **Pause (`pause.lua`, 0.7.0 layers A-G)**: in a split race the game makes every menu screen for the LAST local player
 (P2 in 2P) and gives UI input to the FIRST one only. Layers A-G act only while a split race runs; each key turns its layer
@@ -928,6 +1061,19 @@ split-race pause belongs to the pause controller (the player the pause screen wa
 | `MenuBridgeControllerFallback` | `true` | the pause controller's A/B (+ Game+UI input) on a pause screen another player owns (a page the pre-create missed; the Logbook while `PauseSubScreenHook` is false) | V-MB-03 |
 | `MenuBridgeProfileOwner` | `true` | front end after a split race: the main menu's profile card owned by a guest ("Player 2") is re-owned by P1 (name, rank, platform refreshed) | V-MB-06 |
 | `MenuBridgeSharedFocus` | `true` | 0.9.0: on a results screen another player owns, P1 (kept in UI-only input by the game) gets Slate focus on the screen's own target, so P1's A clicks CONTINUE natively | V-MB-07 |
+| `MenuBridgeRawA` | `false` | 0.10.0: on a shared results screen a non-owner's A is also read from its raw vehicle input. Off by default since 0.10.1: P1's raw input never shows the A there (V-MB-08 failed live 2026-10-10) | V-MB-08 |
+| `MenuBridgeP1Catcher` | `true` | 0.10.1: on a shared screen another player owns (the split race's results), an invisible plain `/Script/UMG.Button` is added to that screen with P1's Slate focus; P1's A presses it (`IsPressed`) and the bridge clicks as for the other players | V-MB-09 |
+
+**Front-end menu owner (`feowner.lua`, 0.10.0)**: after a split race the game builds the front-end screens for the last
+local player (P2 drove the main menu, P1's pad did nothing); these keys make them P1's (`notes/research/menu-owner.md`).
+The race results screens are not covered (menu bridge above).
+| Key | Default | Meaning | VERIFY |
+|---|---|---|---|
+| `FrontEndMenuOwner` | `"p1"` | `"p1"`: the main menu is pre-created for P1 \| `"game"` (the UIManager picks: the last guest; the kill switch) | V-FEO-01..12 |
+| `FrontEndMenuPrecreate` | `true` | pre-create on `BP_Csm_FrontEnd_PickPrimaryMode` (every entry into the main menu, the arrival after a race included) | V-FEO-01/02 |
+| `FrontEndSubScreens` | `true` | Settings (+ its pages), Credits, Stickerbook, the inspect screens and their returns are pre-created for P1 too | V-FEO-11/13 |
+| `FrontEndHideMultiplayer` | `true` | hide and disable the Multiplayer tab while split-screen guests exist | V-FEO-07 |
+| `FrontEndMenuZ` | `500` | Menu-layer z order of the pre-created menu | — |
 
 **Phase / photo mode (`phase.lua`, 0.5.0)**
 | Key | Default | Meaning | VERIFY |
@@ -995,7 +1141,8 @@ split-race pause belongs to the pause controller (the player the pause screen wa
 ## 8. Runtime test plan
 
 The sessions run in order, and each one needs the previous one green. Keep the logs of every run (§6). When a check
-fails, put the named switch in `config_user.lua`, press Ctrl+F11 and repeat the check. When a check is answered,
+fails, put the named switch in `config_user.lua`, restart the game (Ctrl+F11 only with `AllowHotReload = true`) and
+repeat the check. When a check is answered,
 update its row in `notes/ARCHITECTURE.md` §6 before changing code.
 
 - **Session A0**: the no-intro boot (two boots: the first with the Epic flag still on, then a normal one).
@@ -1010,20 +1157,25 @@ update its row in `notes/ARCHITECTURE.md` §6 before changing code.
   photo mode, visible pause menu, inputfix bind check, hot reload mid-race, setup track list and vehicle art.
 - **Run-H UX checks** (0.7.0): each half is its own player's: messages, last-life red, ramjet blue, full-screen danger
   effects, the guest engine panel and lap, the game's hidden HUD, and the hooks removed before leaving the race (§9).
+- **Session R** (0.10.0, run live 2026-10-10): the RACERS step with 2-4 pads, the launch with pilots and loadouts, the
+  results and the front end after a split race, persistence, pods (§9 "Session R").
 
-UE4SS works on this Denuvo build (answered 2026-10-06).
+UE4SS works on this Denuvo build (answered 2026-10-06). The copy is not refundable, so play time is no constraint.
 
 ## 9. Runtime test checklist
 
 Every `VERIFY(V-…)` id in the code has a row. "Fallback" is what to set in `config_user.lua` (or elsewhere, when
-stated) if the check fails.
+stated) if the check fails. 0.10.0's new ids are listed in `notes/design/vehicle-step-v2.md` §8.1 (V-RC),
+`notes/research/menu-owner.md` (V-FEO; V-FEO-13 in the `feowner.lua` header) and `notes/research/track-whitelist.md`
+(V-TRK); "Session R" has the ones run live. Since 0.10.0 every row that presses Ctrl+F11 needs `AllowHotReload = true`
+in `config_user.lua` (§5).
 
 ### Session A0: no-intro boot (1 player)
 Save `UE4SS.log` of each boot; `grep '\[fastboot\]' UE4SS.log`.
 | Id | Check | How | Pass | Fallback |
 |---|---|---|---|---|
 | V-FB-01 | title skipped | boot | `title: title skipped: AdvancePreLoadIfPossible() after N ms ready` ~1-3 s after `BOOT -> FRONTEND`; no PRESS A screen, no brand ident video/audio after it (a short Fuse sound may play); no `IsReadyToLeavePreLoad() unusable` / `IsInitialLoadComplete() unusable` warning | `FastBootStopIdentMovies = false` if the advance misbehaves; `FastBootSkipTitle = false` |
-| V-FB-02 | photosensitivity skipped | same boot | `photo: photosensitivity warning skipped: ReturnToMainMenu() (no next state)` (or `ContinueToNextState(None)`), then `menu: main menu reached X s after arming`; main menu works, SPLIT SCREEN tab added | `photo: state active but not skipped` = widget lookup failed: report it, then `FastBootPhotoBlind = true` |
+| V-FB-02 | photosensitivity skipped | same boot | `photo: photosensitivity warning skipped: ReturnToMainMenu() (no next state)` (or `ContinueToNextState(None)`), then `menu: main menu reached X s after arming`; main menu works, FREE MODE tab added | `photo: state active but not skipped` = widget lookup failed: report it, then `FastBootPhotoBlind = true` |
 | V-FB-03 | no Epic login / SOCIAL OVERLAY modal | first boot with the mod | `epic: profile bUseEosLinking true -> false (…)` and `epic: GfnUserSettings bEnableEOSAccountLinking true -> false`; no epicgames.com page; no modal. After the game saved (`GriffinSave.6.sav` mtime changes): `python3 -I -c "import sys;b=open(sys.argv[1],'rb').read();i=b.find(b'bUseEosLinking');print('absent' if i<0 else hex(b[i+40]))" <…/SaveGames/<SteamID>/GriffinSave.6.sav>` prints `0x0` or `absent` (0x10 = still on); the next boot logs `bUseEosLinking was false at first look` | modal still there: `eos: WantsEosLogin still true at the menu …` should remove it within 1 s; else ACCEPT by hand once (same end state) and report |
 | V-FB-04 | P1 input without PRESS A | after the skipped title | pad 1 navigates the main menu; guests still join in the tab | `FastBootSkipTitle = false` |
 | V-FB-05 | saves still work | change a setting / finish a race | `GriffinSave.6.sav` and `GameUserSettings.ini` rewritten | `FastBoot = false`, report |
@@ -1044,20 +1196,20 @@ Save `UE4SS.log` of each boot; `grep '\[fastboot\]' UE4SS.log`.
 | V-CORE-11 | hot reload | Ctrl+F11 in the lobby (2 joined), during the post-race return, mid-race (2P, split graphics on; once with `P1HudMode = "clone"`) | lobby reopens once, guests still joined, `hot reload: … restored`; mid-race one P1 HUD, no duplicate guest HUD; cvars restored in the next menu | restart the game instead of Ctrl+F11 |
 | V-CORE-12 | Blueprint class load | open the tab (builder class not preloaded) | `LoadAsset(<Pkg>.<Pkg>): found=… loaded=…` once; no `U.class: … still unresolved` | automatic `_C` retry; then `BuilderMode = "devscreen"` |
 | V-DIAG-01 | phase sequence | one offline race, grep `[phase]` | BOOT→FRONTEND→LAUNCHING→LOADING→PRERACE→RACING→POSTRACE→LEAVING→FRONTEND; note whether LoadMap hooks fired and whether `L_SeamlessTravel` appeared | report: `phase` rules |
-| V-TAB-01 | tab appears | main menu | `SPLIT SCREEN` right of Multiplayer; the bumpers reach it | SLOW `ensure`, F5 |
+| V-TAB-01 | tab appears | main menu | `FREE MODE` right of Multiplayer; the bumpers reach it | SLOW `ensure`, F5 |
 | V-TAB-02 | tab button class | log | `Button Widget Type` = `WBP_Tab_Btn_C` | built-in fallback `WBP_Tab_Btn_C` |
-| V-TAB-03 | label sticks | browse tabs for 2 min | label stays `SPLIT SCREEN` | re-applied by SLOW `ensure` (automatic) |
+| V-TAB-03 | label sticks | browse tabs for 2 min | label stays `FREE MODE` | re-applied by SLOW `ensure` (automatic) |
 | V-TAB-04 | `CustomEvent(TabId)` | click each tab | the 5 FName ids logged; `IgnoreTabSelection` false on clicks | report |
 | V-TAB-05 | leaving our tab | ours → Arcade | Arcade pane shows | `RestoreGamePaneOnTabLeave = true` |
 | V-TAB-06 | programmatic select | F5 from another tab, and after a race | our tab highlighted, lobby shown | built-in direct fallback; `ReturnToSplitTab = false` |
 | V-TAB-07 | pad focus | open the tab with the pad | first run: CommonUI focus did NOT reach the rows. Now: `race` row highlighted at once, up/down moves the highlight (V-LOB-08); builder: `Btn_SetVehicle` focused | `LobbyNavHighlight = "style"`; report |
 | V-TAB-08 | sync selection | race → menu, then the Campaign pane | `CustomEvent … from the switcher->tab sync` lines with `IgnoreTabSelection` true; kept guests survive until our tab is reselected | report |
 | V-TAB-09 | first-tab auto-select | debug log while a menu is built | one `CustomEvent(…) during RegisterTabs (fewer than 4 tabs): ignored` per menu; `RegisterTab(…, index 4)` | report |
-| V-TAB-10 | tab poll | click every tab, 10 times between SPLIT SCREEN and others | one `tab poll: active tab is now <id>` per click; lobby shows / hides accordingly | report (F5 path) |
+| V-TAB-10 | tab poll | click every tab, 10 times between FREE MODE and others | one `tab poll: active tab is now <id>` per click; lobby shows / hides accordingly | report (F5 path) |
 | V-TAB-14 | return after another screen | open our tab, enter a sub-screen that covers the main menu (settings, or `BuilderMode = "devscreen"`), come back | `main menu active again after N ms while our tab was open: returning to it`, lobby shown again; a tab click never logs it | `TabReactivateMinMs` higher; `ReturnToSplitTab = false` |
 | V-TAB-11 | menu rebuilt in one world | open our tab, switch tabs, enter and leave a sub-screen | at most one `main menu instance installed` per front-end world, else `main menu replaced while our tab was open` followed by the tab reopening | `ReturnToSplitTab = false` |
 | V-TAB-12 | covered game pane | open our tab from Campaign; Live View: `WBP_FE_Recommended_C` `IsActivated` | `false` under our page, its action-bar prompts gone; reactivated on Campaign | `DeactivateGamePaneOnShow = true` |
-| V-TAB-13 | our tab after the Campaign pane | show `WBP_FE_Campaign`, click SPLIT SCREEN once | `our tab un-highlighted after the switcher->tab sync`; one click opens the lobby | `OurTabSyncFix = "off"` (then F5) |
+| V-TAB-13 | our tab after the Campaign pane | show `WBP_FE_Campaign`, click FREE MODE once | `our tab un-highlighted after the switcher->tab sync`; one click opens the lobby | `OurTabSyncFix = "off"` (then F5) |
 | V-LOB-01 | lobby root | open the tab | only our rows (the setting rows are cleared) | `LobbyRootMode = "own"` |
 | V-LOB-02 | look | visual | game-styled buttons, labels stick | report |
 | V-LOB-03 | clicks | each row with pad A and mouse | one action per click (`poll click '<id>'` or `nav: A on '<id>'` in the debug log, never both for one press) | `LobbyNavDedupMs` higher |
@@ -1084,7 +1236,7 @@ Save `UE4SS.log` of each boot; `grep '\[fastboot\]' UE4SS.log`.
 |---|---|---|---|---|
 | V-JOIN-01 | dormant guests | open the tab with pads 2..n plugged in (nothing created: `pads not enabled`), then ADD PLAYERS twice | `pads enabled (lobby ADD PLAYERS)`, one guest per plugged-in pad (`BP_GfnPlayerController_C`); menu unaffected; plugging a pad in later creates its guest within 1 s | `GuestCreate = "all"`; F6 twice |
 | V-JOIN-02 | single view | open the tab, then other tabs | one full view while guests exist, on every tab | report |
-| V-JOIN-11 | **no re-entry crash** | SPLIT SCREEN ↔ Arcade/Campaign tabs 10 times (~16 s apart, then fast), P2 joined once in between | no crash; `join session closed (…): k guest(s) kept` / `join session open: … (0 created now …)`; never a `RemovePlayer` line; P2 still joins; one view on the game tabs | report the log + dump; never set `GuestRemoval = "always"` except to reproduce |
+| V-JOIN-11 | **no re-entry crash** | FREE MODE ↔ Arcade/Campaign tabs 10 times (~16 s apart, then fast), P2 joined once in between | no crash; `join session closed (…): k guest(s) kept` / `join session open: … (0 created now …)`; never a `RemovePlayer` line; P2 still joins; one view on the game tabs | report the log + dump; never set `GuestRemoval = "always"` except to reproduce |
 | V-JOIN-12 | removal hazard (only `GuestRemoval = "launch"` + `GuestRemovalUnsafe = true`: crash reproducer) | a dormant guest, START RACE twice / start a Campaign race | expected: crash at the race load (dangling listener) | keep `"never"` |
 | V-JOIN-03 | guest pad in the menu | pad 2 presses A | P2 joins | `JoinFocusTrick = "userfocus"`, `"viewport"`, then `"gameandui"` (+ `JoinInputModeReapplyMs = 500`); last resort F6 + pad confirm |
 | V-JOIN-04 | pad ↔ ControllerId | pads 2..4, then `KeyboardIsP1` on | pad k → ControllerId k (k+1 with keyboard P1) | report (remap in `join`) |
@@ -1291,15 +1443,15 @@ lines go into `test.cmd` (`TestCommands = true`). Offline harnesses (no game): s
 
 | Id | Check | How | Pass | Fallback |
 |---|---|---|---|---|
-| (boot) | 0.8.0 loads, nothing armed | boot to the main menu | `[main] SWGRCouch 0.8.0 loading: ...`; `started: ... modules=33/33`; `[subsplit] init: subtitles=route detect=hook both=clone unmatched=both ability-hook on; hooks only in split races (V-SUB-00)`; `[pause] init 0.7.2: phase 2 PauseSubScreenPrecreate=true PauseSubScreenHook=false PauseDialogGuestUi=lower (V-PAU-19..22)`; `[menubridge] init 0.7.2: MenuBridge=true wait 150 ms (...) dialogs true, back true, controller fallback true, profile owner true`; no `[subsplit] hook on` before a race; no `module ... failed to load`, no `config_user.lua: unknown key` | report |
-| V-VP-01 | bay + model + ready | RACE SETUP > VEHICLES, P1 alone; wait ~2 s | `[vpreview] bay 1 at (0, 60000, 60000): target 640x360 format 6, source 2, fov 30, show-only list, fill on (V-VP-01)`, `bay 1: PRE_Car_Beluga spawned (GfnGameInstance.StaticVehicleClass) (BELUGA, archetype 0) (V-VP-01)`, within ~1-2 s `bay 1 ready: PRE_Car_Beluga, <n> unit(s), all bounds <W>x<D>x<H> (r <r>), camera <d> uu, <t> ms, stable (V-VP-01)`. Bad: `3D vehicle preview off for this session: <why>` (every card 2D) or `bay 1: <id> not shown in 3D (<why>)` (that column 2D); `the model falls (z .. < ..): physics off, put back` = report | `SetupPreview3D=false` |
+| (boot) | 0.8.0 loads, nothing armed | boot to the main menu | `[main] SWGRCouch 0.8.0 loading: ...`; `started: ... modules=33/33` (0.10.0: `modules=42/42`, Session R); `[subsplit] init: subtitles=route detect=hook both=clone unmatched=both ability-hook on; hooks only in split races (V-SUB-00)`; `[pause] init 0.7.2: phase 2 PauseSubScreenPrecreate=true PauseSubScreenHook=false PauseDialogGuestUi=lower (V-PAU-19..22)`; `[menubridge] init 0.7.2: MenuBridge=true wait 150 ms (...) dialogs true, back true, controller fallback true, profile owner true`; no `[subsplit] hook on` before a race; no `module ... failed to load`, no `config_user.lua: unknown key` | report |
+| V-VP-01 | bay + model + ready | RACE SETUP > VEHICLES, P1 alone; wait ~2 s | `[vpreview] bay 1 at (0, 60000, 60000): target 640x360 format 6, source 2, fov 30, show-only list, fill on (V-VP-01)` (0.10.0 default: `target 960x540`), `bay 1: PRE_Car_Beluga spawned (GfnGameInstance.StaticVehicleClass) (BELUGA, archetype 0) (V-VP-01)`, within ~1-2 s `bay 1 ready: PRE_Car_Beluga, <n> unit(s), all bounds <W>x<D>x<H> (r <r>), camera <d> uu, <t> ms, stable (V-VP-01)`. Bad: `3D vehicle preview off for this session: <why>` (every card 2D) or `bay 1: <id> not shown in 3D (<why>)` (that column 2D); `the model falls (z .. < ..): physics off, put back` = report | `SetupPreview3D=false` |
 | V-VP-03 | the card shows the model | same, screenshot | `column image = MID of /Game/Griffin/UI/Library/Materials/Diegetic/M_UI_RetainerBox_ScreenSpace.M_UI_RetainerBox_ScreenSpace, texture parameter Texture (V-VP-03)`; each card shows its own turning vehicle (not black / transparent); the 2D art until `ready`; a new pick keeps the previous model at 50 % until it is built | distorted / noisy: `SetupPreviewMaterial="/VirtualCamera/WidgetLibrary/VCamTakesBrowser/Widgets/mat/M_ThumbnailMask.M_ThumbnailMask"` + `SetupPreviewMaterialParam="Target"`, then `SetupPreviewBrush="texture"`; washed out: `SetupPreviewRtFormat=3`, then `2` |
 | V-VP-08 | badges + inset | cycle the models | speeders show their manufacturer logo top left (Beluga = Ace A, Goblin = Assassin B, Hammerhead and the QUIET STRENGTH livery = Raider B); pods none except MYTH P1-P3; a pilot livery shows its owner's portrait bottom right next to the render; the 2D cards get the badge too | `SetupCardBadges=false` |
 | V-VP-04 | look | screenshot of a speeder and a pod | exposure and colours close to the menu's; the speeder and the QuadEngine pod framed whole while turning (the `ready` line prints the bounds kind and the camera distance) | `SetupPreviewExposure="fixed"` + `SetupPreviewEV`; `SetupPreviewFillLux`; `SetupPreviewFrame`; `SetupPreviewBounds="colliding"` |
 | V-VP-05 | main view unaffected | every main-menu tab and camera while the step was open and after | no floating vehicle or shadow anywhere; the front-end screens behave as before | `SetupPreviewCaptureOnly=true` |
 | V-VP-07 | teardown | BACK; SAVE; START RACE; a guest leaves; change tab; Ctrl+F11 in the step | BACK: `[vpreview] released (step mode): 1 bay(s), 3 actor(s) destroyed; session N spawn(s), 0 rebuild(s), N ready, F failed, C capture(s) (V-VP-07)`; `released (save)` / `released (start)` / `released (tab left)`; a guest leaving: `bay 2 released (no player in column 2): 3 actor(s) destroyed (V-VP-07)`; Ctrl+F11: `hot reload (shared variable): preview actors of the previous Lua state to destroy: <3 paths>`, then `hot reload: 3 preview actor(s) of the previous Lua state destroyed, 0 already gone (V-VP-07)` | report |
 | V-VP-06 | cost | `Debug = true`; 1, 2, then 4 spinning bays | the `[main] FAST loop timing` line and the frame time stay close to the menu without bays | `SetupPreviewCaptureMs=100`, then `SetupPreviewSpinDps=0` (static) |
-| V-VP-10 | 2-4 players | guests join in the step | one `bay N at (X, 60000, 60000)` per column (X 0 / 5000 / 10000 / 15000); 4 players: cards 187 px high and 332 wide, no row overflow; columns re-render when guests join / leave | report |
+| V-VP-10 | 2-4 players | guests join in the step | one `bay N at (X, 60000, 60000)` per column (X 0 / 5000 / 10000 / 15000; 0.10.0 default spacing: 0 / 20000 / 40000 / 60000); 4 players: cards 187 px high and 332 wide, no row overflow; columns re-render when guests join / leave | report |
 | V-VP-02 | (optional) rebuild in place | `SetupPreviewRebuild="update"`, pick another model | `bay 1: PRE_Car_Bluefin rebuilt in place (BLUEFIN, archetype 0) (V-VP-02)`, then a `ready` line with other bounds and the new model on the card. Same bounds / old model: keep `"respawn"` | `"respawn"` (default) |
 | V-VP-09 | 2D fallback | `SetupPreview3D=false` | no `[vpreview]` line at all; the 0.7.1 cards (2D art at its own width, 269 px for speeders) + the badge | — |
 | F9 | diag | F9 in the step, in a race | new sections: `menubridge: on=true screens=... top=... owner=...`, `subsplit: armed=... widget=[...] hooks=7 ...` + `cfg:` / `flags:` / `hook` / `pending` lines, `vpreview: 3D on, bays {1=ready:PRE_Car_Beluga}, captures N; usable now=true`, and a `pause` `phase 2: ctsHook=false ctsCalls=... subRequests=... subScreen=... imcDialog=...` line | — |
@@ -1357,7 +1509,8 @@ Offline harnesses (no game; /tmp is lost on reboot, copy them to `scripts/harnes
 fixes), `lua5.4 /tmp/vptest/scenario.lua <Scripts>` (`[TEST] PASS: 0 failure(s)`, 43 checks) +
 `/tmp/vptest/variants.lua <Scripts> off|update|static|texture|fixed`, `lua5.4 /tmp/integ080/pp2/scen_p2_on.lua` (37,
 Logbook hook on) and `/tmp/integ080/pp2/scen_p2_off.lua` (16, the default), `lua5.4 /tmp/integ080/smoke/main_boot.lua
-<Scripts>` (boot + hot reload of main.lua, `modules=33/33`).
+<Scripts>` (boot + hot reload of main.lua, `modules=33/33` with the 0.8.0 Scripts; the 0.10.0 boot line says
+`modules=42/42`).
 
 Force it: `couch takeover` / Ctrl+F6 for a PC without a car, `SlotMode = "auto"` with a guest that did not get a
 slot, or `AllowMidRaceJoin = true` + F6 in a race.
@@ -1396,6 +1549,41 @@ Order: P1 alone, landspeeder (6 planets) -> podracer (7 planets, the arc spreads
 | V-CMAP-11 | VEHICLES unchanged | the 0.8.0 V-VP lines | — |
 | V-CMAP-12 | off | `SetupCampaignMap=false`: `[cmap] campaign views off`, the 0.8.0 lists | — |
 | V-HUD-15 | 3-player HUD (**PASS run M**, live: the slot stretch was needed too) | 3 players: P2's and P3's timer, lap and POS fully visible in their quarter views; P1's bar unchanged; `HUD top bar fits its view` per player | `HudFitInterior=false` |
+
+### Session R: 0.10.0 RACERS step (run live 2026-10-10)
+Three launches on the hotfix build CL382493 (UE4SS Galactic Racer Edition), window 1280x720, 4 pads (pad 2 joined;
+pads 3-4 joined for the 3P / 4P checks, else connected but not joined), a test copy with `TestCommands = true` (the
+`test.cmd` helpers `setup.debugJump{class = "Car", planet = "Mastiff"}`, `racers.event`, `racers.status()`) and
+640 x 360 previews. Logs and screenshots: `state/runs/20261010-0213-racers-v2/`, `20261010-0238-racers-v2b/`,
+`20261010-0244-racers-v2c/`; facts: `notes/research/live-run-racers-facts.md`.
+`grep -E '\[SWGRCouch\]\[(racers|cards|perkapply|vpreview|feowner|menubridge)\]' UE4SS.log`.
+
+| Id | Check | How | Pass | Fallback |
+|---|---|---|---|---|
+| (boot) | 0.10.0 loads (**PASS** in all three launches) | boot to the main menu | `[main] SWGRCouch 0.10.0 loading: ...`; `started: loops fast=5 main=6 slow=7 (33/250/1000 ms), modules=42/42, phase=BOOT`; `[feowner] init 0.10.0: main menu owner P1 ...`; no `[SWGRCouch]` ERROR line, no crash dump | report |
+| V-INP-10 | the input filter DLL matched this build (**PASS**) | ADD PLAYERS; then a race | `[inputfix] native filter loaded: installed=1 reason=ok build=382493`; in the race `every local car reads its own raw input: native filter + contexts on (ctrl 0 own, ctrl 1 bound, ...)`. (The Run-G table uses V-INP-10 for the pad order.) | `reason=` names the mismatch: report (the Lua-only `kbsplit` isolation runs) |
+| V-RC-01/02 | cards built, P1's pad on the sink (**PASS**) | CHOOSE RACE to RACERS (or `debugJump`); P1 d-pad right / down / up | `[racers] built (4 card slots, P1 sink sink, 1.0 ms) (V-RC-01)`, crumb `STEP 5/5 RACERS`, no tofu; one `[racers] P1 sink <dir> (V-RC-02)` per press; `racers.status()`: `sink events n, drops 0, leaks 0`. On the first setup open: `[setup] track pools 'arcade': 73 TrackDef(s) (game data) (V-TRK-01)` | `CardP1Input = "geometric"`, then `SetupPlayerFlow = "classic"` |
+| V-RC-15/16 | layouts and build cost (**PASS**) | 2, 3, then 4 players | `[cards] layout: 2 player(s), class W ..., cards 1720 su, gap 60`, `3 player(s), class M ..., cards 1140 su, gap 40`, `4 player(s), class N ..., cards 845 su`; `card n: shell built (W): 65 widgets, <t> ms`, `pilot panel built (W): 87 widgets, <t> ms` (88 after the run-1 layout fixes; live 1-6 ms each); `dbg loaded <texture> in <t> ms (big) (RC-9)` one per tick (typically 4-8 ms); nothing clipped (`rc-05-3p-mixed.png`, `rc-06-4p-mixed.png`) | lower `CardH`; lower `CardBuildsPerTick` / `CardLoadsPerTick` |
+| V-RC-31 | the page belongs to P1 (**PASS**, also right after a split race) | enter RACERS before and after a race | `[racers] enter Car (new visit, n player(s)); page owner BP_GfnPlayerController_C_<n> (P1) (V-RC-31)` | keyboard + mouse |
+| V-RC-11/12/13 | pickers (**PASS**) | P1 on PERKS: A on a part slot, left/right = category, up/down, A = equip; the same on an ability and a trait | the category pill with `n / N`, tier pips, a tick on the equipped item, the detail card (+ large art on 1-2-player cards); another part makes the kit row `LOADOUT: CUSTOM · FROM <kit>`; ability and trait pickers equip (`rc-03-2p-picker-ready.png`) | — |
+| V-RC-04 | joins and leaves mid-step (**PASS**) | pads 3, 4 press A; later a guest holds B 1.4 s | `[join] P3 JOINED`, the layout goes to M, then N, the new card starts at PILOT; leave: `[racers] P3 (ControllerId 2) left: card removed, bay released, picks kept for the pad (V-RC-04)`, `[vpreview] bay 3 released (P3 left): 3 actor(s) destroyed (V-VP-07)` | raise `CardBackTapMaxMs` |
+| V-RC-14/18 | quick path, all READY (**PASS**) | A, A, A on each card | `[racers] P2 READY after 3 presses (pilot ..., kit pilot) (V-RC-14)`; `all 4 players READY (P1: A TO START) (V-RC-18)`; status `ALL READY · P1: A TO START`, P1's row `START RACE · ALL READY` (`rc-07-4p-all-ready.png`) | — |
+| V-RC-35 | START with un-joined pads (**PASS**) | pads 3, 4 connected, not joined: START; START again 11 s later; then two STARTs 1.2 s apart | first START: `[setup] PADS 3, 4 ARE NOT JOINED: START AGAIN FOR AI CARS`, the page stays; 11 s later the gate warns again (window 5 s); two STARTs within 5 s: `[launch] WARN launch with un-joined guest(s) accepted by the race setup's second START: PADS 3, 4 ARE NOT JOINED (V-RC-35)`, `[join] 2 PADS NOT JOINED: THEIR CARS ARE AI-DRIVEN`; those pads race AI-driven in their own views | join the pads (A) before START |
+| V-RC-19/20 | launch base, pilots (**PASS**) | START RACE | `[perkapply] VBD_000_1Mastiff UnlockedAffixSlots 4 -> 6, MaximumAffixSlots 10 -> 10 (in memory for the LaunchCustomRace call; V-RC-19)`, then `... 4 -> 6 -> 4 (after call; V-RC-19)`; `pilots: P1=<id> P2=<id>; AI re-assigned n (V-RC-20)` and per re-assigned AI `AI <old> -> <new> (a human's pilot; PlayerState.Pilot set, name '<name>') (V-RC-20)`; the results list no human's pilot among the AI (`rc-12-results.png`, run 2) | `PerkApply = "passives"` |
+| V-RC-21/22/23 | loadouts, traits and pilots in the race (**PASS**) | same; PRERACE | front end `loadout: P1 build[Car e0]: lv 10/2/0/6/5/8 PL31 abil ... crash ... parts 4/6 ... (plan) (V-RC-21)`, `apply (full, Car): P1 ok P2 ok`; race `loadout: P1 in race: build ok, abilities 4/4, crash ok, parts 4/4 live (V-RC-21)`, `loadout: P1 traits: 3 of 3 applied, PassiveList 4 -> 7 (V-RC-22)` (+3 per human, not +6), `pilot: P1 PlayerState.Pilot = <id>, the pick (V-RC-23)`; each view's HUD shows its own ability cluster (`rc-10-race-hud.png`) | `PerkApply = "passives"`; `PerkTraits = false`; `PilotSeatCheck = "refresh"` |
+| V-MB-01/02 | results: another player's A (**PASS**) | finish; P2 presses A | `[menubridge] P2 A -> WBP_SimpleRaceResultsScreen_C WBP_Common_Btn_Continue (focused): clicked (V-MB-01/02)`, then FRONTEND | `MenuBridge = false` |
+| V-MB-08 | results: P1's A (**FAILED**, task #10 open) | P1 holds A on the results | expected `P1 A read from its raw vehicle input on WBP_SimpleRaceResultsScreen_C (V-MB-08)`: never logged; the screen stays (`rc-13-after-p1-a.png`). Probes: P1's `EnhancedPlayerInput.ActionInstanceData` has no `IA_Veh_Boost` entry, `IA_UI_Accept` TriggerEvent 0, `IsInputKeyDown(Gamepad_FaceButton_Bottom)` false | another player presses A |
+| V-MB-09 | results: P1's A (0.10.1 catcher) | P1 presses A on the results | `P1 catcher button added to WBP_SimpleRaceResultsScreen_C (V-MB-09)`, `P1 A read from the catcher button on ... (V-MB-09)`, `P1 A -> WBP_SimpleRaceResultsScreen_C WBP_Common_Btn_Continue (focused): clicked`, then `POSTRACE -> LEAVING` (passed 2026-10-10, run catcher-test) | `MenuBridgeP1Catcher = false` |
+| V-FEO-01/02/07/12 | the main menu is P1's after the race (**PASS**) | back in the front end after the split race | `[feowner] PickPrimaryMode: WBP_FE_MainMenu_C pre-created for P1 (pc <n>, 4 local PCs) z=500 (V-FEO-01)`, `pre-created WBP_FE_MainMenu_C (PickPrimaryMode) acquired by the front-end CSM after <t> ms: extra ref released; input mode refresh ok (V-FEO-02); owner P1 (V-FEO-12)`; `Multiplayer tab hidden while 4 local player(s) exist: enabled set, visibility set (V-FEO-07)`; P1's pad drives the menu (LB / RB glyphs, `rc-15-after-settings.png`) | `FrontEndMenuOwner = "game"`; `FrontEndHideMultiplayer = false` |
+| V-FEO-13/11 | Settings after the race (**PASS**) | P1's X, then P1's B | `ChangeStateTo(CSM_FrontEnd_Settings): WBP_Settings_C pre-created for P1 (...) z=500 (V-FEO-13)` + `acquired ...; owner P1 (V-FEO-12)`; B: `WBP_Settings_C Back: WBP_FE_MainMenu_C pre-created for P1 (...) (V-FEO-11)` and P1's main menu is back | `FrontEndSubScreens = false` |
+| V-RC-25 | picks survive a restart (**PASS**) | START (or SAVE AND RETURN), quit, restart, open RACERS | `[racers] LastRaceRacers saved for ControllerId 0, 1 (2 pad(s) on file) (V-RC-25)`; after the restart `picks of 2 pad(s) restored for archetype 0 (V-RC-25)`: P1's KATJA MOX with the custom loadout and P2's pick come back | clear `LastRaceRacers` in `settings.txt` |
+| V-RC-32 | pods on the cards (**PASS**; no pod race yet: V-RC-24) | RACERS on TATOOINE / MOS ESPA SPEEDWAY (`debugJump{class = "Plane", planet = "Beagle"}`) | `[perkapply] systems Plane: ramjet false, critmalf false (VBD_000_1Mastiff_Plane reads false / false; ...) (V-RC-32)`; 8 pod pilots in the roster (`1 / 8`); DUD BOLT's style VULPTEREEN 327 with his head shot as the icon (untinted); sixth upgrade row AIR BRAKE; `LOADOUT: VULPTEREEN 327 KIT` (`rc-09-pods-pilot.png`, `rc-13-pods-perks.png`) | `PerkHideInert = false` |
+| (pause) | the game's inactivity auto-pause | nobody gives game input for ~60 s in the race | `game paused by none (unknown: the menu keeps its owner)`: the game's own pause, not a mod fault; resume + stick input continues | `tools/keepalive.sh` for unattended runs |
+
+Layout fixes after run 1 (confirmed in runs 2-3): the section rules (a texture-less image drew a 32-su bar), the style
+title / subline spacing, the READY `<pilot> · <vehicle>` line vs the style name, the PERKS POWER inset, the centred
+VEHICLE info line, untinted pod style icons. Not run live yet: V-RC-03, V-RC-07, V-RC-08, V-RC-10, V-RC-24, V-RC-26 to
+V-RC-30, V-RC-34 and the 960x540 preview default.
 
 ### Session D: network (two machines on the LAN, then over WireGuard)
 | Id | Check | How | Pass | Fallback |

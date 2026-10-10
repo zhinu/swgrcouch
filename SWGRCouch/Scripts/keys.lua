@@ -1,14 +1,17 @@
 -- SWGRCouch · keys.lua (G2 Wiring & lifecycle)
 -- Debug keybinds (ARCHITECTURE.md §1.8) and the `couch` console command.
 --
--- UE4SS facts [API§3, §11, §12]: RegisterKeyBind callbacks run on the UE4SS input thread (never touch a
--- UObject there), see the keyboard only (GetAsyncKeyState), fire only while the game window has focus,
--- and match modifiers exactly (F6 does not fire on Ctrl+F6). F10/Tilde belong to ConsoleEnablerMod, INS,
+-- UE4SS facts [API§3, §11, §12]: RegisterKeyBind callbacks run on the UE4SS event-loop thread, see the keyboard only
+-- (GetAsyncKeyState), fire only while the game window has focus, and match modifiers exactly (F6 does not fire on
+-- Ctrl+F6). 0.10.0: every bind goes through keyq (the event-loop callback only bumps a counter; the FAST loop runs the
+-- body on the game thread). No UE4SS call may be made from that thread, not even ExecuteInGameThread: it corrupted the
+-- shared hook lua_State (crash_2026_10_08_13_27_33, notes/research/ue4ss-hook-thread-gc.md). F10/Tilde belong to ConsoleEnablerMod, INS,
 -- Ctrl+J/H/O/R/Y/U/I, Ctrl+Num5-9 and F3 to other bundled mods: none of them is used here.
 -- The console handler runs on the game thread inside ProcessConsoleExec and must return a boolean.
 
 local St = require("state")
 local U = require("util")
+local cfg = require("config")
 local sched = require("sched")
 local settings = require("settings")
 
@@ -28,13 +31,11 @@ local function call(modName, fnName, ...)
   return f(...)
 end
 
--- Keybind body: always deferred to the game thread through sched (sched wraps it in U.try).
+-- Keybind body: runs on the game thread (keyq.drain from the FAST loop wraps it in U.try).
 local function onGame(label, modName, fnName)
   return function()
-    sched.run("key", function()
-      U.log(TAG, "%s -> %s.%s()", label, modName, fnName)
-      call(modName, fnName)
-    end)
+    U.log(TAG, "%s -> %s.%s()", label, modName, fnName)
+    call(modName, fnName)
   end
 end
 
@@ -43,10 +44,7 @@ local function bind(key, mods, label, fn)
     U.warn(TAG, "key for %s is missing in this UE4SS build", label)
     return
   end
-  local ok, err
-  if mods then ok, err = pcall(RegisterKeyBind, key, mods, fn)
-  else ok, err = pcall(RegisterKeyBind, key, fn) end
-  if not ok then U.err(TAG, "RegisterKeyBind %s failed: %s", label, tostring(err)) end
+  require("keyq").bind(key, mods, label, fn)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -132,7 +130,7 @@ SUB.diag = function() call("diag", "dump"); return { "diag dump written to UE4SS
 SUB.recipe = function() call("diag", "recipe"); return { "recipe dump written to UE4SS.log" } end
 SUB.net = function() call("diag", "net"); return { "network dump written to UE4SS.log" } end
 SUB.input = function() call("inputfix", "dump"); return { "input isolation dump written to UE4SS.log" } end
-SUB.tab = function() call("menu_tab", "selectOurTab"); return { "SPLIT SCREEN tab requested" } end
+SUB.tab = function() call("menu_tab", "selectOurTab"); return { "FREE MODE tab requested" } end
 SUB.join = function() call("join", "keyboardJoin"); return { "join requested" } end
 SUB.leave = function() call("join", "keyboardLeave"); return { "leave requested" } end
 SUB.layout = function()
@@ -206,6 +204,7 @@ SUB.set = function(p)
 end
 
 SUB.reload = function()
+  if cfg.AllowHotReload ~= true then return { "hot reload is off (cfg.AllowHotReload = false): restart the game" } end
   RestartCurrentMod()
   return { "restarting SWGRCouch" }
 end
@@ -269,20 +268,21 @@ function M.init()
   bind(Key.F7, CTRL, "Ctrl+F7", onGame("Ctrl+F7", "net", "toggleHosting"))
   bind(Key.F8, CTRL, "Ctrl+F8", onGame("Ctrl+F8", "net", "toggleConnect"))
   bind(Key.F9, CTRL, "Ctrl+F9", onGame("Ctrl+F9", "diag", "net"))
-  -- Keybind callbacks run on the UE4SS event-loop thread, where RestartCurrentMod does NOT queue: it
-  -- uninstalls the mod inline and lua_close()s the state this callback is running in (use-after-free).
-  -- From the game thread is_event_loop_thread() is false, so the reinstall goes through queue_event and
-  -- runs later outside any Lua frame of this mod (UE4SSProgram.cpp queue_reinstall_mod(ModId)).
-  bind(Key.F11, CTRL, "Ctrl+F11", function()
-    sched.run("reload", function()
+  -- Hot reload only with cfg.AllowHotReload (0.10.0, default off): lua_close of a state other threads still use and
+  -- the deletion of the process-wide Lua lock make it a crash risk in this UE4SS (upstream #1445 points 1-2).
+  -- keyq runs the body on the game thread, where is_event_loop_thread() is false, so RestartCurrentMod queues the
+  -- reinstall (queue_reinstall_mod) instead of lua_close()-ing the state this callback runs in.
+  if cfg.AllowHotReload == true then
+    bind(Key.F11, CTRL, "Ctrl+F11", function()
       U.log(TAG, "Ctrl+F11 -> RestartCurrentMod()")
       RestartCurrentMod()
     end)
-  end)
+  end
 
   local ok, err = pcall(RegisterConsoleCommandGlobalHandler, "couch", onConsole)
   if not ok then U.err(TAG, "RegisterConsoleCommandGlobalHandler failed: %s", tostring(err)) end
-  U.dbg(TAG, "keybinds F5-F9, Ctrl+F5-F9, Ctrl+F11 and console 'couch' registered")
+  U.dbg(TAG, "keybinds F5-F9, Ctrl+F5-F9%s and console 'couch' registered (through keyq)",
+    cfg.AllowHotReload == true and ", Ctrl+F11" or "")
 end
 
 return M

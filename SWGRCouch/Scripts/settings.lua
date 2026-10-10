@@ -15,7 +15,8 @@ local DEFAULTS = cfg.Defaults
 -- Fixed key order for writing the file
 local ORDER = { "Layout2P", "SplitGraphics", "TakedownCams", "NameTags", "KeyboardIsP1", "NetMode",
                 "JoinAddress", "Port", "LastRaceArchetype", "LastRaceGameMode", "LastRacePlanet", "LastRaceTrack",
-                "LastRaceBuild", "LastRaceDebugBuild", "LastRaceCondition", "LastRaceMaxRacers", "LastRaceVehicles" }
+                "LastRaceBuild", "LastRaceDebugBuild", "LastRaceCondition", "LastRaceMaxRacers", "LastRaceVehicles",
+                "LastRaceRacers" }
 -- Enumerated string keys: allowed values (a value outside the list is refused / replaced by the default)
 settings.ALLOWED = {
     Layout2P      = { "top-bottom", "side-by-side" },
@@ -46,6 +47,7 @@ local COMMENTS = {
     Port          = "host port; a host on another port than 7777 must be started with -port=<n>",
     LastRaceMaxRacers = "RACE SETUP grid size, humans included (0 = the class limit: 12 speeders / 8 podracers)",
     LastRaceVehicles  = "RACE SETUP picks per player: <pnum>=<PRE_* preset>@<build path>;...",
+    LastRaceRacers    = "RACERS step per pad: <ControllerId>=<pilot>@<preset>@<loadout>;...",
 }
 
 local values = {}        -- key -> typed value (only keys of DEFAULTS)

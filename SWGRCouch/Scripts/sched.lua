@@ -56,7 +56,7 @@ end
 --- Returns true when queued.
 function sched.run(tag, fn, ...)
     local args = pack(...)
-    local wrapped = function() U.try(tag, fn, table.unpack(args, 1, args.n)) end
+    local wrapped = function() U.anchorThread(); U.try(tag, fn, table.unpack(args, 1, args.n)) end
     local ok, e
     if sched.GT ~= nil then
         ok, e = pcall(ExecuteInGameThread, wrapped, sched.GT)
@@ -82,6 +82,7 @@ end
 function sched.after(tag, ms, fn)
     local h
     local wrapped = function()
+        U.anchorThread()
         if h ~= nil then handles[h] = nil end
         U.try(tag, fn)
     end
@@ -102,6 +103,7 @@ function sched.nextFrame(tag, fn, fallbackMs)
     if EngineTickAvailable == true then
         local h
         local wrapped = function()
+            U.anchorThread()
             if h ~= nil then handles[h] = nil end
             U.try(tag, fn)
         end
@@ -126,6 +128,7 @@ function sched.every(tag, ms, fn)
                  lastErrLogMs = nil, periodMs = toMs(ms) }
     loopStats[tag] = st
     local wrapped = function()
+        U.anchorThread()                     -- util.lua: keep UE4SS's shared hook thread alive (V-CORE-12)
         -- game thread: anchor St.nowMs on the engine's real time (state.lua REAL CLOCK; os.clock runs fast under Wine)
         pcall(St.sampleClock)
         local now = St.nowMs()

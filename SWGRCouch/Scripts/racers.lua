@@ -1,0 +1,1910 @@
+-- racers.lua (G3 Front-end UI, 0.10.0): the race setup's step 5 RACERS - one card per local player, each player on
+-- its own PILOT -> VEHICLE -> PERKS -> READY. User request 2026-10-09: "A chracter should be chosen, a kart then. and
+-- then we should be able to map out all the benefits and perks added to the kart (all unlocked just for this mod)",
+-- "kart are horrible p1 and p2 are not similar". Binding spec: notes/design/vehicle-step-v2.md §2 (UX flow) and §5.7
+-- (this module) with the review corrections RC-6 (sounds, stray mouse clicks), RC-10 (direction guard) and RC-11
+-- (KeyboardIsP1 pad-1 guest), plus the optional "ring" input mode.
+--
+-- One state machine per player, St.racers.players[ControllerId]: cards, memory, preview bays and the persisted picks are
+-- keyed by ControllerId; pnum only numbers and colours the cards. Every input source ends in dispatch():
+--   guests    their own PlayerController, polled (setup.lua's readPad): d-pad / left stick with repeat on both axes, A on
+--             the press edge, B on the RELEASE when held shorter than CardBackTapMaxMs (a 1 s hold leaves: join.lua);
+--   P1's pad  CommonUI focus on an invisible 5-button "sink" in the footer: a move onto a neighbour is one direction and
+--             the focus goes back to the centre; a click on any sink button is P1's accept, held one FAST tick and
+--             dropped when a guest's A coincides (task #14);
+--   P1 keys   keyq -> lobby.onKey -> setup.onKey -> M.onKey (arrows, Enter / Space, Backspace);
+--   P1's B    setup.pollP1Back -> M.onP1Back (P1's PlayerController sees pad keys after a race only, CM §3.1);
+--   tests     M.event(pnum | "c<ControllerId>", ev) from test.cmd.
+-- cards.lua only draws: each card's view model (§5.6) is built here right before cards.render, in the tick that takes
+-- its vpreview brush (GC rule). Picks are always complete, so READY is reachable from any stage. Data: pilots.lua
+-- (roster, defaults, uniqueness), vehicles.lua (models, liveries), perks.lua (loadouts, pure), perkapply.lua (the class's
+-- system flags, the energy costs).
+-- setup.lua drives it; no init, no loop of its own: build (per page), enter / leave (step 5 shown / left), poll (its FAST
+-- pollNav while the lobby is not covered), keepFocus, onKey, onP1Back, onPlayers, onPageShown, and for the race choice
+-- readyState / choicePlayers / persist / restore.
+-- VERIFY ids: V-RC-02 (sink), V-RC-03 (A,A,A fast, Enter, Backspace), V-RC-04 (guests), V-RC-07 (attribution guards),
+-- V-RC-08 (P1 back), V-RC-09 (taken pilots, follow rules), V-RC-10 (prebuild), V-RC-14 (quick path), V-RC-25
+-- (persistence), V-RC-30 (sounds, stray clicks), V-RC-31 (page owner).
+
+local C        = require("consts")
+local cfg      = require("config")
+local settings = require("settings")
+local St       = require("state")
+local U        = require("util")
+local V        = require("vehicles")
+local D        = require("perkdata")
+
+local M = {}
+local TAG = "racers"
+
+local function opt(name, default)
+    local v = cfg[name]
+    if v == nil then return default end
+    return v
+end
+
+local function num(name, default)
+    local v = tonumber(cfg[name])
+    if v == nil then return default end
+    return v
+end
+
+local floor, abs = math.floor, math.abs
+
+-- Everything but G1, vehicles and perkdata is reached lazily (ARCH §4.0; spec §5.1 require rules).
+local function CD() return U.mod("cards") end
+local function K() return U.mod("perks") end
+local function P() return U.mod("pilots") end
+local function PA() return U.mod("perkapply") end
+local function ui() return U.mod("ui") end
+local function setupM() return U.mod("setup") end
+
+-- vpreview stays optional as in setup.lua: a load error leaves every card on its 2D art.
+local vpMod = nil
+local function VP()
+    if vpMod == nil then
+        local ok, m = pcall(require, "vpreview")
+        vpMod = (ok and type(m) == "table") and m or false
+        if not vpMod then U.err(TAG, "vpreview.lua failed to load (%s): the cards show 2D art", tostring(m)) end
+    end
+    return vpMod or nil
+end
+
+---------------------------------------------------------------------------------------------------- constants
+local STAGES = { "pilot", "vehicle", "perks", "ready" }
+local STAGE_WORD = { pilot = "PILOT", vehicle = "VEHICLE", perks = "PERKS", ready = "READY" }
+local EVENTS = { up = true, down = true, left = true, right = true, accept = true, back = true }
+local KEY_RACERS = "LastRaceRacers"
+local TOAST_MS = 2000            -- a toast replaces the hint line this long (§2.9)
+local SOUND_GAP_MS = 80          -- at most one card sound per 80 ms over all cards (§2.9)
+local KB_DIR_MS = 300            -- a sink move this soon after a keyboard event is the arrow key's own CommonUI move
+local KB_ACCEPT_MS = 1000        -- mouse+keyboard mode: a sink click is Enter / Space only this soon after its keybind
+local REPEAT_MS = 250            -- P1 (sink, keyboard): the same direction again this soon is an auto-repeat
+local KEEP_MS = 200              -- focus keeper period (§5.7.3)
+local RECONCILE_MS = 1000        -- player list safety net (the "players" event is the normal path)
+local DORMANT_MS = 1000          -- join hint refresh
+local STATUS_MS = 250            -- status line refresh
+local STATUS_HOLD_MS = 5000      -- another module's status (START gate, join, error) stays up this long (the 5 s window)
+local SINK_LEAKS = 5             -- pad presses that left the sink before "P1 sink inactive" (§8.2)
+local POLL_GAP_MS = 500          -- no poll for this long (lobby covered): the pads re-baseline, a queued click is dropped
+local AUDIO_DT  = "/Game/Griffin/Audio/UI/DT_UI_Audio_ForceFeedback.DT_UI_Audio_ForceFeedback"
+local AUDIO_LIB = "/Script/Griffin.Default__UIAudioLibrary"
+local CANVAS = { "/Script/Griffin.FuseCanvasPanel", "/Script/UMG.CanvasPanel" }
+
+-- P1's input sink (§5.7.3): five WBP_Common_Btn as a plus in setup's W.sinkHost (96 x 96 su), 28 x 28 su each; c is the
+-- centre. Ring order (CardP1Input "ring", Z5): index 0..4 = c, u, d, l, r.
+local SINK_POS = { c = { 34, 34 }, u = { 34, 0 }, d = { 34, 68 }, l = { 0, 34 }, r = { 68, 34 } }
+local SINK_KEYS = { "c", "u", "d", "l", "r" }
+local NEIGHBOURS = { "u", "d", "l", "r" }
+local NEIGHBOUR_DIR = { u = "up", d = "down", l = "left", r = "right" }
+local NAV = { left = 0, right = 1, up = 2, down = 3 }          -- EUINavigation
+local RULE_ESCAPE = 0                                            -- EUINavigationRule::Escape (Slate's geometric move)
+-- ring: from button b, Up -> b+1, Down -> b-1, Left -> b+2, Right -> b-2 (mod 5); the index delta is the direction
+local RING_DELTA = { [1] = "up", [4] = "down", [2] = "left", [3] = "right" }
+
+-- Guests' pads (as setup.lua PADK): d-pad and left stick directions, A, B.
+local PADK = {
+    up = { "Gamepad_DPad_Up", "Gamepad_LeftStick_Up" }, down = { "Gamepad_DPad_Down", "Gamepad_LeftStick_Down" },
+    left = { "Gamepad_DPad_Left", "Gamepad_LeftStick_Left" }, right = { "Gamepad_DPad_Right", "Gamepad_LeftStick_Right" },
+    a = { C.KEY.A }, b = { C.KEY.B },
+}
+
+-- Hint glyph keys of cards.lua (the Xbox pad images; CardGlyphs "text" writes them as words).
+local G_LR, G_UD = { "Dpad_Left", "Dpad_Right" }, { "Dpad_Top", "Dpad_Bottom" }
+local G_UP, G_DN = { "Dpad_Top" }, { "Dpad_Bottom" }
+local G_A, G_B, G_NONE = { "FaceButton_Bottom" }, { "FaceButton_Right" }, {}
+
+---------------------------------------------------------------------------------------------------- state
+-- St.racers (diag: racers.status / dump / state):
+--   players[ctrlId] = {ctrlId, pnum, pc, isP1, arch, stage, row = {[stage] = 0 (strip) | 1..n}, last = {[stage] = the
+--     last row >= 1 (cursor memory)}, picker = nil | {slot, kind, cats, cat, items, sel (0 = category row)}, pilotId,
+--     presetId, lo, follow = {vehicle, perks}, nav (a guest's pad edges and repeats), presses, toast, toastUntil,
+--     backArmUntil, dirty, dirtyAt, pilotAt, view}
+--   memory[ctrlId] = {pilot = {[arch] = id}, preset = {[arch] = id}, lo}: the session's picks (kept when a pad leaves)
+--   order = {ctrlId, ...}: card i shows order[i] (pnum i); p1 = P1's input counters and guards; visit = set from the
+--   first enter until setup closes (MODE and back keeps every card; a new visit starts every card at PILOT)
+local function S()
+    local s = St.racers
+    if type(s) ~= "table" then
+        s = { active = false, built = false, visit = nil, ctx = nil, sink = nil, cls = nil, arch = nil, planet = nil,
+              players = {}, memory = {}, order = {}, orderSig = nil, persisted = nil, classInfo = {}, action = nil,
+              inPoll = false, allReady = nil, soundAt = -1e9, statusText = nil, statusAt = 0, statusHoldUntil = 0,
+              dormant = nil, dormantAt = -1e9, reconcileAt = -1e9,
+              p1 = { acceptAt = nil, lastKbMs = -1e9, kbAcceptMs = -1e9, lastDir = nil, lastDirMs = -1e9,
+                     lastKey = nil, lastKeyMs = -1e9, sawB = false, sinkEvents = 0, clicked = false, drops = 0,
+                     leaks = 0, leaking = false, held = false, override = nil, ringAt = nil, keepNext = 0 } }
+        St.racers = s
+    end
+    return s
+end
+
+-- Real milliseconds: setup.realMs (handed over in the build context), else the state clock.
+local function nowMs()
+    local s = St.racers
+    local f = type(s) == "table" and type(s.ctx) == "table" and s.ctx.realMs or nil
+    if type(f) == "function" then
+        local ok, v = pcall(f)
+        if ok and type(v) == "number" then return v end
+    end
+    return St.nowMs()
+end
+
+---------------------------------------------------------------------------------------------------- helpers
+local function indexOf(list, v)
+    for i = 1, #list do if list[i] == v then return i end end
+    return nil
+end
+
+-- The stage strip: PILOT / PERKS can be switched off (their defaults are used, §2.1).
+local function stageList()
+    local out = {}
+    for _, st in ipairs(STAGES) do
+        local off = (st == "pilot" and opt("PilotStage", true) == false)
+            or (st == "perks" and opt("PerkStage", true) == false)
+        if not off then out[#out + 1] = st end
+    end
+    return out
+end
+
+local function kbP1() return settings.get("KeyboardIsP1") == true end
+
+-- RC-11: with KeyboardIsP1 the guest on pad 1 (ControllerId 1, join.lua startOnlyFor) is also Slate user 0: its B is
+-- P1's CommonUI Back ("Exit Game?"). That card ignores B and goes back through the strip.
+local function padOneGuest(pl) return not pl.isP1 and pl.ctrlId == 1 and kbP1() end
+
+local function nameOf(pl) return "P" .. tostring(pl and pl.pnum or "?") end
+local function colourOf(pnum) return C.COLOURS[pnum] or C.COLOURS.Remote end
+local function shortId(id) return (tostring(id):gsub("^DA_Racer_", ""):gsub("^DA_PlaneRacer_", "Pod")) end
+
+-- The pilot-relative kits: "pilot" (the pilot's style kit) and "max" (it at level 10) follow a pilot change.
+local function isPilotKit(lo) return type(lo) == "table" and (lo.kit == "pilot" or lo.kit == "max") end
+
+local function markDirty(pl, now)
+    if pl and not pl.dirty then pl.dirty, pl.dirtyAt = true, now or nowMs() end
+end
+
+local function toast(pl, text, now, ms)
+    pl.toast, pl.toastUntil = text, now + (ms or TOAST_MS)
+end
+
+local function p1Player()
+    local s = S()
+    return s.players[s.order[1] or 0]
+end
+
+-- P1's input type (CommonInput: gamepad vs mouse + keyboard) through setup.p1Gamepad; unknown = gamepad, as there.
+local function p1Gamepad()
+    local okF, f = pcall(function() return setupM().p1Gamepad end)
+    if okF and type(f) == "function" then
+        local ok, v = pcall(f)
+        if ok and type(v) == "boolean" then return v end
+    end
+    U.logOnce("racers.p1gamepad", TAG, "setup.p1Gamepad unavailable: P1 is treated as a gamepad user")
+    return true
+end
+
+local function pilotStyle(pl) return P().styleKey(pl.pilotId, S().arch) end
+
+-- Width class of the card row ("W" 1-2 players, "M" 3, "N" 4) for the pilot crops and the roster tiles.
+local function widthClass()
+    local ok, c = pcall(function() return CD().cls() end)
+    return (ok and c) or "W"
+end
+
+---------------------------------------------------------------------------------------------------- memory
+local function memOf(ctrlId)
+    local s = S()
+    local m = s.memory[ctrlId]
+    if not m then
+        m = { pilot = {}, preset = {}, lo = nil }
+        s.memory[ctrlId] = m
+    end
+    return m
+end
+
+-- Every pick change: the session memory (pilot and preset per class; one loadout, validated per class on use, §2.4).
+local function remember(pl)
+    local arch = S().arch
+    if arch == nil then return end
+    local m = memOf(pl.ctrlId)
+    m.pilot[arch], m.preset[arch] = pl.pilotId, pl.presetId
+    m.lo = K().copy(pl.lo)
+end
+
+-- settings LastRaceRacers "<ctrlId>=<pilot>@<preset>@<loadout code>;..." (§7.1) -> {[ctrlId] = {pilot, preset, code}}.
+-- A loadout code never holds ";", "=" or "@" (perks.encode). Exported as M.parseRacers (setup.deriveSetup).
+local function parseRacers(text)
+    local out = {}
+    if type(text) ~= "string" then return out end
+    for entry in text:gmatch("[^;]+") do
+        local c, pilot, preset, code = entry:match("^%s*(%d+)=([%w_]*)@([%w_]*)@(.-)%s*$")
+        c = tonumber(c)
+        if c then
+            out[c] = { pilot = (pilot ~= "") and pilot or nil, preset = (preset ~= "") and preset or nil,
+                       code = (code ~= "") and code or nil }
+        end
+    end
+    return out
+end
+
+-- A pad's persisted picks: the second default source after the session memory (§2.4). Read once per visit.
+local function persisted(ctrlId)
+    local s = S()
+    if s.persisted == nil then
+        local ok, v = pcall(settings.get, KEY_RACERS)
+        s.persisted = parseRacers(ok and v or nil)
+    end
+    return s.persisted[ctrlId]
+end
+
+---------------------------------------------------------------------------------------------------- picks
+-- {[pilotId] = ctrlId} of every human's current pick, whatever the stage (pilots.holder skips the asker's own).
+local function takenMap()
+    local t = {}
+    for c, pl in pairs(S().players) do
+        if pl.pilotId then t[pl.pilotId] = c end
+    end
+    return t
+end
+
+-- The first model no other player drives (its standard livery), else vehicles.defaultPresetIndex (§2.4).
+local function freePreset(pl)
+    local s = S()
+    local used = {}
+    for c, o in pairs(s.players) do
+        if c ~= pl.ctrlId and o.presetId then
+            local _, _, m = V.modelOf(s.arch, o.presetId)
+            if m then used[m.base] = true end
+        end
+    end
+    for _, m in ipairs(V.models(s.arch)) do
+        if not used[m.base] and m.presets[1] then return m.presets[1].id end
+    end
+    local p = V.presets(s.arch)[V.defaultPresetIndex(s.arch, pl.pnum)]
+    return p and p.id or nil
+end
+
+-- A loadout for (class, pilot style): an unedited kit of the class's KIT row is rebuilt for this class and pilot (the
+-- RC-2 refills of perks.fromKit apply: a REDLINER kit taken into a pod), an edited one ("custom") is validated for the
+-- class; none = the pilot's style kit. The pilot's own style kit picked as "s_<Key>" is the same loadout as "pilot" and
+-- takes that name (it then follows the pilot again).
+local function fitLoadout(lo, arch, style)
+    local Km = K()
+    if type(lo) ~= "table" then return (Km.fromKit("pilot", arch, style)) end
+    local kit = lo.kit
+    if kit == "s_" .. tostring(style) then kit = "pilot" end
+    if kit ~= "custom" and (kit == "pilot" or indexOf(Km.kits(arch, style), kit)) then
+        return (Km.fromKit(kit, arch, style, lo))
+    end
+    return (Km.validate(lo, arch, style))
+end
+
+-- §2.4 defaults of a (re)started card, first rule that applies:
+--   pilot   session memory -> LastRaceRacers -> pilots.defaultFor (P1: SHADE / favourite; guests: the first free class
+--           specialist; the first free pilot); a class change keeps the current pilot first when the class allows it
+--           and nobody else holds it (§2.7);
+--   vehicle memory -> persisted (same class) -> the pilot's signature -> the first model nobody else drives;
+--   loadout memory -> persisted -> the pilot's style kit (each validated for the class).
+-- how = "new" (joined) | "visit" (a new visit) | "class" (class change); old = the pilot before.
+local function defaultPicks(pl, how, old)
+    local s = S()
+    local arch, Pm, Km = s.arch, P(), K()
+    local mem, per = memOf(pl.ctrlId), persisted(pl.ctrlId) or {}
+    local remembered = {}
+    local function add(id) if type(id) == "string" then remembered[#remembered + 1] = id end end
+    if how == "class" then add(old) end
+    add(mem.pilot[arch])
+    add(per.pilot)
+    if how ~= "class" then add(old) end
+    local e = Pm.defaultFor(arch, pl.isP1, takenMap(), remembered, pl.ctrlId)
+    pl.pilotId = e.id
+    local style = Pm.styleKey(e, arch)
+    local function known(id) return type(id) == "string" and V.presetById(arch, id) ~= nil end
+    pl.presetId = (known(mem.preset[arch]) and mem.preset[arch]) or (known(per.preset) and per.preset)
+        or Pm.signature(e, arch) or freePreset(pl)
+    local lo = mem.lo
+    if type(lo) ~= "table" and per.code then lo = (Km.decode(per.code, arch, style)) end
+    pl.lo = fitLoadout(lo, arch, style)
+end
+
+local function freshRows() return { pilot = 1, vehicle = 1, perks = 1, ready = 1 } end
+
+local function newPlayer(e)
+    return { ctrlId = e.ctrlId, pnum = e.pnum, pc = e.pc, isP1 = e.pnum == 1, arch = nil, stage = nil,
+             row = freshRows(), last = freshRows(), picker = nil, pilotId = nil, presetId = nil, lo = nil,
+             follow = { vehicle = true, perks = true }, nav = { primed = false, prev = {}, dirMs = {} },
+             presses = 0, toast = nil, toastUntil = 0, backArmUntil = 0, dirty = true, dirtyAt = 0, pilotAt = 0,
+             view = "" }
+end
+
+-- A card (re)starts at the first stage with fresh rows and its default picks (a join, a new visit, a class change).
+local function restart(pl, how, now, old)
+    local s = S()
+    pl.arch, pl.stage = s.arch, stageList()[1]
+    pl.row, pl.last, pl.picker = freshRows(), freshRows(), nil
+    pl.toast, pl.toastUntil, pl.backArmUntil, pl.presses = nil, 0, 0, 0
+    pl.follow.vehicle = true                 -- "the player has not changed MODEL / LIVERY in this setup"
+    defaultPicks(pl, how, old)
+    pl.follow.perks = isPilotKit(pl.lo)
+    pl.pilotAt = now
+    remember(pl)
+    markDirty(pl, now)
+    U.dbg(TAG, "%s card %s at %s: pilot %s, %s, kit %s", nameOf(pl), how, tostring(pl.stage), tostring(pl.pilotId),
+        tostring(pl.presetId), tostring(pl.lo and pl.lo.kit))
+end
+
+---------------------------------------------------------------------------------------------------- players
+-- P1 + the joined guests in view order (as setup.lua localPlayers): {{pnum, ctrlId, pc}, ...}.
+local function localPlayers()
+    local list = { { pnum = 1, ctrlId = 0, pc = U.p1() } }
+    pcall(function()
+        for _, e in ipairs(U.mod("join").joinedList()) do
+            list[#list + 1] = { pnum = e.pnum, ctrlId = e.ctrlId, pc = e.pc }
+        end
+    end)
+    return list
+end
+
+-- Where each player's view will be (as setup.lua viewName / viewSlot: split.lua's layout rules, every local player's
+-- position in GameInstance.LocalPlayers, dormant guests included).
+local function viewName(i, n)
+    if n <= 1 then return "FULL SCREEN" end
+    if n == 2 then
+        if settings.get("Layout2P") == "side-by-side" then return i == 1 and "LEFT" or "RIGHT" end
+        return i == 1 and "TOP" or "BOTTOM"
+    end
+    if n == 3 then return ({ "TOP", "BOTTOM LEFT", "BOTTOM RIGHT" })[i] or "?" end
+    return ({ "TOP LEFT", "TOP RIGHT", "BOTTOM LEFT", "BOTTOM RIGHT" })[i] or "?"
+end
+
+local function viewLabel(pc, i, n)
+    local lps = {}
+    for _, lp in ipairs(U.localPlayers()) do if U.ok(lp.pc) then lps[#lps + 1] = lp end end
+    if #lps < n then return viewName(i, n) end
+    for k, lp in ipairs(lps) do
+        if U.same(lp.pc, pc) then return viewName(k, #lps) end
+    end
+    return viewName(i, #lps)
+end
+
+-- The cards follow the local players: a joiner gets a fresh card at the first stage (its join press is the input
+-- baseline), a leaver's card goes and its bay is released (its picks stay in memory), restartAll (a new visit) and a
+-- class change restart the cards in view order, each seeing the picks made before it. Returns true when it changed.
+local function reconcile(why, restartAll, now)
+    local s = S()
+    local list = localPlayers()
+    local ids, stale = {}, false
+    for i, e in ipairs(list) do
+        ids[i] = tostring(e.ctrlId)
+        local pl = s.players[e.ctrlId]
+        if pl and pl.arch ~= s.arch then stale = true end
+    end
+    local sig = table.concat(ids, ",")
+    if not restartAll and not stale and sig == s.orderSig then
+        for _, e in ipairs(list) do
+            local pl = s.players[e.ctrlId]
+            if pl then pl.pc = e.pc end
+        end
+        return false
+    end
+    s.orderSig = sig
+    local seen = {}
+    for _, e in ipairs(list) do seen[e.ctrlId] = true end
+    local gone = {}
+    for c in pairs(s.players) do if not seen[c] then gone[#gone + 1] = c end end
+    if #gone > 0 then
+        -- every render image lets go of its target first: the card indices shift (cards.releaseRenders, then vpreview)
+        pcall(function() CD().releaseRenders(nil) end)
+        for _, c in ipairs(gone) do
+            local pl = s.players[c]
+            s.players[c] = nil
+            local vp = VP()
+            if vp then U.try(TAG, vp.release, c + 1, nameOf(pl) .. " left", true) end
+            U.log(TAG, "%s (ControllerId %d) left: card removed, bay released, picks kept for the pad (V-RC-04)",
+                nameOf(pl), c)
+        end
+    end
+    local fresh = {}
+    s.order = {}
+    for i, e in ipairs(list) do
+        local pl = s.players[e.ctrlId]
+        local how = nil
+        if not pl then
+            pl = newPlayer(e)
+            s.players[e.ctrlId] = pl
+            how = "new"
+        elseif restartAll then
+            how = "visit"                        -- a new visit replays the remembered picks, whatever class came before
+        elseif pl.arch ~= s.arch then
+            how = "class"
+        end
+        pl.pnum, pl.pc, pl.isP1 = i, e.pc, i == 1
+        s.order[i] = e.ctrlId
+        if how then fresh[#fresh + 1] = { pl = pl, how = how, old = pl.pilotId } end
+    end
+    for _, f in ipairs(fresh) do f.pl.pilotId, f.pl.presetId = nil, nil end
+    for _, f in ipairs(fresh) do restart(f.pl, f.how, now, f.old) end
+    local n = #s.order
+    local names = {}
+    for i, c in ipairs(s.order) do
+        local pl = s.players[c]
+        pl.view = viewLabel(pl.pc, i, n)
+        markDirty(pl, now)
+        names[#names + 1] = string.format("%s c%d %s %s/%s", nameOf(pl), c, STAGE_WORD[pl.stage] or "?",
+            shortId(pl.pilotId), tostring(pl.presetId))
+    end
+    pcall(function() CD().layout(n) end)
+    s.allReady = nil
+    U.log(TAG, "players (%s): %s", tostring(why), table.concat(names, ", "))
+    return true
+end
+
+---------------------------------------------------------------------------------------------------- sounds
+local soundObjs = { al = nil, dt = nil }
+local function play(pc, row)
+    pcall(function()
+        if not U.ok(soundObjs.al) then soundObjs.al = U.cdo(AUDIO_LIB) end
+        if not U.ok(soundObjs.dt) then soundObjs.dt = U.obj(AUDIO_DT) end
+        if U.ok(soundObjs.al) and U.ok(soundObjs.dt) and U.ok(pc) then
+            -- UIAudioLibrary::Play2DAudioFromTable(Object WorldContextObject, DataTable Table, Name RowName) [V JMAP, cmap]
+            -- on that player's PC: the force-feedback row rumbles the right pad
+            soundObjs.al:Play2DAudioFromTable(pc, soundObjs.dt, U.fname(row))
+        end
+    end)
+end
+
+-- §2.9 + RC-6. CardSounds "match": guests' navigation ticks + everybody's accept / equip / stage-change sound; "accept":
+-- accept sounds only; "off". P1 never gets a navigation sound from here (the sink's WBP_Common_Btn plays MainNavigation
+-- on every focus it receives) nor one for a sink click (its BP plays MainAccept; a keyboard Enter clicks the sink too):
+-- only P1's keyboard path without the sink (src "key") gets ours. At most one sound per 80 ms over all cards.
+-- VERIFY(V-RC-30): guests tick per move; two ticks per P1 sink press, one accept.
+local function sound(pl, kind, src, now)
+    local mode = opt("CardSounds", "match")
+    if mode == "off" or (kind ~= "nav" and kind ~= "accept") then return end
+    if kind == "nav" and mode ~= "match" then return end
+    if pl.isP1 and (kind == "nav" or src ~= "key") then return end
+    local s = S()
+    if now - s.soundAt < SOUND_GAP_MS then return end
+    s.soundAt = now
+    play(pl.pc, kind == "nav" and "MainNavigation" or "MainAccept")
+end
+
+---------------------------------------------------------------------------------------------------- events (§2.2)
+-- Handlers return nil (nothing happened) or what happened: "nav" (cursor / value move), "accept" (accept, equip, stage
+-- change) or "quiet" (a toast only). P1's START / SAVE / MODE are queued in s.action and run outside the input pass
+-- (flushAction): they close or leave the step.
+
+local function setRow(pl, r)
+    pl.row[pl.stage] = r
+    if r >= 1 then pl.last[pl.stage] = r end
+end
+
+local function goStage(pl, st, how, now)
+    local was = pl.stage
+    pl.stage, pl.picker = st, nil
+    if how == "forward" then
+        setRow(pl, 1)                        -- A, A, A from a fresh card always reaches READY (PERKS opens on KIT)
+    elseif how == "strip" then
+        pl.row[st] = 0                       -- the cursor stays on the strip
+    else
+        setRow(pl, pl.last[st] or 1)         -- back: that stage's last row
+    end
+    if st == "ready" and was ~= "ready" then
+        -- VERIFY(V-RC-14): "P2 READY after 3 presses" with the signature preset and the style kit from a fresh card
+        U.log(TAG, "%s READY after %d presses (pilot %s, %s, kit %s) (V-RC-14)", nameOf(pl), pl.presses,
+            tostring(pl.pilotId), tostring(pl.presetId), tostring(pl.lo and pl.lo.kit))
+    elseif was == "ready" and st ~= "ready" then
+        U.dbg(TAG, "%s not ready (%s)", nameOf(pl), st)
+    end
+end
+
+-- Back from the first stage. Guests: a toast (leaving = B held 1 s, join.lua). P1 (V-RC-08): the first back arms
+-- CardP1BackConfirmMs with "BACK AGAIN: MODE STEP", a second one inside it goes to MODE (setup.back; every card keeps
+-- its state, §2.7).
+local BACK_TOAST = "BACK AGAIN: MODE STEP"
+local function backRule(pl, now)
+    if not pl.isP1 then
+        toast(pl, padOneGuest(pl) and "HOLD START TO LEAVE" or "HOLD B TO LEAVE", now)
+        return "quiet"
+    end
+    pl.backHit = true                            -- dispatch keeps the window armed for this event only
+    if now < pl.backArmUntil then
+        pl.backArmUntil, pl.toast = 0, nil
+        S().action = "back"
+        U.log(TAG, "P1 back twice at %s: MODE step (V-RC-08)", STAGE_WORD[pl.stage] or "?")
+        return "accept"
+    end
+    local ms = num("CardP1BackConfirmMs", 3000)
+    pl.backArmUntil = now + ms
+    toast(pl, BACK_TOAST, now, ms)
+    return "quiet"
+end
+
+local function forward(pl, now)
+    local list = stageList()
+    local i = indexOf(list, pl.stage) or 1
+    if i >= #list then return nil end
+    goStage(pl, list[i + 1], "forward", now)
+    return "accept"
+end
+
+local function backward(pl, now)
+    local list = stageList()
+    local i = indexOf(list, pl.stage) or 1
+    if i <= 1 then return backRule(pl, now) end
+    goStage(pl, list[i - 1], "back", now)
+    return "accept"
+end
+
+-- §2.4 follow rules on a pilot change: the vehicle becomes the new pilot's signature while MODEL / LIVERY were not
+-- touched in this setup or the preset is the old pilot's signature; a pilot-relative kit follows the pilot, any other
+-- loadout is kept (toast LOADOUT KEPT). The other PILOT cards re-render: their rosters tag who holds what.
+local function setPilot(pl, id, now)
+    local s = S()
+    local Pm, arch = P(), s.arch
+    local oldSig = Pm.signature(pl.pilotId, arch)
+    pl.pilotId, pl.pilotAt = id, now
+    local sig = Pm.signature(id, arch)
+    if sig and (pl.follow.vehicle or pl.presetId == oldSig) then pl.presetId = sig end
+    local style = Pm.styleKey(id, arch)
+    if isPilotKit(pl.lo) then
+        pl.lo = (K().fromKit(pl.lo.kit, arch, style))
+    else
+        if pl.lo.kit == "s_" .. style then pl.lo.kit = "pilot" end   -- the new pilot's own style kit: the same loadout
+        toast(pl, "LOADOUT KEPT", now)
+    end
+    pl.follow.perks = isPilotKit(pl.lo)
+    remember(pl)
+    for _, o in pairs(s.players) do
+        if o ~= pl and o.stage == "pilot" then markDirty(o, now) end
+    end
+end
+
+-- PILOT row: the previous / next pilot nobody else holds (§2.8, V-RC-09).
+local function stepPilot(pl, d, now)
+    local e = P().step(S().arch, pl.pilotId, d, takenMap(), pl.ctrlId)
+    if not e then
+        toast(pl, "NO OTHER PILOT IS FREE", now)
+        return "quiet"
+    end
+    setPilot(pl, e.id, now)
+    return "nav"
+end
+
+-- MODEL row: the next base model, on the pilot's signature livery when it has one, else its standard livery (§4.2).
+local function stepModel(pl, d)
+    local s = S()
+    local models = V.models(s.arch)
+    if #models < 2 then return nil end
+    local mi = V.modelOf(s.arch, pl.presetId) or 1
+    mi = ((mi - 1 + d) % #models) + 1
+    local p = V.modelPreset(s.arch, mi, P().signature(pl.pilotId, s.arch))
+    if not p then return nil end
+    pl.presetId, pl.follow.vehicle = p.id, false
+    remember(pl)
+    return "nav"
+end
+
+-- LIVERY row: the model's presets (standard first, then the owner liveries).
+local function stepLivery(pl, d)
+    local s = S()
+    local _, li, m = V.modelOf(s.arch, pl.presetId)
+    if not m or #m.presets < 2 then return nil end
+    li = ((li - 1 + d) % #m.presets) + 1
+    pl.presetId, pl.follow.vehicle = m.presets[li].id, false
+    remember(pl)
+    return "nav"
+end
+
+-- After a PERKS edit (perks.lua made the loadout "custom" unless it was a KIT change): follow flag, memory, toast.
+local function afterEdit(pl, toastText, now)
+    pl.follow.perks = isPilotKit(pl.lo)
+    remember(pl)
+    if toastText then toast(pl, toastText, now) end
+end
+
+-- PERKS L/R quick change of the slot under the cursor (§2.5).
+local function cycleSlot(pl, slot, d, now)
+    local _, changed, toastText = K().cycle(pl.lo, slot, d, S().arch, pilotStyle(pl))
+    if not changed then return nil end
+    afterEdit(pl, toastText, now)
+    return "nav"
+end
+
+-- PERKS A: the slot's picker, on the equipped item's category and row (§2.5).
+local function openPicker(pl, slot)
+    local pk = K().picker(pl.lo, slot, S().arch)
+    if not pk or #pk.items == 0 then return nil end
+    pl.picker = { slot = slot, kind = pk.kind, cats = pk.cats, cat = pk.cat, items = pk.items, sel = pk.sel }
+    return "accept"
+end
+
+-- Picker A on an item: equip (a family / ladder / trait held by another slot is swapped) and close.
+local function equip(pl, slot, id, now)
+    if id == nil then id = false end
+    local _, toastText, changed = K().equip(pl.lo, slot, id, S().arch, pilotStyle(pl))
+    pl.picker = nil
+    if changed then afterEdit(pl, toastText, now) elseif toastText then toast(pl, toastText, now) end
+    return "accept"
+end
+
+local HANDLERS = {}
+
+-- Row 0, the stage strip: left / right = previous / next stage (fresh presses only; left at the first stage = the back
+-- rule), down / A = the stage's last row (cursor memory), back = as left.
+local function onStrip(pl, ev, rep, now)
+    if ev == "down" or ev == "accept" then
+        setRow(pl, pl.last[pl.stage] or 1)
+        return "nav"
+    end
+    if ev == "left" or ev == "right" or ev == "back" then
+        if rep then return nil end
+        local list = stageList()
+        local j = (indexOf(list, pl.stage) or 1) + ((ev == "right") and 1 or -1)
+        if j < 1 then return backRule(pl, now) end
+        if j > #list then return nil end
+        goStage(pl, list[j], "strip", now)
+        return "accept"
+    end
+    return nil
+end
+
+HANDLERS.pilot = function(pl, ev, rep, now, r)
+    if ev == "up" then setRow(pl, 0); return "nav" end
+    if ev == "left" or ev == "right" then return stepPilot(pl, (ev == "right") and 1 or -1, now) end
+    if ev == "accept" then return forward(pl, now) end
+    if ev == "back" then return backward(pl, now) end
+    return nil
+end
+
+HANDLERS.vehicle = function(pl, ev, rep, now, r)
+    if ev == "up" then setRow(pl, r - 1); return "nav" end
+    if ev == "down" then
+        if r < 2 then setRow(pl, r + 1); return "nav" end
+        return nil
+    end
+    if ev == "left" or ev == "right" then
+        local d = (ev == "right") and 1 or -1
+        if r == 1 then return stepModel(pl, d) end
+        return stepLivery(pl, d)
+    end
+    if ev == "accept" then return forward(pl, now) end
+    if ev == "back" then return backward(pl, now) end
+    return nil
+end
+
+-- PERKS board (K.slots order): A on KIT = READY, on an upgrade = the next row, anywhere else = the picker; down wraps.
+HANDLERS.perks = function(pl, ev, rep, now, r)
+    local Km = K()
+    local slots = Km.slots(S().arch)
+    local n = #slots
+    if r > n then r = n; setRow(pl, r) end
+    local slot = slots[r]
+    if ev == "up" then setRow(pl, r - 1); return "nav" end
+    if ev == "down" then setRow(pl, (r % n) + 1); return "nav" end
+    if ev == "left" or ev == "right" then return cycleSlot(pl, slot, (ev == "right") and 1 or -1, now) end
+    if ev == "accept" then
+        local kind = Km.slotKind(slot)
+        if kind == "kit" then return forward(pl, now) end
+        if kind == "tune" then setRow(pl, (r % n) + 1); return "nav" end
+        return openPicker(pl, slot)
+    end
+    if ev == "back" then return backward(pl, now) end
+    return nil
+end
+
+-- READY: P1 row 1 START RACE / row 2 SAVE AND RETURN (setup.finish runs the START gates), a guest's row has nothing
+-- to start (the accept sound only); back = PERKS, un-ready (§2.6).
+HANDLERS.ready = function(pl, ev, rep, now, r)
+    local rows = pl.isP1 and 2 or 1
+    if ev == "up" then setRow(pl, r - 1); return "nav" end
+    if ev == "down" then
+        if r < rows then setRow(pl, r + 1); return "nav" end
+        return nil
+    end
+    if ev == "accept" then
+        if pl.isP1 then S().action = (r == 2) and "save" or "start" end
+        return "accept"
+    end
+    if ev == "back" then return backward(pl, now) end
+    return nil
+end
+
+-- Picker: row 0 = the category row (left / right = category, wrapping; a fresh up there cancels), 1..n = items.
+local function onPicker(pl, ev, rep, now)
+    local pk = pl.picker
+    local n = #pk.items
+    if ev == "up" then
+        if pk.sel > 0 then pk.sel = pk.sel - 1; return "nav" end
+        if rep then return nil end
+        pl.picker = nil
+        return "nav"
+    end
+    if ev == "down" then
+        if pk.sel < n then pk.sel = pk.sel + 1; return "nav" end
+        return nil
+    end
+    if ev == "left" or ev == "right" then
+        if #pk.cats < 2 then return nil end
+        local ci = ((pk.cat - 1 + ((ev == "right") and 1 or -1)) % #pk.cats) + 1
+        local items, sel = K().pickerCat(pl.lo, pk.slot, S().arch, ci)
+        pk.cat, pk.items, pk.sel = ci, items, sel
+        return "nav"
+    end
+    if ev == "accept" then
+        if pk.sel == 0 then
+            if n == 0 then return nil end
+            pk.sel = 1
+            return "nav"
+        end
+        local it = pk.items[pk.sel]
+        if not it then return nil end
+        return equip(pl, pk.slot, it.id, now)
+    end
+    if ev == "back" then
+        pl.picker = nil
+        return "nav"
+    end
+    return nil
+end
+
+-- The one mutator of a card (pads, sink, keyboard, P1's B, tests). src: "pad" | "sink" | "key" | "padB" | "test".
+local function dispatch(pl, ev, rep, src, now)
+    local s = S()
+    if not s.active or not pl or not pl.stage or not EVENTS[ev] then return false end
+    now = now or nowMs()
+    pl.presses = pl.presses + 1
+    pl.backHit = false
+    local what
+    local r = pl.row[pl.stage] or 1
+    if pl.picker then
+        what = onPicker(pl, ev, rep, now)
+    elseif r == 0 then
+        what = onStrip(pl, ev, rep, now)
+    else
+        what = HANDLERS[pl.stage](pl, ev, rep, now, r)
+    end
+    if pl.backArmUntil > 0 and not pl.backHit then   -- any other input of P1's disarms "BACK AGAIN"
+        pl.backArmUntil = 0
+        if pl.toast == BACK_TOAST then pl.toast = nil; markDirty(pl, now) end
+    end
+    if not what then return false end
+    markDirty(pl, now)
+    sound(pl, what, src, now)
+    return true
+end
+
+-- P1's queued START / SAVE / MODE, run outside the input pass (it closes or leaves the step).
+local function flushAction()
+    local s = S()
+    local a = s.action
+    if not a or s.inPoll then return end
+    s.action = nil
+    if a == "back" then U.try(TAG, function() setupM().back() end)
+    elseif a == "start" then U.try(TAG, function() setupM().finish(true) end)
+    elseif a == "save" then U.try(TAG, function() setupM().finish(false) end) end
+end
+
+---------------------------------------------------------------------------------------------------- guests' pads
+local function readPad(pc)
+    local st = {}
+    for k, names in pairs(PADK) do
+        st[k] = false
+        for _, n in ipairs(names) do
+            if ui().keyDown(pc, n) then st[k] = true; break end
+        end
+    end
+    return st
+end
+
+local function axis(neg, pos)
+    if neg and not pos then return -1 end
+    if pos and not neg then return 1 end
+    return 0
+end
+
+-- Edge + repeat on one axis (k = "h" | "v"): -> step (-1 | 0 | 1), isRepeat.
+local function repeatAxis(n, k, dir, now, delay, rep)
+    local dk, nk = k .. "dir", k .. "Next"
+    if dir == 0 then n[dk] = 0; return 0, false end
+    if dir ~= n[dk] then n[dk], n[nk] = dir, now + delay; return dir, false end
+    if now >= (n[nk] or 0) then n[nk] = now + rep; return dir, true end
+    return 0, false
+end
+
+-- §5.7.3 guests: A on the press edge (both edges time-stamped for P1's accept guard); B on the RELEASE when held
+-- shorter than CardBackTapMaxMs (a hold of 1 s leaves through join.lua, guestBHoldsToLeave); directions with repeat
+-- (LobbyNavRepeatDelayMs / LobbyNavRepeatMs) on both axes, each time-stamped for P1's direction guard (RC-10). The
+-- first poll after an enter or a join is the baseline. VERIFY(V-RC-04): B tap = back, B hold = leave without a back.
+local function pollGuest(pl, now)
+    if not U.ok(pl.pc) then return end
+    local st = readPad(pl.pc)
+    local n = pl.nav
+    local delay, rep = num("LobbyNavRepeatDelayMs", 400), num("LobbyNavRepeatMs", 140)
+    if not n.primed then
+        n.primed, n.prev, n.bDownMs = true, st, nil
+        n.hdir, n.hNext = axis(st.left, st.right), now + delay
+        n.vdir, n.vNext = axis(st.up, st.down), now + delay
+        return
+    end
+    local prev = n.prev
+    n.prev = st                                  -- first: an event that throws must not repeat its edge every tick
+    local events = {}
+    if st.a and not prev.a then n.aDownMs = now; events[#events + 1] = { "accept", false } end
+    if not st.a and prev.a then n.aUpMs = now end
+    if not padOneGuest(pl) then                  -- RC-11: that pad's B is P1's CommonUI Back
+        if st.b and not prev.b then n.bDownMs = now end
+        if not st.b and prev.b then
+            local held = n.bDownMs and (now - n.bDownMs) or nil
+            n.bDownMs = nil
+            if held and held < num("CardBackTapMaxMs", 600) then events[#events + 1] = { "back", false } end
+        end
+    end
+    local h, hRep = repeatAxis(n, "h", axis(st.left, st.right), now, delay, rep)
+    if h ~= 0 then
+        local dir = (h < 0) and "left" or "right"
+        n.dirMs[dir] = now
+        events[#events + 1] = { dir, hRep }
+    end
+    local v, vRep = repeatAxis(n, "v", axis(st.up, st.down), now, delay, rep)
+    if v ~= 0 then
+        local dir = (v < 0) and "up" or "down"
+        n.dirMs[dir] = now
+        events[#events + 1] = { dir, vRep }
+    end
+    for _, e in ipairs(events) do dispatch(pl, e[1], e[2], "pad", now) end
+end
+
+---------------------------------------------------------------------------------------------------- P1's sink
+-- P1's focus: HasUserFocusedDescendants(P1) is the check that matched live (ui.lua V-LOB-08); ui.hasFocus when it errors.
+local function holds(w, p1)
+    if not U.ok(w) then return false end
+    local ok, v = pcall(function() return w:HasUserFocusedDescendants(p1) end)
+    if ok then return v == true end
+    return ui().hasFocus(w, p1)
+end
+
+local function sinkHolds(p1)
+    local k = S().sink
+    if not k then return false end
+    for _, key in ipairs(SINK_KEYS) do
+        if holds(k[key], p1) then return true end
+    end
+    return false
+end
+
+-- setup's footer buttons (optional ctx.footer): CommonUI clicks them itself on Enter.
+local function footerHolds(p1)
+    local s = S()
+    local f = type(s.ctx) == "table" and s.ctx.footer or nil
+    if type(f) ~= "table" then return false end
+    for _, w in ipairs(f) do
+        if holds(w, p1) then return true end
+    end
+    return false
+end
+
+local function inputMode()
+    local m = S().p1.override or opt("CardP1Input", "sink")
+    if m ~= "geometric" and m ~= "ring" then m = "sink" end
+    return m
+end
+
+-- The focus target of the step: the sink's centre (ring: the button that had the focus last).
+local function target()
+    local s = S()
+    local k = s.sink
+    if not k then return nil end
+    if k.wired == "ring" and s.p1.ringAt ~= nil and U.ok(k.ring[s.p1.ringAt]) then return k.ring[s.p1.ringAt] end
+    return k.c
+end
+
+-- The five buttons: ui.button with opts.noClaim (every CommonUI click reaches M.onSinkClick, no 350 ms dedup), render
+-- opacity 0 but Visible and focusable (Slate's navigation needs hit-testable widgets), on a canvas in the sink host.
+local function buildSink(ctx)
+    if not U.ok(ctx.sinkHost) then error("no sink host") end
+    local cv = ctx.newW(CANVAS)
+    ctx.sinkHost:AddChild(cv)
+    local k = { cv = cv, ring = {}, wired = nil }
+    for i, key in ipairs(SINK_KEYS) do
+        local w = ui().button(ctx.pc, "setup:sink:" .. key, "", M.onSinkClick, { noClaim = true })
+        if not U.ok(w) then error("sink button " .. key .. " not created") end
+        pcall(function() w:SetRenderOpacity(0) end)
+        pcall(function() w:SetVisibility(C.E.Vis.Visible) end)
+        pcall(function() w:BP_SetIsFocusable(true) end)
+        local s = cv:AddChildToCanvas(w)                         -- -> CanvasPanelSlot (as cmap.lua place)
+        if not U.ok(s) then error("AddChildToCanvas returned no slot") end
+        s:SetAnchors({ Minimum = { X = 0, Y = 0 }, Maximum = { X = 0, Y = 0 } })
+        s:SetAlignment({ X = 0, Y = 0 })
+        s:SetAutoSize(false)
+        s:SetSize({ X = 28, Y = 28 })
+        s:SetPosition({ X = SINK_POS[key][1], Y = SINK_POS[key][2] })
+        k[key], k.ring[i - 1] = w, w
+    end
+    return k
+end
+
+-- Navigation rules per input mode (EUINavigation Left 0 / Right 1 / Up 2 / Down 3):
+--   "sink"      c -> u / d / l / r explicitly, every neighbour back to c in all four directions;
+--   "ring"      the Z5 wiring of RING_DELTA (no programmatic re-focus: one BP navigation tick per press, RC-6);
+--   "geometric" no explicit rule: Slate's geometric move between the plus-shaped buttons.
+-- A rewire first resets every rule to Escape (the default). VERIFY(V-RC-02): explicit Up / Down rules hold like
+-- Left / Right; fallback CardP1Input "geometric".
+local function wireSink(k, mode)
+    if not k or k.wired == mode then return end
+    local ok, err = pcall(function()
+        if k.wired ~= nil then
+            for _, key in ipairs(SINK_KEYS) do
+                for _, nv in pairs(NAV) do k[key]:SetNavigationRuleBase(nv, RULE_ESCAPE) end
+            end
+        end
+        if mode == "sink" then
+            for key, dir in pairs(NEIGHBOUR_DIR) do k.c:SetNavigationRuleExplicit(NAV[dir], k[key]) end
+            for _, key in ipairs(NEIGHBOURS) do
+                for _, nv in pairs(NAV) do k[key]:SetNavigationRuleExplicit(nv, k.c) end
+            end
+        elseif mode == "ring" then
+            for i = 0, 4 do
+                local b = k.ring[i]
+                b:SetNavigationRuleExplicit(NAV.up, k.ring[(i + 1) % 5])
+                b:SetNavigationRuleExplicit(NAV.down, k.ring[(i + 4) % 5])
+                b:SetNavigationRuleExplicit(NAV.left, k.ring[(i + 2) % 5])
+                b:SetNavigationRuleExplicit(NAV.right, k.ring[(i + 3) % 5])
+            end
+        end
+    end)
+    if not ok then U.warn(TAG, "sink navigation rules (%s) failed: %s", mode, tostring(err)) end
+    k.wired = mode
+    U.log(TAG, "P1 sink wired: %s (V-RC-02)", mode)
+end
+
+-- A move of P1's sink focus = one direction event, unless it is not P1's pad: mouse + keyboard input, KeyboardIsP1
+-- (pad 1 is guest 1 and Slate user 0, R4), a keyboard arrow (its keybind already gave the event), or RC-10: a guest
+-- had the same direction within CardP1DirGuardMs (insurance against task #14). VERIFY(V-RC-02): one "P1 sink <dir>" per
+-- press; VERIFY(V-RC-07): a guest's d-pad never moves P1's card.
+local function sinkDir(dir, now)
+    local s = S()
+    local p = s.p1
+    if not p1Gamepad() or kbP1() or now - p.lastKbMs <= KB_DIR_MS then return end
+    local g = num("CardP1DirGuardMs", 50)
+    if g > 0 then
+        for i = 2, #s.order do
+            local o = s.players[s.order[i]]
+            local t = o and o.nav.dirMs[dir]
+            if t and abs(now - t) <= g then
+                p.drops = p.drops + 1
+                U.log(TAG, "P1 %s dropped (%s %s %d ms) (V-RC-07)", dir, nameOf(o), dir, floor(abs(now - t)))
+                return
+            end
+        end
+    end
+    -- CommonUI repeats a held direction by moving the focus again: a quick second move is a repeat (the strip ignores it)
+    local rep = p.lastDir == dir and now - p.lastDirMs < REPEAT_MS
+    p.lastDir, p.lastDirMs = dir, now
+    p.sinkEvents = p.sinkEvents + 1
+    if rep then U.dbg(TAG, "P1 sink %s (repeat)", dir) else U.log(TAG, "P1 sink %s (V-RC-02)", dir) end
+    dispatch(p1Player(), dir, rep, "sink", now)
+end
+
+-- The focus went elsewhere: counted once per departure from a sink that held it, while P1 uses a pad (M.keepFocus brings
+-- it back). No sink event or click after SINK_LEAKS such presses = the sink does not work: logged, the next enter wires
+-- "geometric" (§8.2).
+local function leak(now)
+    local s = S()
+    local p = s.p1
+    if p.leaking then return end
+    p.leaking = true
+    if not p.held or not p1Gamepad() or kbP1() then return end
+    p.leaks = p.leaks + 1
+    U.dbg(TAG, "P1 focus left the sink (%d)", p.leaks)
+    local mode = s.sink and s.sink.wired
+    if p.sinkEvents == 0 and not p.clicked and p.leaks >= SINK_LEAKS and not p.override and mode ~= "geometric" then
+        p.override = "geometric"
+        U.warn(TAG, "P1 sink inactive (%d pad presses left it, no sink event): P1 keeps the keyboard and the footer; the "
+            .. "next enter wires CardP1Input \"geometric\" (V-RC-02)", p.leaks)
+    end
+end
+
+-- §5.7.4 step 2: where P1's focus is now. sink / geometric: on a neighbour = one direction, then back to the centre;
+-- ring: the index delta to the button focused before (no re-focus).
+local function pollSink(p1, now)
+    local s = S()
+    local k, p = s.sink, s.p1
+    if not k or not U.ok(k.c) then return end
+    if k.wired == "ring" then
+        local at = nil
+        if p.ringAt ~= nil and holds(k.ring[p.ringAt], p1) then at = p.ringAt end
+        if at == nil then
+            for i = 0, 4 do
+                if holds(k.ring[i], p1) then at = i; break end
+            end
+        end
+        if at == nil then return leak(now) end
+        p.leaking, p.held = false, true
+        if p.ringAt ~= nil and at ~= p.ringAt then
+            local dir = RING_DELTA[(at - p.ringAt) % 5]
+            if dir then sinkDir(dir, now) end
+        end
+        p.ringAt = at
+        return
+    end
+    if holds(k.c, p1) then p.leaking, p.held = false, true; return end
+    for _, key in ipairs(NEIGHBOURS) do
+        if holds(k[key], p1) then
+            p.leaking, p.held = false, true
+            sinkDir(NEIGHBOUR_DIR[key], now)
+            ui().focus(k.c, p1)
+            return
+        end
+    end
+    leak(now)
+end
+
+-- §5.7.4 step 3: P1's sink click from the previous tick, now that this tick's guest pads are read: dropped while a
+-- guest's A is down or had an edge within CardGuestClickGuardMs of the click (task #14). VERIFY(V-RC-07): "P1 accept
+-- dropped (P3 A 40 ms)" and P1's card does not move.
+local function p1Accept(now)
+    local s = S()
+    local p = s.p1
+    local at = p.acceptAt
+    if not at then return end
+    p.acceptAt = nil
+    local g = num("CardGuestClickGuardMs", 150)
+    for i = 2, #s.order do
+        local o = s.players[s.order[i]]
+        local n = o and o.nav
+        if n and n.primed then
+            local d = nil
+            if n.prev and n.prev.a then d = 0 end
+            if not d and n.aDownMs and abs(at - n.aDownMs) <= g then d = abs(at - n.aDownMs) end
+            if not d and n.aUpMs and abs(at - n.aUpMs) <= g then d = abs(at - n.aUpMs) end
+            if d then
+                p.drops = p.drops + 1
+                U.log(TAG, "P1 accept dropped (%s A %d ms) (V-RC-07)", nameOf(o), floor(d))
+                return
+            end
+        end
+    end
+    dispatch(p1Player(), "accept", false, "sink", now)
+end
+
+---------------------------------------------------------------------------------------------------- view model (§5.6)
+local function tex(rel) return K().tex(rel) end
+
+local function classArt()
+    local s = S()
+    if not s.cls then return nil end
+    return (V.classImage and V.classImage(s.cls, s.planet and s.planet.art)) or s.cls.image
+end
+
+-- §3.3 backdrop (CardBackdrop): the style's own art, a real path from perkdata (RC-8: never derived from the key);
+-- pod styles have none: the planet's Arcade pod art (setup.arcadeBg); nil = the dark backdrop.
+local function backdropOf(style)
+    local s = S()
+    local st = D.STYLES[style]
+    if st and st.bg then return tex(st.bg) end
+    if s.arch == 1 and s.planet and s.cls then
+        local ok, path = pcall(function() return setupM().arcadeBg(s.planet, s.cls) end)
+        if ok and type(path) == "string" then return path end
+    end
+    return nil
+end
+
+-- The class traits' names from the VehicleArchetype (vehicles.classInfo: FText reads), once per class and visit.
+local function classTraits()
+    local s = S()
+    local c = s.classInfo[s.arch]
+    if c == nil then
+        c = ""
+        U.try(TAG, function()
+            local names = {}
+            for _, t in ipairs(V.classInfo(s.cls).traits or {}) do names[#names + 1] = t:match("^([^:]+)") or t end
+            c = table.concat(names, " · ")
+        end)
+        s.classInfo[s.arch] = c
+    end
+    return c
+end
+
+-- §3.4 info line: the maker (badge code) or the pod's name, then the class traits.
+local function infoLine(m)
+    local parts = {}
+    local who = m and (m.maker or m.podName)
+    if who then parts[#parts + 1] = who end
+    local t = classTraits()
+    if t ~= "" then parts[#parts + 1] = t end
+    return table.concat(parts, " · ")
+end
+
+-- vpreview's brush of the player's bay (key = ControllerId + 1), built in this tick (GC rule); nil = the 2D art.
+local function brushOf(pl)
+    local vp = VP()
+    if not vp then return nil end
+    local ok, b, kind, dim = U.try(TAG, vp.brush, pl.ctrlId + 1)
+    if ok and b then return b, kind, dim end
+    return nil
+end
+
+-- The ability's energy cost for the detail tag (perkapply: the native config CDO, RC-4).
+local function abilityCost(id)
+    local ok, c = U.try(TAG, function() return PA().abilityCost(id) end)
+    if ok and type(c) == "number" then return c end
+    return nil
+end
+
+-- §2.9 hint line (glyphs + one word each). P1 goes back through the strip ("Up STAGES") until pollP1Back saw one B in
+-- this session, then the guests' B hints; the KeyboardIsP1 pad-1 guest always uses the strip and leaves with Start.
+local function hint(glyphs, text) return { glyphs = glyphs, text = text } end
+
+local function hintsFor(pl)
+    local s = S()
+    local strip = (pl.isP1 and not s.p1.sawB) or padOneGuest(pl)
+    local function back(word) return strip and hint(G_UP, "STAGES") or hint(G_B, word) end
+    local leave = padOneGuest(pl) and hint(G_NONE, "HOLD START: LEAVE") or hint(G_B, "HOLD: LEAVE")
+    if pl.picker then
+        return { hint(G_UD, "CHOOSE"), hint(G_LR, "GROUP"), hint(G_A, "EQUIP"),
+                 strip and hint(G_UP, "TOP: CANCEL") or hint(G_B, "CANCEL") }
+    end
+    local r = pl.row[pl.stage] or 1
+    if r == 0 then return { hint(G_LR, "STAGE"), hint(G_DN, "OPTIONS") } end
+    if pl.stage == "pilot" then
+        return { hint(G_LR, "PILOT"), hint(G_A, "CONFIRM"), pl.isP1 and back("BACK") or leave }
+    elseif pl.stage == "vehicle" then
+        return { hint(G_LR, "CHANGE"), hint(G_UD, "ROW"), hint(G_A, "CONFIRM"), back("BACK") }
+    elseif pl.stage == "perks" then
+        local Km = K()
+        local slot = Km.slots(s.arch)[r]
+        local kind = Km.slotKind(slot)
+        if kind == "kit" then return { hint(G_LR, "KIT"), hint(G_A, "READY"), hint(G_UD, "SLOT"), back("BACK") } end
+        if kind == "tune" then return { hint(G_LR, "LEVEL"), hint(G_A, "NEXT"), hint(G_UD, "SLOT"), back("BACK") } end
+        local out = {}
+        local lr = Km.lrMode(pl.lo, slot)               -- nil: a single part or an empty slot, L/R does nothing
+        if lr then out[#out + 1] = hint(G_LR, (lr == "tier") and "TIER" or "CHANGE") end
+        out[#out + 1] = hint(G_A, "PICK")
+        out[#out + 1] = hint(G_UD, "SLOT")
+        out[#out + 1] = back("BACK")
+        return out
+    end
+    if pl.isP1 then return { hint(G_A, (r == 2) and "SAVE" or "START"), hint(G_UD, "ROW"), back("CHANGE") } end
+    return { padOneGuest(pl) and hint(G_UP, "STAGES") or hint(G_B, "CHANGE"), leave }
+end
+
+-- The roster strip (§3.3): the class's tile count (cards.ROSTER_TILES) centred on the current pilot, wrapping; pilots
+-- another human holds carry that player's number (dimmed and tagged by cards.lua).
+local function rosterVm(pl)
+    local s = S()
+    local Pm = P()
+    local list = Pm.list(s.arch)
+    local n = #list
+    if n == 0 then return {} end
+    local tiles = 7
+    pcall(function() tiles = CD().ROSTER_TILES[widthClass()] or 7 end)
+    local m = math.min(tiles, n)
+    local cur = 1
+    for i, e in ipairs(list) do
+        if e.id == pl.pilotId then cur = i; break end
+    end
+    local taken = takenMap()
+    local before = floor((m - 1) / 2)
+    local out = {}
+    for k = 1, m do
+        local idx = ((cur - 1 - before + k - 1) % n) + 1
+        local e = list[idx]
+        local c = Pm.holder(e, taken, pl.ctrlId)
+        local o = (c ~= nil) and s.players[c] or nil
+        out[k] = { thumb = e.thumb, current = idx == cur, takenBy = o and o.pnum or nil }
+    end
+    return out
+end
+
+local function pilotVm(pl, e, style)
+    local s = S()
+    local Pm = P()
+    local st = D.STYLES[style] or {}
+    local traits = {}
+    for k = 1, 3 do
+        local t = st.traits and D.TRAITS[st.traits[k]]
+        if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc } end
+    end
+    local label = s.cls and s.cls.label or ""
+    local sigText = "ANY " .. label
+    local sig = Pm.signature(e, s.arch)
+    if sig then
+        local _, _, m = V.modelOf(s.arch, sig)
+        if m then sigText = "SIGNATURE " .. label .. " · " .. (m.podName or m.name) end
+    end
+    local i, n = Pm.indexOf(s.arch, pl.pilotId)
+    return {
+        backdrop = backdropOf(style), full = e.full, crop = Pm.crop(e, widthClass()), styleIcon = tex(st.icon),
+        styleName = st.name or "", styleLine = "PILOT'S OWN STYLE · 3 TRAITS", styleDesc = st.short or st.desc or "",
+        traits = traits, signature = sigText, name = e.name or "",
+        counter = string.format("%s / %d", i and tostring(i) or "-", n or 0),
+        roster = rosterVm(pl), cursor = (pl.row.pilot or 0) >= 1,
+    }
+end
+
+local function vehicleVm(pl, e, live)
+    local s = S()
+    local models = V.models(s.arch)
+    local mi, _, m = V.modelOf(s.arch, pl.presetId)
+    local pr = V.presetById(s.arch, pl.presetId)
+    local v = {
+        fallback = classArt(), badge = m and m.badge or nil, code = m and m.code or nil,
+        driver = { thumb = e.thumb, name = e.name },
+        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, s.arch),
+        model = m and m.name or "?", counter = string.format("%d / %d", mi or 0, #models),
+        modelRow = "MODEL: " .. (m and m.name or "?"), liveryRow = "LIVERY: " .. (pr and pr.livery or "STANDARD"),
+        info = infoLine(m), cursor = pl.row.vehicle or 0,
+    }
+    if live then v.brush, v.brushKind, v.dim = brushOf(pl) end
+    return v
+end
+
+local function perksVm(pl, style)
+    local s = S()
+    local Km = K()
+    local board = Km.board(pl.lo, s.arch, style)
+    local slots = Km.slots(s.arch)
+    local r = pl.row.perks or 0
+    local pk = pl.picker
+    local cursor = pk and pk.slot or ((r >= 1) and slots[r] or nil)
+    -- the detail panel follows the slot (or the picker row) under the cursor; on the strip, the stage's last row
+    local itemId = nil
+    if pk and pk.sel >= 1 and pk.items[pk.sel] then itemId = pk.items[pk.sel].id end
+    local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, s.arch, itemId, style)
+    if d.costId then
+        local c = abilityCost(d.costId)
+        if c then d.tag = (d.tag or "") .. " · COST " .. tostring(c) end
+    end
+    board.cursor, board.detail = cursor, d
+    if pk then
+        local cat = pk.cats[pk.cat] or {}
+        board.picker = { catName = cat.name, catIcon = cat.icon,
+                         counter = string.format("%d / %d", math.max(1, pk.sel), #pk.items), rows = pk.items,
+                         cursor = pk.sel }
+    end
+    return board
+end
+
+local function readyVm(pl, e, style, live)
+    local s = S()
+    local Km = K()
+    local board = Km.board(pl.lo, s.arch, style)
+    local sum = Km.summary(pl.lo, s.arch)
+    local _, _, m = V.modelOf(s.arch, pl.presetId)
+    local rows
+    if pl.isP1 then
+        rows = { s.allReady and "START RACE · ALL READY" or "START RACE", "SAVE AND RETURN" }
+    else
+        rows = { "READY · WAITING FOR P1" }
+    end
+    local rp = {
+        fallback = classArt(),
+        figure = { full = e.full, crop = P().crop(e, widthClass()), backdrop = backdropOf(style) },
+        line = (e.name or "?") .. " · " .. (m and m.name or "?"), styleName = board.style and board.style.name or "",
+        strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, style = board.style and board.style.icon,
+                  traits = board.traits },
+        totals = sum.totals, rows = rows, cursor = pl.row.ready or 0,
+        -- §2.6: everybody READY -> P1's START row pulses (cards.tick animates it)
+        pulse = (pl.isP1 and s.allReady == true and opt("CardStartPulse", true) ~= false) or nil,
+    }
+    if live then rp.brush, rp.brushKind, rp.dim = brushOf(pl) end
+    return rp
+end
+
+-- One card's view model. live = false (dump): no vpreview brush is made.
+local function buildVm(pl, now, live)
+    local s = S()
+    local e = P().byId(pl.pilotId) or {}
+    local style = pilotStyle(pl)
+    local list = stageList()
+    local r = pl.row[pl.stage] or 1
+    local vm = {
+        pnum = pl.pnum, colour = colourOf(pl.pnum), isP1 = pl.isP1, view = pl.view, ready = pl.stage == "ready",
+        header = { pilotName = e.name or "", thumb = e.thumb },
+        strip = { stages = list, current = indexOf(list, pl.stage) or 1, cursor = r == 0 and not pl.picker },
+        stage = pl.stage, hint = hintsFor(pl), toast = (pl.toast and now < pl.toastUntil) and pl.toast or nil,
+    }
+    if pl.stage == "pilot" then vm.pilot = pilotVm(pl, e, style)
+    elseif pl.stage == "vehicle" then vm.vehicle = vehicleVm(pl, e, live)
+    elseif pl.stage == "perks" then vm.perks = perksVm(pl, style)
+    else vm.readyPanel = readyVm(pl, e, style, live) end
+    return vm
+end
+
+---------------------------------------------------------------------------------------------------- poll parts (§5.7.4)
+-- 4. toasts, P1's back window, the ALL READY state (P1's START row and the status line).
+local function timers(now)
+    local s = S()
+    local all = #s.order > 0
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl then
+            if pl.toast and now >= pl.toastUntil then pl.toast = nil; markDirty(pl, now) end
+            if pl.backArmUntil > 0 and now >= pl.backArmUntil then pl.backArmUntil = 0 end
+            if pl.stage ~= "ready" then all = false end
+        end
+    end
+    if all ~= s.allReady then
+        s.allReady = all
+        markDirty(p1Player(), now)
+        if all and #s.order > 1 then U.log(TAG, "all %d players READY (P1: A TO START) (V-RC-18)", #s.order) end
+    end
+end
+
+-- 5. previews: VEHICLE spins, PERKS / READY stills, PILOT a still prebuild of the pick once the pilot was unchanged
+-- SetupPreviewPrebuildMs (VERIFY(V-RC-10): "bay n ready" before the step to VEHICLE); then vpreview's tick, whose
+-- changed bays re-render their cards.
+local function previews(now)
+    local s = S()
+    local vp = VP()
+    if not vp then return end
+    local prebuild = num("SetupPreviewPrebuildMs", 600)
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl then
+            U.tryEvery("racers.preview", nil, TAG, function()
+                if pl.stage == "pilot" and not (prebuild > 0 and now - pl.pilotAt >= prebuild) then return end
+                local pr = V.presetById(s.arch, pl.presetId)
+                if pr then vp.want(c + 1, pr, s.cls) end
+                vp.setMode(c + 1, vp.stageMode(pl.stage))
+            end)
+        end
+    end
+    local ok, changed, keys = U.tryEvery("racers.vptick", nil, TAG, vp.tick)
+    if ok and changed and type(keys) == "table" then
+        for key in pairs(keys) do markDirty(s.players[key - 1], now) end
+    end
+end
+
+-- 7. up to CardRendersPerTick dirty cards, oldest first: view model (with this tick's brush) -> cards.render. A
+-- render that waits for the build budget stays dirty (its next render carries a fresh brush).
+local function renders(now)
+    local s = S()
+    local list = {}
+    for i, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl and pl.dirty then list[#list + 1] = { i = i, pl = pl } end
+    end
+    if #list == 0 then return end
+    table.sort(list, function(a, b)
+        if a.pl.dirtyAt ~= b.pl.dirtyAt then return a.pl.dirtyAt < b.pl.dirtyAt end
+        return a.i < b.i
+    end)
+    local cd = CD()
+    for k = 1, math.min(#list, math.max(1, floor(num("CardRendersPerTick", 2)))) do
+        local e = list[k]
+        e.pl.dirty = false                       -- a render error waits for the next change, not every tick
+        U.tryEvery("racers.render", nil, TAG, function()
+            local done = cd.render(e.i, buildVm(e.pl, now, true))
+            if not done then e.pl.dirty, e.pl.dirtyAt = true, now end
+        end)
+    end
+end
+
+-- Join hints (§2.6): connected pads that did not join (join.dormantList), refreshed once a second.
+local function dormantHint(now)
+    local s = S()
+    if now < s.dormantAt then return s.dormant end
+    s.dormantAt = now + DORMANT_MS
+    local list = {}
+    pcall(function() list = U.mod("join").dormantList() end)
+    local byButton = { A = {}, START = {} }
+    for _, d in ipairs(list) do
+        local startOnly = cfg.JoinButtons == "start" or (d.ctrlId == 1 and kbP1())   -- join.lua startOnlyFor
+        local t = byButton[startOnly and "START" or "A"]
+        t[#t + 1] = (tostring(d.label or ""):gsub("^PAD ", ""))
+    end
+    local parts = {}
+    for _, b in ipairs({ "A", "START" }) do
+        local nums = byButton[b]
+        if #nums == 1 then
+            parts[#parts + 1] = string.format("PAD %s: PRESS %s TO JOIN", nums[1], b)
+        elseif #nums > 1 then
+            parts[#parts + 1] = string.format("PADS %s: PRESS %s TO JOIN", table.concat(nums, ", "), b)
+        end
+    end
+    s.dormant = (#parts > 0) and table.concat(parts, "   ·   ") or nil
+    return s.dormant
+end
+
+-- §2.9 status line under the footer: "P1 PILOT · P2 PERKS · P3 READY" or "ALL READY · P1: A TO START", the join hint
+-- appended. A status of another module (START gate, joins, errors) holds the line for STATUS_HOLD_MS.
+local function statusText(now)
+    local s = S()
+    local parts, all = {}, #s.order > 0
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl then
+            parts[#parts + 1] = nameOf(pl) .. " " .. (STAGE_WORD[pl.stage] or "?")
+            if pl.stage ~= "ready" then all = false end
+        end
+    end
+    local t = all and "ALL READY · P1: A TO START" or table.concat(parts, " · ")
+    local d = dormantHint(now)
+    if d then t = t .. "   ·   " .. d end
+    return t
+end
+
+local function statusTick(now)
+    local s = S()
+    if now < s.statusHoldUntil or now < s.statusAt then return end
+    s.statusAt = now + STATUS_MS
+    local t = statusText(now)
+    if t ~= s.statusText then
+        s.statusText = t
+        pcall(function() setupM().setStatus(t) end)
+    end
+end
+
+St.on("status", TAG, function()
+    local s = St.racers
+    if type(s) == "table" and s.active then
+        s.statusHoldUntil, s.statusText = nowMs() + STATUS_HOLD_MS, nil
+    end
+end)
+
+-- RC-9: the class roster's head shots and full bodies queued at low priority (cards.lua loads one big texture a tick).
+local function prefetch()
+    local cd = CD()
+    for _, e in ipairs(P().list(S().arch)) do
+        cd.tex(e.thumb)
+        cd.tex(e.full)
+    end
+end
+
+---------------------------------------------------------------------------------------------------- API (§5.7.1)
+-- setup.buildWidgets, once per page: cards.init (four collapsed card slots in ctx.row) + P1's sink in ctx.sinkHost.
+-- ctx = {tree, pc, newW, row, sinkHost, realMs [, footer = {back, save, start}]}. Raises (setup's pcall) or returns
+-- false when the cards are unusable: that page keeps the classic columns. VERIFY(V-RC-01)
+function M.build(ctx)
+    if type(ctx) ~= "table" then error("racers.build: no context") end
+    local s = S()
+    local t0 = St.nowMs()
+    s.built = false
+    CD().init(ctx)
+    s.ctx = ctx
+    s.sink = buildSink(ctx)
+    s.p1.ringAt = nil
+    wireSink(s.sink, inputMode())
+    s.built = true
+    U.log(TAG, "built (4 card slots, P1 sink %s, %.1f ms) (V-RC-01)", tostring(s.sink.wired), St.nowMs() - t0)
+    return true
+end
+
+-- setup.showStep("vehicles") in the cards flow: the players, their cards and previews; returns P1's focus target (the
+-- sink). A new visit (the first enter since setup opened) starts every card at the first stage with the remembered
+-- picks; MODE and back in the same class keeps every card's stage, rows and READY; a class change restarts every card
+-- (the pilot kept when the class allows it, §2.7).
+function M.enter(cls, planet)
+    local s = S()
+    if not s.built or type(cls) ~= "table" then return nil end
+    local now = nowMs()
+    local newVisit = s.visit == nil
+    local classChange = s.arch ~= nil and s.arch ~= cls.arch
+    s.cls, s.arch, s.planet = cls, cls.arch, planet
+    s.visit = s.visit or { at = now }
+    s.active, s.action, s.inPoll, s.lastPollAt = true, nil, false, nil
+    s.p1.acceptAt, s.p1.leaking, s.p1.held, s.p1.keepNext = nil, false, false, 0
+    -- an earlier visit's stamps go: setup.realMs restarts with each world when it falls back to the world's real time
+    -- (state.lua clock on os.clock), and a stamp "in the future" would mute the sounds and drop P1's sink directions
+    s.soundAt = -1e9
+    s.p1.lastKbMs, s.p1.kbAcceptMs, s.p1.lastDirMs, s.p1.lastKeyMs = -1e9, -1e9, -1e9, -1e9
+    s.persisted, s.classInfo, s.allReady = nil, {}, nil
+    s.statusText, s.statusAt, s.statusHoldUntil, s.dormantAt, s.reconcileAt = nil, 0, 0, -1e9, now + RECONCILE_MS
+    -- RC-2: the class's ramjet / critical-malfunction flags reach perks.lua before any loadout is built
+    U.try(TAG, function() PA().systems(cls.arch) end)
+    U.try(TAG, reconcile, newVisit and "new visit" or (classChange and "class change" or "same visit"), newVisit, now)
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        pl.nav.primed = false                    -- the guests' first poll is the baseline (the press that got here)
+        markDirty(pl, now)
+    end
+    pcall(function() CD().layout(#s.order) end)
+    U.try(TAG, prefetch)
+    if s.sink then U.try(TAG, wireSink, s.sink, inputMode()) end
+    -- VERIFY(V-RC-31): after a split race (menu owned by the last local PC) P1's pad still drives P1's card
+    local owner, isP1 = "?", false
+    pcall(function()
+        if not U.ok(s.ctx.pc) then return end              -- a stored wrapper: U.ok before any member (ARCH 0.7.0 #8)
+        owner = s.ctx.pc:GetFName():ToString()
+        isP1 = U.same(s.ctx.pc, U.p1())
+    end)
+    U.log(TAG, "enter %s (%s, %d player(s)); page owner %s (%s) (V-RC-31)", tostring(cls.key),
+        newVisit and "new visit" or (classChange and "class change" or "same visit"), #s.order, owner,
+        isP1 and "P1" or "NOT P1")
+    return target()
+end
+
+-- Another step, close or START (why "step <x>" keeps the visit; anything else ends it: the next open starts at
+-- PILOT, READY never survives a re-open). Polling stops; the render images let go of the targets, then the bays go.
+function M.leave(why)
+    local s = S()
+    why = tostring(why or "?")
+    local was = s.active
+    s.active, s.action, s.inPoll = false, nil, false
+    s.p1.acceptAt = nil
+    if not why:match("^step ") then s.visit = nil end
+    if not was then return end
+    pcall(function() CD().releaseRenders(nil) end)
+    local vp = VP()
+    if vp then U.try(TAG, vp.releaseAll, "racers: " .. why, true) end
+    U.log(TAG, "left (%s)%s", why, s.visit and "" or ": the visit ended")
+end
+
+-- The page died (menu replaced): every widget reference goes (its images died with it); picks stay in memory.
+function M.forget()
+    local s = S()
+    s.active, s.built, s.visit, s.sink, s.ctx, s.action = false, false, nil, nil, nil, nil
+    s.p1.acceptAt, s.p1.ringAt = nil, nil
+    for _, pl in pairs(s.players) do pl.pc = nil end
+    local vp = VP()
+    if vp then U.try(TAG, vp.releaseAll, "racers: menu replaced", false) end
+    pcall(function() CD().forget() end)
+end
+
+-- FAST (setup.pollNav, lobby not covered): §5.7.4 in order, each block guarded; one bad player never stops the others.
+function M.poll(p1)
+    local s = S()
+    if not s.active then return end
+    local now = nowMs()
+    if now - (s.lastPollAt or now) > POLL_GAP_MS then
+        -- the lobby was covered (the game's "Exit Game?" prompt, another page): what the pads did meanwhile is no edge,
+        -- and a sink click queued before the gap is stale
+        for _, c in ipairs(s.order) do
+            local pl = s.players[c]
+            if pl then pl.nav.primed = false end
+        end
+        s.p1.acceptAt = nil
+        U.dbg(TAG, "poll resumed after %d ms: pads re-baselined", floor(now - s.lastPollAt))
+    end
+    s.lastPollAt = now
+    s.inPoll = true
+    if now >= s.reconcileAt then                 -- the "players" event is the path; this is the safety net
+        s.reconcileAt = now + RECONCILE_MS
+        U.tryEvery("racers.players", nil, TAG, reconcile, "poll", false, now)
+    end
+    -- 1. guests' pads
+    for i = 2, #s.order do
+        local pl = s.players[s.order[i]]
+        if pl then U.tryEvery("racers.guest", nil, TAG, pollGuest, pl, now) end
+    end
+    -- 2. P1's sink focus
+    if U.ok(p1) then U.tryEvery("racers.sink", nil, TAG, pollSink, p1, now) end
+    -- 3. P1's queued accept (held one tick: this tick's guest A edges are known)
+    U.tryEvery("racers.accept", nil, TAG, p1Accept, now)
+    s.inPoll = false
+    flushAction()
+    if not s.active then return end              -- START / SAVE / MODE left the step
+    -- 4. timers
+    U.tryEvery("racers.timers", nil, TAG, timers, now)
+    -- 5. previews
+    U.tryEvery("racers.previews", nil, TAG, previews, now)
+    -- 6. cards: texture queue, deferred panels, START pulse
+    U.tryEvery("racers.cards", nil, TAG, function() CD().tick() end)
+    -- 7. renders
+    U.tryEvery("racers.renders", nil, TAG, renders, now)
+    -- 8. status line
+    U.tryEvery("racers.status", nil, TAG, statusTick, now)
+end
+
+-- setup.keepFocus (lobby not covered): P1's focus back on the sink every KEEP_MS while P1 uses a pad and it is
+-- elsewhere (mouse, modal, menu re-activation, R3).
+function M.keepFocus()
+    local s = S()
+    if not s.active or not s.sink then return end
+    local now = nowMs()
+    if now < s.p1.keepNext then return end
+    s.p1.keepNext = now + KEEP_MS
+    if not p1Gamepad() then return end
+    local p1 = U.p1()
+    if not U.ok(p1) or sinkHolds(p1) then return end
+    local t = target()
+    if U.ok(t) then ui().focus(t, p1) end
+end
+
+-- Keyboard (keyq -> lobby.onKey -> setup.onKey, game thread): arrows = P1's directions, Enter / Space = P1's accept
+-- unless a sink or footer button holds P1's focus (CommonUI clicks it itself: M.onSinkClick), Backspace ("back2") =
+-- P1's back. Every key stamps lastKbMs: the CommonUI move an arrow also makes is then no sink event.
+-- VERIFY(V-RC-03): Enter = 1 accept, Backspace = back.
+function M.onKey(name)
+    local s = S()
+    if not s.active then return end
+    local pl = p1Player()
+    if not pl then return end
+    local now = nowMs()
+    local p = s.p1
+    if name == "accept" then
+        p.lastKbMs, p.kbAcceptMs = now, now
+        local p1 = U.p1()
+        if sinkHolds(p1) or footerHolds(p1) then return end
+        dispatch(pl, "accept", false, "key", now)
+    elseif name == "back2" then
+        p.lastKbMs = now
+        dispatch(pl, "back", false, "key", now)
+    elseif name == "up" or name == "down" or name == "left" or name == "right" then
+        p.lastKbMs = now
+        local rep = p.lastKey == name and now - p.lastKeyMs < REPEAT_MS
+        p.lastKey, p.lastKeyMs = name, now
+        dispatch(pl, name, rep, "key", now)
+    end
+    flushAction()
+end
+
+-- setup.pollP1Back: P1's B on its own PlayerController (after a race; never with KeyboardIsP1). From now on P1's hints
+-- show B. VERIFY(V-RC-08): after a race the hints switch to B.
+function M.onP1Back()
+    local s = S()
+    if not s.active then return end
+    local pl = p1Player()
+    if not pl then return end
+    local now = nowMs()
+    if not s.p1.sawB then
+        s.p1.sawB = true
+        U.log(TAG, "P1's B seen on its PlayerController: P1's hints show B from now on (V-RC-08)")
+    end
+    markDirty(pl, now)
+    dispatch(pl, "back", false, "padB", now)
+    flushAction()
+end
+
+-- ui.pollClicks (opts.noClaim) for any of the five sink buttons. The accept waits one FAST tick (p1Accept). Ignored:
+-- KeyboardIsP1 with pad input (pad 1 is guest 1 and still Slate user 0, R4), and RC-6 a click in mouse + keyboard mode
+-- without an Enter / Space keybind just before (a mouse click on the invisible sink area).
+function M.onSinkClick(w)
+    local s = S()
+    if not s.active then return end
+    local now = nowMs()
+    local pad = p1Gamepad()
+    if pad and kbP1() then
+        U.logEvery("racers.kbp1click", 5000, TAG, "sink click ignored: KeyboardIsP1 and pad input (pad 1's A is guest "
+            .. "1's) (V-RC-07)")
+        return
+    end
+    if not pad and now - s.p1.kbAcceptMs > KB_ACCEPT_MS then
+        U.logEvery("racers.mouseclick", 2000, TAG, "P1 sink click ignored: mouse (no Enter / Space within %d ms) "
+            .. "(V-RC-30)", KB_ACCEPT_MS)
+        return
+    end
+    s.p1.acceptAt, s.p1.clicked = now, true      -- clicked: the sink works (never "inactive")
+end
+
+-- Joins and leaves while the step shows (lobby's "players" listener -> setup.onPlayers).
+function M.onPlayers()
+    local s = S()
+    if not s.active then return end
+    U.try(TAG, reconcile, "players", false, nowMs())
+end
+
+-- [extension] setup.onPageShown (the page came back, e.g. from Settings): every card cache cleared and re-rendered
+-- (a Slate rebuild may reset BP-applied colours, V-RC-06), a new still burst for every still bay (RC-12). Returns the
+-- focus target.
+function M.onPageShown()
+    local s = S()
+    if s.active then
+        pcall(function() CD().clearCaches() end)
+        local vp = VP()
+        if vp then U.try(TAG, vp.recapture, "page shown") end
+        local now = nowMs()
+        for _, c in ipairs(s.order) do markDirty(s.players[c], now) end
+    end
+    return target()
+end
+
+-- [extension] P1's focus target (the sink's centre; ring: the last focused button).
+function M.sink() return target() end
+
+-- [extension] The LastRaceRacers parser for setup.deriveSetup: text -> {[ctrlId] = {pilot, preset, code}}.
+M.parseRacers = parseRacers
+
+-- The single mutator, for tests (test.cmd: require("racers").event(2, "right")): who = pnum (1..4) | "c<ctrlId>";
+-- ev = up | down | left | right | accept | back; rep = an auto-repeat. -> true when the card changed.
+function M.event(who, ev, rep, src)
+    local s = S()
+    if not s.active then return false end
+    local pl = nil
+    if type(who) == "number" then
+        pl = s.players[s.order[who] or -1]
+    elseif type(who) == "string" then
+        local c = tonumber(who:match("^c(%d+)$"))
+        pl = c and s.players[c] or nil
+    end
+    if not pl then return false end
+    local ok, r = U.try(TAG, dispatch, pl, ev, rep == true, src or "test", nowMs())
+    flushAction()
+    return ok and r == true
+end
+
+-- setup.finish's START gate: allReady = every joined guest is on READY; waiting = {"P2", ...} (§2.6).
+function M.readyState()
+    local s = S()
+    local waiting = {}
+    for i = 2, #s.order do
+        local pl = s.players[s.order[i]]
+        if pl and pl.stage ~= "ready" then waiting[#waiting + 1] = nameOf(pl) end
+    end
+    return #waiting == 0, waiting
+end
+
+-- setup.makeChoice: {[pnum] = {ctrlId, pilotId, presetId, buildPath, loadout = lo (a copy), code}}. buildPath = the
+-- class's zero base build (LastRaceVehicles keeps its format for the classic flow).
+function M.choicePlayers()
+    local s = S()
+    local out = {}
+    if s.arch == nil then return out end
+    local base = nil
+    pcall(function() base = PA().basePath(s.arch) end)
+    local Km = K()
+    for i, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl and pl.arch == s.arch and pl.lo then
+            out[i] = { ctrlId = c, pilotId = pl.pilotId, presetId = pl.presetId, buildPath = base,
+                       loadout = Km.copy(pl.lo), code = Km.encode(pl.lo) }
+        end
+    end
+    return out
+end
+
+-- setup.persistExtras (SAVE / START): settings LastRaceRacers per ControllerId (§7.1). A pad not in this race keeps its
+-- entry. VERIFY(V-RC-25): SAVE + reopen and quit + relaunch restore every pad's picks.
+function M.persist(c)
+    if settings.get(KEY_RACERS) == nil then return end   -- an older config without the key: nothing is saved
+    local players = type(c) == "table" and type(c.setup) == "table" and c.setup.players or nil
+    local hasIds = false
+    for _, p in pairs(type(players) == "table" and players or {}) do
+        if type(p) == "table" and tonumber(p.ctrlId) then hasIds = true end
+    end
+    if not hasIds then players = M.choicePlayers() end
+    local entries = parseRacers(settings.get(KEY_RACERS))
+    local saved = {}
+    for _, p in pairs(players) do
+        local cid = type(p) == "table" and tonumber(p.ctrlId) or nil
+        if cid and type(p.pilotId) == "string" and type(p.presetId) == "string" then
+            local code = p.code
+            if type(code) ~= "string" and type(p.loadout) == "table" then code = K().encode(p.loadout) end
+            entries[cid] = { pilot = p.pilotId, preset = p.presetId, code = code }
+            saved[#saved + 1] = tostring(cid)
+        end
+    end
+    local ids = {}
+    for cid in pairs(entries) do ids[#ids + 1] = cid end
+    table.sort(ids)
+    local parts = {}
+    for _, cid in ipairs(ids) do
+        local e = entries[cid]
+        if e.pilot and e.preset then
+            parts[#parts + 1] = string.format("%d=%s@%s@%s", cid, e.pilot, e.preset, e.code or "")
+        end
+    end
+    local text = table.concat(parts, ";")
+    settings.set(KEY_RACERS, text)
+    S().persisted = nil
+    table.sort(saved)
+    U.log(TAG, "LastRaceRacers saved for ControllerId %s (%d pad(s) on file) (V-RC-25)", table.concat(saved, ", "), #parts)
+    U.dbg(TAG, "LastRaceRacers = %s", text)
+end
+
+-- setup.preselect (setup.open with a new race choice): seeds the session memory from c.setup (St.race.choice) or from
+-- setup.deriveSetup (settings): src = {arch | classKey, players = {[pnum] = {ctrlId, pilotId, presetId, loadout | code}}}.
+-- A classic choice (no ControllerIds) seeds P1's preset only.
+function M.restore(src)
+    if type(src) ~= "table" or type(src.players) ~= "table" then return end
+    local arch = tonumber(src.arch)
+    if arch == nil and src.classKey then
+        local cls = V.classByKey(src.classKey)
+        arch = cls and cls.arch or nil
+    end
+    if arch == nil then return end
+    local Pm, Km = P(), K()
+    local n = 0
+    for pnum, p in pairs(src.players) do
+        local cid = type(p) == "table" and tonumber(p.ctrlId) or nil
+        if cid == nil and tonumber(pnum) == 1 and type(p) == "table" then cid = 0 end
+        if cid then
+            local m = memOf(cid)
+            if type(p.pilotId) == "string" and Pm.byId(p.pilotId) then m.pilot[arch] = p.pilotId end
+            if type(p.presetId) == "string" and V.presetById(arch, p.presetId) then m.preset[arch] = p.presetId end
+            local style = Pm.styleKey(m.pilot[arch] or p.pilotId, arch)
+            local lo = nil
+            if type(p.loadout) == "table" then
+                lo = Km.validate(p.loadout, arch, style)
+            elseif type(p.code) == "string" and p.code ~= "" then
+                local why
+                lo, why = Km.decode(p.code, arch, style)
+                if not lo then
+                    U.logOnce("racers.decode." .. cid, TAG, "pad %d: loadout not decodable (%s)", cid, tostring(why))
+                end
+            end
+            if type(lo) == "table" then m.lo = lo end
+            n = n + 1
+        end
+    end
+    U.log(TAG, "picks of %d pad(s) restored for archetype %d (V-RC-25)", n, arch)
+end
+
+-- One line for diag / test.cmd.
+function M.status()
+    local s = S()
+    local parts = {}
+    for _, c in ipairs(s.order) do
+        local pl = s.players[c]
+        if pl then
+            local r = pl.row[pl.stage]
+            local where = pl.picker and string.format("picker %s %d/%d", pl.picker.slot, pl.picker.sel, #pl.picker.items)
+                or ((r == 0) and "strip" or ("row " .. tostring(r)))
+            parts[#parts + 1] = string.format("%s c%d %s %s %s/%s/kit %s", nameOf(pl), c, STAGE_WORD[pl.stage] or "?",
+                where, shortId(pl.pilotId), tostring(pl.presetId), tostring(pl.lo and pl.lo.kit))
+        end
+    end
+    local p = s.p1
+    local cards = "cards ?"
+    pcall(function() cards = CD().status() end)
+    return string.format("racers %s%s: %s | P1 input %s (sink events %d, drops %d, leaks %d, B seen %s) | %s",
+        s.active and "on" or "off", s.cls and (" " .. tostring(s.cls.key)) or "",
+        (#parts > 0) and table.concat(parts, "; ") or "no players", s.sink and tostring(s.sink.wired) or "none",
+        p.sinkEvents, p.drops, p.leaks, tostring(p.sawB), cards)
+end
+
+-- Text dump of a value: sorted keys, object paths shortened to their asset name, depth-limited.
+local function ser(v, depth)
+    local t = type(v)
+    if t == "string" then
+        local short = v:match("^/[%w_/]+%.([%w_]+)$")
+        return string.format("%q", short or v)
+    end
+    if t == "number" or t == "boolean" or t == "nil" then return tostring(v) end
+    if t ~= "table" then return "<" .. t .. ">" end
+    if depth <= 0 then return "{...}" end
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b)
+        if type(a) ~= type(b) then return type(a) == "number" end
+        return a < b
+    end)
+    local out = {}
+    for _, k in ipairs(keys) do
+        out[#out + 1] = ((type(k) == "number") and ("[" .. k .. "]") or tostring(k)) .. " = " .. ser(v[k], depth - 1)
+    end
+    return "{" .. table.concat(out, ", ") .. "}"
+end
+
+-- test.cmd: the view model a card would get now (no 3D brush is made), as text. who as in M.event (default P1).
+function M.dump(who)
+    local s = S()
+    local pl = nil
+    if type(who) == "string" then
+        local c = tonumber(who:match("^c(%d+)$"))
+        pl = c and s.players[c] or nil
+    else
+        pl = s.players[s.order[tonumber(who) or 1] or -1]
+    end
+    if not pl or not pl.stage then return "racers: no such player" end
+    local ok, vm = pcall(buildVm, pl, nowMs(), false)
+    if not ok then return "racers: view model failed: " .. tostring(vm) end
+    return ser(vm, 6)
+end
+
+-- The module state (St.racers) for diag / test.cmd.
+function M.state() return S() end
+
+return M

@@ -444,7 +444,7 @@ function menu_tab.install(menu)
         sched.after("tab", 250, attempt)
       else
         returnPending = false
-        U.warn(TAG, "return to the SPLIT SCREEN tab dropped: phase %s, menu %s", tostring(St.phase),
+        U.warn(TAG, "return to the FREE MODE tab dropped: phase %s, menu %s", tostring(St.phase),
           isStale(St.menu.widget) and "missing" or "ok")
         if tabOpen then
           -- pollTab kept the session open (pages hidden) for this return: pair its "tab"(true) now
@@ -601,7 +601,7 @@ function menu_tab.onTabSelected(menu, id)
       St.emit("tab", true)
     else
       -- No "tab"(true): join.open would create dormant guests that no "tab"(false) would ever close.
-      St.emit("status", "SPLIT SCREEN PAGE UNAVAILABLE")
+      St.emit("status", "FREE MODE PAGE UNAVAILABLE")
     end
     St.menu.prevTabId = id
     return
@@ -630,7 +630,7 @@ function menu_tab.onTabSelected(menu, id)
   if id == "MainMenu_Multiplayer" and #U.localPlayers() > 1 then
     U.warn(TAG, "Multiplayer tab with %d split-screen guest(s) alive: they would join online sessions as extra "
       .. "players; restart the game before online play", #U.localPlayers() - 1)
-    St.emit("status", "RESTART THE GAME BEFORE ONLINE PLAY (SPLIT-SCREEN PADS ACTIVE)")
+    St.emit("status", "RESTART THE GAME BEFORE ONLINE PLAY (EXTRA PADS ACTIVE)")
   end
 end
 

@@ -410,7 +410,10 @@ local function buildNativeCfg(players)
         if a ~= 0 then lines[#lines + 1] = string.format("p %d 0x%x", p.ctrlId, a) end
     end
     for _, w in pairs(S.native.writes) do
-        lines[#lines + 1] = string.format("wo %d 0x%x 0x%x", w.tag, w.dst, w.obj)
+        -- 0.10.0: a car destroyed before the DLL applied its copy would leave a write into freed memory
+        if w.car == nil or U.ok(w.car) then
+            lines[#lines + 1] = string.format("wo %d 0x%x 0x%x", w.tag, w.dst, w.obj)
+        end
     end
     return table.concat(lines, "\n") .. "\n"
 end
@@ -439,7 +442,9 @@ local function loadNative(players)
     if ok and r1 then
         S.native.loaded = true
         local st = readNativeStatus()
-        U.log(TAG, "native filter loaded: installed=%s reason=%s", tostring(st.installed), tostring(st.reason))
+        -- 0.10.0: the DLL knows game builds CL381121 and CL382493 (hotfix) and reports the one it matched  V-INP-10
+        U.log(TAG, "native filter loaded: installed=%s reason=%s build=%s", tostring(st.installed), tostring(st.reason),
+            tostring(st.build))
         if st.installed ~= "1" then
             U.warn(TAG, "native filter did not patch (%s): falling back to kbsplit", tostring(st.reason))
         end
@@ -552,7 +557,7 @@ local function bindCar(p)
         local t = os.time() * 1000 + (S.native.wTag % 1000) + 1
         if t <= S.native.wTag then t = S.native.wTag + 1 end
         S.native.wTag = t
-        w = { tag = t, dst = U.key(comp) + 0xc0, obj = p.subKey, atMs = now }
+        w = { tag = t, dst = U.key(comp) + 0xc0, obj = p.subKey, atMs = now, car = p.car }
         S.native.writes[carKey] = w
         S.native.seq = S.native.seq + 1
         U.log(TAG, "car %s (ControllerId %d): reads %s @0x%x, own is %s @0x%x: native weak-pointer copy requested (tag %d)",

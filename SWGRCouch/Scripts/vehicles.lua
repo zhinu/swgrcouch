@@ -23,6 +23,8 @@
 --   2D card stays the fallback) plus the model's manufacturer badge (M.badge, TH_<Model>.Thumbnail decoded).
 --   SpawnFrontEndVehicle itself stays unused (one vehicle per tag, sets owned by the game's own screens); the
 --   IconPaletteTag/IconMaskTag path is the livery decal, not a UI icon (dead end, vehicle-preview.md §2).
+--   0.10.0 RACERS step (notes/design/vehicle-step-v2.md §3.4, §4.2): the VEHICLE stage picks a base MODEL, then a
+--   LIVERY of it: M.models groups the presets by base model, M.podName gives a pod its own name (Pvp_IA_Plane_*).
 
 local C   = require("consts")
 local cfg = require("config")
@@ -218,6 +220,11 @@ function M.presets(arch)
             classPath = dir .. id .. "." .. id .. "_C",  -- the generated class (FRecipeRacerSetup.VehicleCustomisation)
         }
     end
+    -- LIVERY row label (RACERS step): the owner ("ARY QUILL", pods "AGED"), the preset's own name when its model has
+    -- several owner-less presets ("MYTH P2"), else "STANDARD".
+    local plain = {}   -- base -> owner-less presets
+    for _, p in ipairs(out) do if not p.owner then plain[p.base] = (plain[p.base] or 0) + 1 end end
+    for _, p in ipairs(out) do p.livery = p.owner or ((plain[p.base] or 0) > 1 and p.name) or "STANDARD" end
     presetCache[arch] = out
     return out
 end
@@ -232,6 +239,73 @@ end
 function M.presetById(arch, id)
     for _, p in ipairs(M.presets(arch)) do if p.id == id then return p end end
     return nil
+end
+
+---------------------------------------------------------------------------------------------------- models
+-- RACERS step (vehicle-step-v2.md §3.4, §4.2): MODEL row = the base models of the class, LIVERY row = the presets of
+-- the current model. Pod names = the titles of the pods' PlaneInstantAction racer styles (Pvp_IA_Plane_<Veg>
+-- descriptions, decoded 2026-10-09, pilot-select.md §2.2); Myth and Northropi have none.
+local POD_NAME = {
+    Cretornis = "VULPTEREEN 327", Hexing = "CUSTOM ORD PEDROVIA", Sordes = "IPG-X1131 LONGTAIL",
+    Nesodon = "PLUG-F MAMMOTH", Dearc = "BT310 QUADRA", Tarchia = "EXELBROK XL 5115",
+}
+
+-- "Cretornis" -> "VULPTEREEN 327"; nil for every other base model.
+function M.podName(base)
+    return type(base) == "string" and POD_NAME[base] or nil
+end
+
+-- {{base = "Orca", name = "ORCA", presets = {<M.presets entries>}, badge = path | nil, code = "CRE" | nil,
+-- maker = "ROBOTIC" | nil, podName = "VULPTEREEN 327" | nil}, ...}: M.presets(arch) grouped by base model in
+-- first-appearance order (Car 13 = 12 + ANTAGONIST, Bike 12, Skimmer 12, Plane 8). Inside a model the owner-less
+-- presets come first (MYTH P1/P2/P3), then the owner liveries (pods: AGED). code = 3-letter model code, set only when
+-- the model has no badge (pods but MYTH, PRE_Car_Antagonist); maker = the badge's maker (Robotic_B -> "ROBOTIC") for
+-- the info line. Cached and shared like M.presets: callers must not modify the tables.
+local modelCache = {}   -- arch -> list
+function M.models(arch)
+    arch = tonumber(arch)
+    if arch == nil then return {} end
+    if modelCache[arch] then return modelCache[arch] end
+    local out, byBase, owned = {}, {}, {}
+    for _, p in ipairs(M.presets(arch)) do
+        local m = byBase[p.base]
+        if not m then
+            local badge, badgeCode = M.badge(p), BADGE[p.base]
+            m = { base = p.base, name = string.upper(p.base), presets = {}, badge = badge,
+                  code = (not badge) and string.upper(p.base:sub(1, 3)) or nil,
+                  maker = badgeCode and string.upper((badgeCode:gsub("_%a+$", ""))) or nil,
+                  podName = M.podName(p.base) }
+            byBase[p.base], owned[p.base] = m, {}
+            out[#out + 1] = m
+        end
+        if p.owner then local o = owned[p.base]; o[#o + 1] = p else m.presets[#m.presets + 1] = p end
+    end
+    for _, m in ipairs(out) do
+        for _, p in ipairs(owned[m.base]) do m.presets[#m.presets + 1] = p end
+    end
+    modelCache[arch] = out
+    return out
+end
+
+-- Model index, livery index and model entry of a preset id; nil when the class has no such preset.
+function M.modelOf(arch, id)
+    for mi, m in ipairs(M.models(arch)) do
+        for li, p in ipairs(m.presets) do
+            if p.id == id then return mi, li, m end
+        end
+    end
+    return nil
+end
+
+-- The preset a MODEL change lands on (§4.2): preferId (the pilot's signature preset) when model mi has it, else the
+-- model's standard livery. nil for a model index out of range.
+function M.modelPreset(arch, mi, preferId)
+    local m = M.models(arch)[tonumber(mi) or 0]
+    if not m then return nil end
+    if preferId then
+        for _, p in ipairs(m.presets) do if p.id == preferId then return p end end
+    end
+    return m.presets[1]
 end
 
 ---------------------------------------------------------------------------------------------------- resolvers
@@ -293,19 +367,31 @@ local function ftextStr(o, field)
 end
 
 -- {name, desc, traits = {"NAME: description", ...}} from the VA asset (FText fields), "" when unreadable.
+-- The archetype texts are rich text for the game's own widgets: <action id="ImprovedSteering"/> is an input glyph
+-- (the game's VEHICLE SELECT draws the X button there), <H1>..</> styles. Plain text blocks showed the markup raw
+-- ("USE <ACTION ID=..."), so: known actions become their pad button, every other tag is dropped.
+local ACTION_LABEL = { improvedsteering = "X" }
+local function plainText(s)
+    if type(s) ~= "string" or s == "" then return "" end
+    s = s:gsub('<action%s+id="([^"]*)"%s*/>', function(id) return ACTION_LABEL[id:lower()] or "the button" end)
+    s = s:gsub("<[^>]*>", "")
+    return (s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+M.plainText = plainText
+
 function M.classInfo(cls)
     local out = { name = cls and cls.label or "?", desc = "", traits = {} }
     local va = M.archetypeObj(cls)
     if not va then return out end
     local n = ftextStr(va, "PlayerFacingName")
     if n ~= "" then out.name = string.upper(n) end
-    out.desc = ftextStr(va, "Description")
+    out.desc = plainText(ftextStr(va, "Description"))
     pcall(function()
         local arr = va.Traits
         local cnt = arr:GetArrayNum()
         for i = 1, math.min(cnt, 3) do
             local t = arr[i]
-            local tn, td = U.str(t.PlayerFacingName), U.str(t.Description)
+            local tn, td = U.str(t.PlayerFacingName), plainText(U.str(t.Description))
             out.traits[#out.traits + 1] = string.upper(tn) .. (td ~= "" and (": " .. td) or "")
         end
     end)

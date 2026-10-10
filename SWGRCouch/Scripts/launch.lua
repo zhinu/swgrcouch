@@ -25,6 +25,15 @@
 -- build (VehicleBuildStateFunctions:SetVehicleBuildStateFromBuildDef(out Struct VehicleBuildState, VehicleBuildDef,
 -- GfnGameInstance, Enum archetype), static); in the race world PlayerVehicleCustomisationComponent:
 -- Client_SetOverrideVehicleRecipe(Class) repeats the human presets (LOADING / PRERACE). All signatures: runtime JMAP.
+--
+-- 0.10.0 RACERS cards flow (notes/design/vehicle-step-v2.md §5.10, §6; perkapply.lua makes the game writes): the plan
+-- carries flow = "cards" and every human's ControllerId, pilot and loadout. start launches on the class's launch base
+-- build with its affix slots raised in memory for the call (perkapply.prepareLaunch; undone right after the call, on a
+-- refusal and at FRONTEND); applyRecipe matches the picks by ControllerId, gives every human his pilot before the AI
+-- class loop (an AI holding a human's pilot gets another one) and writes each human's loadout (perkapply.applyAll);
+-- raceTick runs perkapply's race-world pass (verify, traits, late fallback, seat check). start({acceptDormant = true})
+-- is the race setup's own second START with un-joined pads (RC-1: the setup asked before it closed). The classic flow
+-- (the 0.9.x columns, the dev panel, a choice from settings.txt without RACERS picks) is unchanged.
 
 local C        = require("consts")
 local cfg      = require("config")
@@ -197,10 +206,14 @@ local function opt(name, default)
 end
 
 local function V() return U.mod("vehicles") end
+local function PA() return U.mod("perkapply") end           -- 0.10.0 cards flow: the game writes of the loadouts
 
--- plan = {arch, cls, single, grid ("max"|"native"), maxRacers, players = {[pnum] = {presetId, buildPath}}}.
+-- plan = {arch, cls, single, grid ("max"|"native"), maxRacers, flow ("cards" | "classic" | nil),
+--         players = {[pnum] = {presetId, buildPath}}}; 0.10.0 cards flow: players[pnum] also carry ctrlId, pilotId,
+--         loadout (perks.lua table) and code (its text form).
 -- A choice from the dev panel / settings.txt has no c.setup: setup.deriveSetup makes one (grid = class limit for
--- GMV_Race, so the dev panel gets the full grid too).
+-- GMV_Race, so the dev panel gets the full grid too; flow "cards" with the LastRaceRacers picks when the choice
+-- launches on a cards race's base build).
 function M.plan(choice)
     local s = type(choice) == "table" and choice.setup or nil
     if type(s) ~= "table" then
@@ -210,7 +223,7 @@ function M.plan(choice)
     local arch = tonumber(s.arch)
     if arch == nil then pcall(function() arch = tonumber(choice.archetype.Archetype) end) end
     return { arch = arch, cls = V().classByArch(arch), single = s.single == true, grid = s.grid or "native",
-             maxRacers = tonumber(s.maxRacers), players = s.players or {} }
+             maxRacers = tonumber(s.maxRacers), flow = s.flow, players = s.players or {} }
 end
 
 -- Full grid (user feedback item 9). Humans are inside NumEntrants (2026-10-07 race: GMV_Race "PlayerChoice x5" =
@@ -264,6 +277,72 @@ local function localHumanPS()
             local ps = e.pc.PlayerState
             if U.ok(ps) then out[U.key(ps)] = e.pnum end
         end)
+    end
+    return out
+end
+
+-- 0.10.0 cards flow: key -> {pnum, ctrlId, ps} (P1 = pnum 1, ControllerId 0 as the RACERS step files P1's picks;
+-- joined guests with their pnum and ControllerId). The shape perkapply's assignPilots / applyAll take.
+local function localHumans()
+    local out = {}
+    pcall(function()
+        local ps = U.p1().PlayerState
+        if U.ok(ps) then out[U.key(ps)] = { pnum = 1, ctrlId = 0, ps = ps } end
+    end)
+    for _, e in ipairs(U.mod("join").joinedList()) do
+        pcall(function()
+            local ps = e.pc.PlayerState
+            if U.ok(ps) then out[U.key(ps)] = { pnum = e.pnum, ctrlId = e.ctrlId, ps = ps } end
+        end)
+    end
+    return out
+end
+
+-- 0.10.0 cards flow: every local human's pick under the pnum he has now, so the humans' preset loop below,
+-- assignPilots, applyAll and the in-race override all find it there. Matched by ControllerId first (perkapply.pickFor:
+-- a guest who left between SAVE and START moved the later pads up, "pick of P3 re-mapped by ControllerId 2",
+-- V-RC-26), copied (the race choice keeps its own picks). [extension] A human without a pick (a pad that joined after
+-- the race was chosen, or one with no LastRaceRacers entry) or whose pilot the class does not allow gets a fresh
+-- card's defaults (spec §2.4, §8.2): a free pilot (pilots.defaultFor), its signature vehicle when he had no vehicle
+-- (else vehicles.defaultPresetIndex) and the pilot's style kit (perkapply builds it for a pick without a loadout).
+-- Without that he would race the bare launch base (no ability, no part, every upgrade at 0). -> {[pnum] = pick}
+local function resolvePicks(plan, hc)
+    local Pm, arch = U.mod("pilots"), plan.arch
+    local list = {}
+    for _, h in pairs(hc) do list[#list + 1] = h end
+    table.sort(list, function(a, b) return a.pnum < b.pnum end)
+    local out, taken, filled = {}, {}, {}
+    for _, h in ipairs(list) do
+        local p = PA().pickFor(plan, h)
+        if type(p) == "table" then
+            local c = {}
+            for k, v in pairs(p) do c[k] = v end
+            c.ctrlId = h.ctrlId
+            if type(c.pilotId) == "string" and Pm.allowed(c.pilotId, arch) then
+                taken[c.pilotId] = h.ctrlId
+            else
+                c.pilotId = nil
+            end
+            out[h.pnum] = c
+        end
+    end
+    for _, h in ipairs(list) do
+        local c = out[h.pnum]
+        if not (c and c.pilotId) then
+            c = c or { ctrlId = h.ctrlId }
+            local e = Pm.defaultFor(arch, h.pnum == 1, taken, nil, h.ctrlId)
+            c.pilotId, taken[e.id] = e.id, h.ctrlId
+            if not (type(c.presetId) == "string" and V().presetById(arch, c.presetId)) then
+                local d = V().presets(arch)[V().defaultPresetIndex(arch, h.pnum)]
+                c.presetId = Pm.signature(e, arch) or (d and d.id) or nil
+            end
+            out[h.pnum] = c
+            filled[#filled + 1] = string.format("P%d=%s/%s", h.pnum, e.id, tostring(c.presetId))
+        end
+    end
+    if #filled > 0 then
+        U.log(TAG, "picks: no usable pick for %s: a fresh card's defaults (pilot, vehicle, the pilot's style kit)",
+            table.concat(filled, " "))
     end
     return out
 end
@@ -434,6 +513,9 @@ end
 --   AI in a single-class mode: class forced (the 2026-10-07 race had DA_Racer_Ghost's preferred Skimmer in a
 --   Landspeeder race: AI in PlayerChoice slots use their pilot's PreferredVehicleType) with a matching preset;
 --   per-player builds (cfg.SetupPerPlayerBuild).
+-- 0.10.0 cards flow (§6 step 6): the picks resolved by ControllerId first (resolvePicks), the humans' presets as
+-- above, then every human's pilot (perkapply.assignPilots) BEFORE the AI class loop (aiPreset then reads the final
+-- pilots), and after it each human's loadout (perkapply.applyAll) instead of GuestPilots and the per-player builds.
 -- VERIFY(V-SET-08): FRecipeRacerSetup fields written through UE4SS struct-element access stick (the log reads them back)
 -- and the race spawns those vehicles.
 local function applyRecipe(choice, plan)
@@ -444,6 +526,9 @@ local function applyRecipe(choice, plan)
     local racers = rs.ActiveRecipe.RecipeState.Racers
     local n = racers:GetArrayNum()
     local humans = localHumanPS()
+    local cards = plan.flow == "cards"
+    local hc = cards and localHumans() or nil              -- {[psKey] = {pnum, ctrlId, ps}} for perkapply
+    if cards then U.try(TAG, function() plan.players = resolvePicks(plan, hc) end) end
     local used, nh, nai, fixed, styled = {}, 0, 0, 0, {}
     -- humans first, so the AI fallback avoids the models the players took
     for i = 1, n do
@@ -465,6 +550,9 @@ local function applyRecipe(choice, plan)
             end)
         end
     end
+    -- 0.10.0 cards flow: every human's pick as his pilot first; an AI holding one of them gets the next free pilot
+    -- (VERIFY(V-RC-20): "pilots: P1=... P2=...; AI re-assigned n")
+    if cards then U.try(TAG, function() PA().assignPilots(racers, n, hc, plan) end) end
     -- AI = not a local human and either flagged a bot or no remote human is connected (a remote human's racer is
     -- never re-classed: it keeps the launch archetype like ours)
     local remote = 0
@@ -487,6 +575,12 @@ local function applyRecipe(choice, plan)
     end
     U.log(TAG, "recipe: %d racer(s): %d local human(s) [%s], %d AI, %d AI moved to %s", n, nh, table.concat(styled, " "),
         nai, fixed, C.enumName(C.E.Archetype, arch))
+    if cards then
+        -- every human's loadout into his own build entry, field by field, read back (VERIFY(V-RC-21)); no GuestPilots
+        -- and no per-player tier build: the RACERS picks are complete
+        U.try(TAG, function() PA().applyAll(racers, n, hc, plan) end)
+        return
+    end
     U.try(TAG, assignGuestPilots, racers, n, humans)
     -- per-player builds (P1's is the launch build already)
     if opt("SetupPerPlayerBuild", true) == false then return end
@@ -529,6 +623,9 @@ end
 local function inRaceOverride(why)
     local vp = St.launch.vehPlan
     if type(vp) ~= "table" or opt("SetupInRaceOverride", true) == false then return 0 end
+    -- cards flow: the recipe write already gives every human the picked car (race recipe checked live 2026-10-10), and
+    -- an override would rebuild the customisation on top of the loadout perkapply wrote
+    if vp.flow == "cards" then return 0 end
     vp.done = vp.done or {}
     local wk = tostring(St.worldGen)
     local waiting = 0
@@ -562,7 +659,12 @@ local function inRaceOverride(why)
 end
 
 -- MAIN race tick (main.lua): LOADING retries of the in-race override (edge-only was too early for the new world).
+-- 0.10.0: first, in every race phase of a cards race, perkapply's race-world pass (PRERACE / RACING, once per world and
+-- local human: verify the build, traits as passives, late fallback, seated-pilot check; spec §6 step 8).
 function M.raceTick()
+    if type(St.launch.vehPlan) == "table" and St.launch.vehPlan.flow == "cards" then
+        U.tryEvery("launch.perkapply", nil, TAG, function() PA().raceTick() end)
+    end
     if not St.race.launchedByUs or St.phase ~= "LOADING" then return end
     local vp = St.launch.vehPlan
     if type(vp) ~= "table" then return end
@@ -593,6 +695,8 @@ local function ensureListener()
     St.on("phase", TAG, function(new, old)
         if new == "FRONTEND" then
             M.restoreGridPatch()
+            -- 0.10.0: the cards flow's base-build patch too (idempotent; perkapply's own listener does the same)
+            U.try(TAG, function() PA().restoreLaunch("frontend") end)
             -- the launch is over (race left, or launch timed out): the next race is "ours" only if launched again
             St.race.launchedByUs = false
             St.launch.vehPlan = nil
@@ -693,6 +797,7 @@ undoPrelaunch = function()
     St.race.launchedByUs = false
     St.ui.returnToTab = false                          -- else an unrelated later race would reopen our tab
     M.restoreGridPatch()
+    U.try(TAG, function() PA().restoreLaunch("launch refused") end)   -- 0.10.0 (idempotent: no patch, no-op)
     local tabOpen = (St.menu.visible == "lobby" or St.menu.visible == "builder")
     local join = U.mod("join")
     if tabOpen and not join.isFrozen() then
@@ -720,7 +825,10 @@ local function selectVehicleForGuests(choice)
     end
 end
 
-function M.start()
+-- opts (optional, 0.10.0): acceptDormant = true -> un-joined guests are accepted at once. The race setup passes it
+-- for its own second START: it asked about them before its page closed (RC-1, V-RC-35); without it the first START
+-- here would be refused after the setup had closed, dropping everybody into the lobby.
+function M.start(opts)
     -- 1. checks
     local ok, why = M.canStart()
     if not ok then
@@ -731,7 +839,9 @@ function M.start()
     -- their own view with an AI-driven car. First START: refused with the reason; a second START within 5 s (same
     -- set) goes ahead (join.commit parks them: car to the AI).
     local dormant = U.mod("join").dormantText()
-    if dormant then
+    if dormant and type(opts) == "table" and opts.acceptDormant == true then
+        U.warn(TAG, "launch with un-joined guest(s) accepted by the race setup's second START: %s (V-RC-35)", dormant)
+    elseif dormant then
         -- real clock: St.nowMs (os.clock) ran ~1.5x fast under Wine (2026-10-07: a 5 s window expired in 3.5 s)
         local now = U.mod("setup").realMs()
         if not (now <= dormantOk.untilMs and dormantOk.text == dormant) then
@@ -798,6 +908,18 @@ function M.start()
 
     -- 7. the launch: 6 arguments, null builds as nil
     local build = U.ok(choice.build) and choice.build or nil
+    local cards = plan.flow == "cards"
+    -- 0.10.0 cards flow (§6 step 3): the class's launch base with UnlockedAffixSlots raised in memory to
+    -- cfg.PerkPartSlots for this call (every human then gets that many part slots); the choice's build when it fails
+    if cards and opt("PerkApply", "full") ~= "off" then
+        local okP, b, whyP = U.try(TAG, function() return PA().prepareLaunch(plan) end)
+        if okP and U.ok(b) then
+            build = b
+        else
+            U.warn(TAG, "RACERS launch base not prepared (%s): %s is launched, loadouts go into its slots",
+                tostring(okP and whyP or "error"), build and U.pathOf(build) or "nil")
+        end
+    end
     local debugBuild = U.ok(choice.debugBuild) and choice.debugBuild or nil
     local cond = M.conditionArg(choice)
     U.log(TAG, "LaunchCustomRace(%s, %s, %s, {TagName=%s}, %s, %s)", U.pathOf(choice.archetype),
@@ -807,6 +929,9 @@ function M.start()
     local called = U.try(TAG, function()
         gm:LaunchCustomRace(choice.archetype, choice.gameMode, choice.track, cond, build, debugBuild)
     end)
+    -- 0.10.0: the build conversion ran synchronously inside the call: the shared asset's patch goes at once, before
+    -- the acceptance check (idempotent). VERIFY(V-RC-19): "UnlockedAffixSlots 4 -> 6 -> 4 (after call)"
+    if cards then U.try(TAG, function() PA().restoreLaunch("after call") end) end
 
     -- 8. accepted iff the native body set PrimaryFlow = QuickRace
     local flowAfter = nil
@@ -828,7 +953,7 @@ function M.start()
     -- 9. per-player vehicles / AI class / builds in the recipe, evidence for V-LCH-03, then the events
     St.launch.accepted = true                          -- phase: long LAUNCHING timeout (cfg.LaunchAcceptedTimeoutMs)
     U.try(TAG, applyRecipe, choice, plan)
-    St.launch.vehPlan = { arch = plan.arch, players = plan.players }
+    St.launch.vehPlan = { arch = plan.arch, players = plan.players, flow = plan.flow }
     U.try(TAG, function() U.mod("diag").recipe() end)
     U.log(TAG, "launch accepted: %s, %d local human(s)", choice.label or "?", U.mod("join").localHumanCount())
     St.emit("launched")
@@ -878,8 +1003,14 @@ function M.prepareExternal(choice)
     -- the grid could not be patched before the dev screen's own launch; the AI class / per-player vehicles still can
     if type(choice) == "table" then
         local plan = M.plan(choice)
+        if plan.flow == "cards" then
+            -- the dev screen's own LaunchCustomRace ran before any affix-slot patch (4 part slots), so the RACERS
+            -- loadouts would lose parts: this path keeps the classic per-player vehicles
+            U.log(TAG, "external launch: RACERS loadouts not applied on the dev screen path (classic vehicles)")
+            plan.flow = "classic"
+        end
         U.try(TAG, applyRecipe, choice, plan)
-        St.launch.vehPlan = { arch = plan.arch, players = plan.players }
+        St.launch.vehPlan = { arch = plan.arch, players = plan.players, flow = plan.flow }
     end
     U.try(TAG, function() U.mod("diag").recipe() end)
     St.emit("launched")

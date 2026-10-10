@@ -422,13 +422,107 @@ local function focusShared(e, p, now)
     end
 end
 
+-- 0.10.0 (task #10): on a shared post-race screen another player owns, P1's PC still sees no key (the game keeps the
+-- first local player in UI-only input whatever SetInputMode does, and Slate focus did not click: V-MB-07 failed live
+-- in runs L and N1). The car input path does see the pad: each player's GfnRawInputSubsystem feeds its own
+-- EnhancedPlayerInput with the vehicle contexts (A = IA_Veh_Boost; IA_Veh_Throttle in the alternative layout), and
+-- ActionInstanceData (reflected TMap<InputAction, FInputActionInstance>) holds the trigger state. A held A is
+-- Triggered/Started/Ongoing for longer than one FAST tick. cfg.MenuBridgeRawA = true | false.  VERIFY(V-MB-08)
+local ACTIVE_TRIGGER = { [1] = true, [2] = true, [4] = true }      -- ETriggerEvent Triggered / Started / Ongoing
+local function rawA(pc)
+    local down = false
+    pcall(function()
+        local raw = pc.RawInputSubsystem
+        if not U.ok(raw) then return end
+        local alt = false
+        pcall(function()
+            raw.ActiveMappingContexts:ForEach(function(_, el)
+                local c = el:get()
+                if U.ok(c) and U.pathOf(c):find("IMC_Vehicle_Alternative", 1, true) then alt = true end
+            end)
+        end)
+        local want = alt and "IA_Veh_Throttle" or "IA_Veh_Boost"
+        local epi = raw.EnhancedPlayerInput
+        if not U.ok(epi) then return end
+        epi.ActionInstanceData:ForEach(function(k, v)
+            if down then return end
+            local ia = k:get()
+            if U.ok(ia) and ia:GetFName():ToString() == want then
+                local inst = v:get()
+                if ACTIVE_TRIGGER[tonumber(inst.TriggerEvent) or 0] then down = true end
+            end
+        end)
+    end)
+    return down
+end
+
+-- 0.10.1 (task #10): P1's A on a shared screen another player owns reaches neither P1's PlayerInput nor its
+-- EnhancedPlayerInput (V-MB-08 failed live), but Slate still delivers it to P1's focused widget. A CommonUI button
+-- ignores it (its click comes from the owner's action router); a plain UMG Button handles the Accept key itself.
+-- Probe 2026-10-10 on WBP_SimpleRaceResultsScreen_C: a Button added to the screen's root canvas and focused for P1
+-- read IsPressed() = true while P1 held A. The bridge polls that invisible "catcher" like a key (V-MB-09).
+local function catcherOf(e, create)
+    S.catch = S.catch or {}
+    local c = S.catch[e.k]
+    if c and c.b and U.ok(c.b) then return c.b end
+    if not create or (c and c.failed) then return nil end
+    local b, err = nil, nil
+    local ok = pcall(function()
+        local tree = e.w.WidgetTree                                -- UUserWidget.WidgetTree
+        local root = tree.RootWidget
+        local cls = U.class("/Script/UMG.Button")
+        if not (U.ok(root) and U.ok(cls)) then err = "no root panel or Button class"; return end
+        b = StaticConstructObject(cls, tree)
+        if not U.ok(b) then err = "Button not constructed"; b = nil; return end
+        local rc = root:GetClass():GetFName():ToString()
+        if rc:find("Canvas", 1, true) then root:AddChildToCanvas(b)
+        elseif rc:find("Overlay", 1, true) then root:AddChildToOverlay(b)
+        else root:AddChild(b) end
+        b:SetRenderOpacity(0.01)                                   -- invisible; focus and keys do not need paint
+    end)
+    if not ok or not b then
+        S.catch[e.k] = { failed = true }
+        U.warn(TAG, "P1 catcher on %s not made (%s): P1's A stays unbridged there (V-MB-09)", e.cls, tostring(err))
+        return nil
+    end
+    S.catch[e.k] = { b = b, focusAt = -1e12 }
+    U.log(TAG, "P1 catcher button added to %s (V-MB-09)", e.cls)
+    return b
+end
+
+-- keeps P1's Slate focus on the catcher (re-checked every 500 ms; the screen's own focus logic may move it)
+local function focusCatcher(e, now)
+    local b = catcherOf(e, true)
+    if not b then return false end
+    local c = S.catch[e.k]
+    if now - c.focusAt < 500 then return true end
+    c.focusAt = now
+    local pc = pcOf(1)
+    if not U.ok(pc) then return true end
+    local has = false
+    pcall(function() has = b:HasUserFocus(pc) == true end)
+    if not has then pcall(function() b:SetUserFocus(pc) end) end
+    return true
+end
+
+local function catcherDown(e)
+    local b = catcherOf(e, false)
+    if not b then return false end
+    local down = false
+    pcall(function() down = b:IsPressed() == true end)
+    return down
+end
+
 local function openInputs(e)
     local own = ownerP(e.w)
     local now = St.nowMs()
     for _, lp in ipairs(U.localPlayers()) do
         if U.ok(lp.pc) and lp.index ~= own then
             openFor(e, lp.index, "its pad must reach the bridge")
-            if lp.index == 1 then focusShared(e, 1, now) end   -- UI-only P1: its A clicks natively (V-MB-07)
+            if lp.index == 1 then
+                -- UI-only P1: the catcher reads its A (V-MB-09); without it, focus on the screen's target (V-MB-07)
+                if not (opt("MenuBridgeP1Catcher", true) and focusCatcher(e, now)) then focusShared(e, 1, now) end
+            end
         end
     end
 end
@@ -495,7 +589,7 @@ function M.fastTick()
     -- menus only exist while paused (pause / player menu, their sub-screens and dialogs) or after the race (results)
     local paused = pausedNow()
     if not paused and St.phase ~= "POSTRACE" then
-        S.screens, S.pending, S.dlg, S.dlgE = {}, nil, nil, nil
+        S.screens, S.pending, S.dlg, S.dlgE, S.catch = {}, nil, nil, nil, {}
         return
     end
     U.tryEvery("mb.scan", nil, TAG, scan, now)
@@ -520,6 +614,20 @@ function M.fastTick()
             local a, b, dir = false, false, 0
             pcall(function()
                 a = pc:IsInputKeyDown(K.A) == true or (lp.index == 1 and pc:IsInputKeyDown(K.Enter) == true)
+                if not a and e and e.shared and lp.index == 1 and opt("MenuBridgeP1Catcher", true)
+                    and lp.index ~= ownerP(e.w) then
+                    a = catcherDown(e)
+                    if a and not S.prevA[U.key(pc)] then
+                        U.logEvery("mb.catch", 2000, TAG, "P1 A read from the catcher button on %s (V-MB-09)", e.cls)
+                    end
+                end
+                if not a and e and e.shared and opt("MenuBridgeRawA", false) ~= false and lp.index ~= ownerP(e.w) then
+                    a = rawA(pc)
+                    if a and not S.prevA[U.key(pc)] then
+                        U.logEvery("mb.rawA" .. tostring(lp.index), 2000, TAG,
+                            "P%d A read from its raw vehicle input on %s (V-MB-08)", lp.index, e.cls)
+                    end
+                end
                 b = pc:IsInputKeyDown(K.B) == true
                 if e and e.dialog then                   -- D-pad read only while a confirm dialog is up
                     if pc:IsInputKeyDown(K.Left) == true or pc:IsInputKeyDown(K.Up) == true then

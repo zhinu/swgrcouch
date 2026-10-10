@@ -173,9 +173,29 @@ local function trackFitsClass(c)
         local list = U.arrayToTable(events:GetQuickplayTracksForVehicleAndPlanet(c.archetype, c.planet))
         U.log(TAG, "track filter: %d track(s) offered for %s on %s", #list, U.pathOf(c.archetype), U.pathOf(c.planet))
         if #list == 0 then return end
-        fits = false
-        for i = 1, #list do
-            if U.same(list[i], c.track) then fits = true; break end
+        -- 0.10.0 (V-TRK-09): compare FNames; U.same(list[i], c.track) never matched (5 of 5 calls, cause unknown: the
+        -- UE4SS __eq compares the same pointer U.key reads). Pods: 9 pod TrackDefs have no VehicleTypeTag, so they
+        -- are only in the speeder lists of their planet (notes/research/track-whitelist.md §2).
+        local function fname(o)
+            local ok, n = pcall(function() return o:GetFName():ToString() end)
+            return ok and n or ""
+        end
+        local want = fname(c.track)
+        local function scan(l)
+            for i = 1, #l do
+                if U.ok(l[i]) and fname(l[i]) == want then return true end
+            end
+            return false
+        end
+        fits = scan(list)
+        if not fits and U.pathOf(c.archetype):find("VA_Plane", 1, true) then
+            local V = U.mod("vehicles")
+            local car = V and V.archetypeObj(V.classByArch(0))
+            if car then fits = scan(U.arrayToTable(events:GetQuickplayTracksForVehicleAndPlanet(car, c.planet))) end
+        end
+        if not fits then
+            U.logOnce("builder.fitkeys", TAG, "track filter miss: first entry %s (key %s), pick %s (key %s)",
+                fname(list[1]), U.key(list[1]), want, U.key(c.track))
         end
     end)
     return fits

@@ -1,7 +1,7 @@
 -- SWGRCouch / config.lua  (G1 Core)
 -- Developer constants, timings and fallback selectors.
 -- Do not edit: put overrides in Scripts/config_user.lua (`return { P1HudMode = "clone" }`, loaded at the end of this
--- file; a syntax error there is logged and ignored), then restart the game or press Ctrl+F11 (RestartCurrentMod).
+-- file; a syntax error there is logged and ignored), then restart the game (Ctrl+F11 / RestartCurrentMod only with cfg.AllowHotReload).
 -- User choices (layout, graphics, network address, last race, ...) are NOT here: they live in
 -- <ModDir>/settings.txt (settings.lua). `Defaults` below are only the values used when that file lacks a key.
 -- Each fallback selector names the VERIFY id (ARCHITECTURE.md §6) whose failure it answers.
@@ -36,7 +36,21 @@ cfg.MenuBridgeSharedFocus = true    -- 0.9.0: on a results screen another player
 cfg.MenuBridgeProfileOwner = true   -- front end after a split race: the main menu's profile card (top right, "Player 2")
                                     --   owned by a guest is re-owned by P1 (SetOwningPlayer + name / rank / platform
                                     --   refresh); the activatable main menu itself is never re-owned  VERIFY(V-MB-06)
+-- 0.10.0 feowner.lua: the front-end main menu belongs to P1 also after a split race (notes/research/menu-owner.md)
+cfg.FrontEndMenuOwner     = "p1"       -- "p1": pre-create the main menu for P1; "game": the UIManager picks (last guest)
+cfg.FrontEndMenuPrecreate = true       -- c1: on BP_Csm_FrontEnd_PickPrimaryMode (arrival after a race)   V-FEO-01/02
+cfg.FrontEndSubScreens    = true       -- c3: Settings (+ pages), Credits, Stickerbook, inspect screens and their returns
+                                       --   are pre-created for P1 too                              V-FEO-11/13
+cfg.FrontEndHideMultiplayer = true     -- g: hide + disable the Multiplayer tab while split-screen guests exist  V-FEO-07
+cfg.FrontEndMenuZ         = 500        -- Menu layer z of the pre-created menu
+cfg.MenuBridgeRawA        = false     -- 0.10.0: on a shared results screen a non-owner's A is also read from its raw
+                                    -- vehicle input. Off: P1's raw input never shows the A there (V-MB-08 failed live)
+cfg.MenuBridgeP1Catcher   = true      -- 0.10.1: on a shared screen another player owns, P1's A is read from an invisible
+                                    -- plain Button added to that screen and focused for P1 (Slate still routes P1's A to
+                                    -- its focus; live probe 2026-10-10)                              VERIFY(V-MB-09)
 cfg.TestCommands        = false     -- testcmd.lua: run <ModDir>/test.cmd blocks (unattended live tests); off for players
+cfg.AllowHotReload      = false     -- 0.10.0: Ctrl+F11 / "couch reload" (RestartCurrentMod). Off: UE4SS's lua_close of a
+                                    -- state other threads still use can crash the game (RE-UE4SS #1445); restart instead
 cfg.TestCommandPollMs   = 300
 cfg.FastPollMs          = 33        -- FAST loop (join edge poll, click poll, pause poll)   VERIFY(V-CORE-02)
 cfg.MainPollMs          = 250       -- MAIN loop (phase, lobby, roster, takeover, hud, nametags, net)
@@ -392,8 +406,19 @@ cfg.SetupInRaceOverridePrerace = false -- also call it on PRERACE for a human it
                                        --   car already exists: may respawn it)               VERIFY(V-SET-11)
 cfg.SetupVideo            = true       -- planet arrival video in the setup's media area (false: still images)  V-SET-02
 cfg.SetupVideoVolume      = -1         -- >= 0: SetVolume on the UI movie player while the setup plays a planet video
+cfg.SetupVideoSettleMs    = 250        -- 0.10.0: a new planet video opens once the selection is still this long (0 = at once)
 cfg.SetupTatooine         = true       -- Tatooine (podracers only) in the planet list
 cfg.SetupAskCondition     = true       -- CONDITIONS step when a track has several (false: the track's first)
+cfg.SetupTrackSet         = "arcade"   -- 0.10.0 which tracks the setup offers (notes/research/track-whitelist.md):
+                                       --   "quickrace" = the game's Quick Race + Quick Podrace pools, "arcade" = + the
+                                       --   Arcade's race tracks, "game" = + Multiplayer Tour + Podracing Tour, "all" =
+                                       --   every TrackDef the dev filter returns (0.9.x: Prologue, debug and campaign
+                                       --   copies included)                                          VERIFY(V-TRK-01..06)
+cfg.SetupTrackArcadePods  = false      -- 0.10.0 also offer the Arcade's pod tracks (The Galactic League Championship,
+                                       --   Sebulba's Challenge): the game races them with 1-2 pods; 8 pods on
+                                       --   TRAK_WHP_PLANE_FWD crashed at PRERACE (V-TRK-08, 2026-10-09)
+cfg.SetupTrackPoolConds   = true       -- 0.10.0 offer only the conditions the game's pool gives a track (no MEMORY
+                                       --   conditions on pods, Scorching only on the _HARD Jakku tracks)
 cfg.SetupTrackDedupe      = true       -- one row per track (run E: "MOS ESPA SPEEDWAY (BGL_PLANE_FWD)" several times):
                                        --   display names, reverse/variants marked; false = every TrackDef the game
                                        --   returns (duplicates marked with their key)              VERIFY(V-SET-12)
@@ -415,12 +440,15 @@ cfg.SetupLeftWeight       = 0.45       -- width share of the media column
 -- above the front-end sets. Front end only; released when the step is left, the setup closes or a player leaves. A
 -- structural failure turns it off for the session (2D cards, reason logged once); a model that fails keeps its 2D card.
 cfg.SetupPreview3D        = true       -- live 3D render of each VEHICLES pick; false = the 0.7.1 2D cards (+ badge)  V-VP-09
-cfg.SetupPreviewX         = 0          -- bay 1 origin X (uu); bay i at X + (i-1) * SetupPreviewSpacing
+cfg.SetupPreviewX         = 0          -- bay 1 origin X (uu); bay key i at X + (i-1) * SetupPreviewSpacing
 cfg.SetupPreviewY         = 60000      -- bay origin Y (uu): empty sky on the far +Y side of the front-end sets
 cfg.SetupPreviewZ         = 60000      -- bay origin Z (uu): ~44 deg above every main-menu camera       VERIFY(V-VP-05)
-cfg.SetupPreviewSpacing   = 5000       -- uu between the bays of two columns (> 0)                      VERIFY(V-VP-10)
-cfg.SetupPreviewW         = 640        -- render target width (px, > 0)
-cfg.SetupPreviewH         = 360        -- render target height (px, > 0); card aspect = W / H
+cfg.SetupPreviewSpacing   = 20000      -- uu between two bays (> 0). 0.10.0: was 5000; the fill light (radius 3 x camera
+                                       --   distance) reached a pod's neighbour model up to ~16000 (vehicle-step-v2.md
+                                       --   §0.3 #7)                                           VERIFY(V-VP-10, V-RC-17)
+cfg.SetupPreviewW         = 960        -- render target width (px, > 0). 0.10.0: was 640 (one size for 1-4 cards; tests at
+                                       --   720p may set 640 x 360 in config_user.lua)
+cfg.SetupPreviewH         = 540        -- render target height (px, > 0); card aspect = W / H. 0.10.0: was 360
 cfg.SetupPreviewRtFormat  = 6          -- ETextureRenderTargetFormat: 6 RGBA16f (linear, right gamma); try 3 RGBA8_SRGB,
                                        --   then 2 RGBA8, if washed out or too dark                    VERIFY(V-VP-03)
 cfg.SetupPreviewCaptureSource = 2      -- ESceneCaptureSource: 2 FinalColorLDR; 7 BaseColor = unlit last resort
@@ -431,7 +459,8 @@ cfg.SetupPreviewYaw       = 245        -- model start yaw (deg): front three-qua
 cfg.SetupPreviewFrame     = 1.05       -- framing margin (camera distance multiplier, > 0; larger = smaller model)  V-VP-04
 cfg.SetupPreviewSpinDps   = 15         -- turntable speed (deg/s, either sign); 0 = static (captures at ready, +0.5 s,
                                        --   +2 s, +5 s, then every 5 s)                                VERIFY(V-VP-06)
-cfg.SetupPreviewCaptureMs = 50         -- min ms between two captures of a spinning bay (>= 0; 0 = every FAST tick)  V-VP-06
+cfg.SetupPreviewCaptureMs = 66         -- min ms between two captures of a spinning bay (>= 0; 0 = every FAST tick; ~15/s
+                                       --   at 33 ms ticks). 0.10.0: was 50                                     V-VP-06
 cfg.SetupPreviewFillLux   = 60         -- fill PointLight above the camera: illuminance at the model in lux (intensity =
                                        --   lux * m^2 candelas); 0 = no fill light                     VERIFY(V-VP-04)
 cfg.SetupPreviewExposure  = "inherit"  -- capture exposure: "inherit" (the front end's own post-process) | "fixed" (eye
@@ -460,10 +489,24 @@ cfg.SetupCardBadgeSize    = 44         -- badge size (px, > 0)
 cfg.SetupCardInsetH       = 72         -- height (px, > 0) of the livery owner's portrait inset next to a 3D render
 cfg.SetupCardRowW         = 1400       -- width budget (px, > 0) of the VEHICLES row: the 16:9 cards get lower when n
                                        --   columns would not fit (4 players: 187 px high, 332 wide)    VERIFY(V-VP-10)
+-- 0.10.0 previews for the RACERS step (vpreview.lua; notes/design/vehicle-step-v2.md §5.8, RC-12): bays keyed by
+-- ControllerId + 1, modes "spin" / "still", budgets over all bays together. The new defaults above (spacing, target
+-- size, capture period) and the budgets apply to the classic columns too.
+cfg.SetupPreviewCaptureBudget = 1      -- CaptureScene() calls per FAST tick over all bays, the due bay captured longest
+                                       --   ago first (> 0; 1 = ~30 captures/s in total, 7.5/s each with 4 spinning)
+                                       --                                                              VERIFY(V-RC-17)
+cfg.SetupPreviewSpawnGapMs = 300       -- a new pick is built (spawn / in-place rebuild) at most once per this many ms over
+                                       --   all bays, the oldest waiting pick first (> 0)                    V-RC-17
+cfg.SetupPreviewStillBurst = 8         -- captures per still (at ready, after the late parts, on a page re-show): Lumen GI,
+                                       --   TSR and eye adaptation settle over captures (RC-12; > 0)          V-RC-17
+cfg.SetupPreviewSpinStage = "vehicle"  -- RACERS stages whose bay spins: "vehicle" | "all" | "none" (stills everywhere)
+                                       --                                                                     V-RC-17
+cfg.SetupPreviewPrebuildMs = 600       -- RACERS PILOT stage: the pilot's signature vehicle is built (still) once the pilot
+                                       --   pick was unchanged this long (>= 0; 0 = no prebuild)               V-RC-10
 -- 0.9.0 campaign views (cmap.lua, notes/research/campaign-map/): PLANET = the campaign's planet arc (WBP_PlanetSelector)
 -- + a row of planet chips (the control); TRACK = a single-planet run map (circuit rows, variant nodes, detail card).
 -- Any failure falls back to the 0.8.0 lists for that step. Sizes are Slate units (1 su = 1 px at 3840x2160).
-cfg.SetupCampaignMap      = false      -- (public build: off until tested live) false: the 0.8.0 lists for PLANET and TRACK (no cmap widget is built)  V-CMAP-12
+cfg.SetupCampaignMap      = true       -- false: the 0.8.0 lists for PLANET and TRACK (no cmap widget is built)  V-CMAP-12
 cfg.SetupCMapPlanetNav    = "chips"    -- "chips" (planet chips under the arc) | "list" (the 0.8.0 planet list)  V-CMAP-05
 cfg.SetupCMapTrackView    = "map"      -- "map" (run map, d-pad between nodes) | "list" (the 0.8.0 track list)   V-CMAP-08
 cfg.SetupCMapAreaW        = 3500       -- planet view area (su, > 0), clipped                                   V-CMAP-06
@@ -485,6 +528,91 @@ cfg.SetupCMapPlanetScale  = 0.62       -- big planet render scale (> 0; disc 233
 cfg.SetupCMapPlanetName   = false      -- also show the big planet's own 84-pt name
 cfg.SetupCMapCardW        = 980        -- detail card width (su, > 0)
 cfg.SetupCMapNodeMax      = 40         -- most circuit variants on one map (> 0; more = the list)
+
+---------------------------------------------------------------------------------------------------- Race setup: RACERS step
+-- 0.10.0 (racers.lua, cards.lua, pilots.lua, perks.lua, perkapply.lua; binding spec notes/design/vehicle-step-v2.md
+-- with its "Review corrections"). User request 2026-10-09: "A character should be chosen, a kart then. and then we
+-- should be able to map out all the benefits and perks added to the kart (all unlocked just for this mod)". Step 5 of
+-- RACE SETUP becomes RACERS: one card per local player, each on its own PILOT -> VEHICLE -> PERKS -> READY, the same
+-- card for P1 and the guests; every perk unlocked (no save, no unlock tag touched). Cards, memory, preview bays and
+-- the persisted picks are keyed by ControllerId. Sizes are Slate units (1 su = 1 px at 3840x2160). GuestPilots,
+-- SetupPerPlayerBuild*, SetupCard* and SetupInRaceOverride* keep their meaning in the classic flow.
+cfg.SetupPlayerFlow       = "cards"    -- "cards" (the RACERS cards) | "classic" (the 0.9.x VEHICLES columns, untouched;
+                                       --   also used for one page when the cards cannot be built)   VERIFY(V-RC-01/28)
+cfg.PilotStage            = true       -- PILOT stage shown (false: the pilot defaults are used)
+cfg.PerkStage             = true       -- PERKS stage shown (false: the pilot's style kit is used)
+-- input: guests are polled on their own PlayerController; P1's pad moves CommonUI focus on an invisible sink
+cfg.CardP1Input           = "sink"     -- "sink" (5 invisible buttons as a plus, explicit navigation rules: a move onto a
+                                       --   neighbour = one direction, focus back on the centre) | "geometric" (the plus
+                                       --   without explicit rules) | "ring" (the 5 buttons wired as Z5: the index delta is
+                                       --   the direction, no re-focus = one BP navigation tick per press, RC-6)
+                                       --                                                         VERIFY(V-RC-02/30)
+cfg.CardP1DirGuardMs      = 50         -- a P1 sink direction within this many ms of the same direction on a guest pad is
+                                       --   dropped and logged (insurance against task #14, RC-10; >= 0, 0 = off)  V-RC-07
+cfg.CardGuestClickGuardMs = 150        -- P1's sink accept is dropped while a guest's A is down or had an edge within this
+                                       --   many ms (task #14: a guest's A clicking P1's focus; >= 0)          V-RC-07
+cfg.CardBackTapMaxMs      = 600        -- a guest's B is "back" on release when held shorter (held 1 s = leave, join.lua;
+                                       --   > 0)                                                               V-RC-04
+cfg.CardP1BackConfirmMs   = 3000       -- P1 at PILOT: a second back within this window goes to MODE (> 0)    V-RC-08
+-- layout (vehicle-step-v2.md §3)
+cfg.CardRowW              = 3500       -- card row width (su, > 0)                                            V-RC-15
+cfg.CardH                 = 1320       -- card height (su, > 0); lower it if the page is shorter than measured (the row
+                                       --   cannot shrink against the page, RC-15)                            V-RC-15
+cfg.CardPad               = 32         -- inner padding of a card (su, > 0)
+cfg.CardW                 = { 1720, 1720, 1140, 845 }   -- card width (su) for 1, 2, 3, 4 players (4 numbers >= 1)
+cfg.CardGap               = { 0, 60, 40, 40 }           -- gap between the cards (su) for 1, 2, 3, 4 players (>= 0)
+-- look: every game widget has a plain fallback, the same for every card                           VERIFY(V-RC-06)
+cfg.CardFrame             = "darkpanel" -- "darkpanel" (WBP_DarkPanel as the card's bottom layer) | "solid" (a FuseImage)
+cfg.CardPanelColour       = { R = 0.012983, G = 0.036889, B = 0.048172, A = 0.90 }   -- #1E363E @0.9, the game's panel
+cfg.CardHighlight         = "pill"     -- "pill" (WBP_ButtonBacker pills) | "solid" (solid images)
+cfg.CardDetail            = "game"     -- detail panel: "game" (WBP_Character_Ability: title + rich text, fed through its
+                                       --   vars + Refresh()) | "plain" (two text blocks, markup stripped)
+cfg.CardThumbMask         = "mid"      -- head shots: "mid" (squircle MID of M_UI_CharacterProfilePicture) | "plain" (the
+                                       --   transparent head shot on a squircle backer)
+cfg.CardDiamond           = "disc"     -- ability diamond: "disc" (our discs) | "hud" (MI_HUD_Abilities_BG behind it)
+cfg.CardBackdrop          = true       -- racer-style art behind the pilots
+cfg.CardGlyphs            = "xbox"     -- hint glyphs: "xbox" (the game's Xbox pad images) | "text"     V-RC-01 (no tofu)
+cfg.CardSounds            = "match"    -- "match" (guests' navigation ticks + everybody's accept sounds, the cmap pattern) |
+                                       --   "accept" (accept sounds only) | "off"                      VERIFY(V-RC-30)
+cfg.CardStartPulse        = true       -- everybody READY: P1's START RACE row pulses
+-- per FAST tick budgets                                                                         VERIFY(V-RC-16)
+cfg.CardBuildsPerTick     = 1          -- card shells / stage panels / pickers built per tick (> 0)
+cfg.CardRendersPerTick    = 2          -- dirty cards rendered per tick (> 0)
+cfg.CardLoadsPerTick      = 3          -- small textures loaded per tick (> 0)
+cfg.CardLoadBigBytes      = 1048576    -- a texture of at least this many bytes is "big": one per tick (full bodies 2.7 MB,
+                                       --   style backdrops 4.1 MB, no mips; RC-9; > 0)
+-- pilots (pilots.lua)
+cfg.PilotUnique           = true       -- a pilot is held by one human at a time (cycling skips the others')  V-RC-09
+cfg.PilotShareShade       = false      -- with PilotUnique: several humans may still race SHADE
+cfg.PilotP1Default        = "shade"    -- P1's first pilot: "shade" | "favourite" (PvpFlowComponent.DefaultPilot when
+                                       --   valid)                                                     VERIFY(V-PIL-08)
+cfg.PilotExtras           = { "DA_Racer_Mentor" }   -- extra pilots (SEBULBA in the Skimmer class); false = none   V-RC-09
+cfg.PilotPodRivals        = false      -- podracers: also the 11 speeder rivals
+cfg.PilotPodAged          = false      -- podracers: also the 5 Aged pilots
+cfg.PilotSeatCheck        = "log"      -- in the race: "log" (ps.Pilot compared with the pick) | "refresh" (also written +
+                                       --   SynchronousRefreshPilot) | "off"                           VERIFY(V-RC-23)
+-- perks (perks.lua board; perkapply.lua launch writes, vehicle-step-v2.md §6)
+cfg.PerkPartSlots         = 6          -- part slots on the board and in the launch build (1..10, clamped)    V-RC-19
+cfg.PerkTraitSlots        = 3          -- trait slots (1..4, clamped)
+cfg.PerkFlaws             = true       -- FLAWS category in the part pickers
+cfg.PerkUniqueFamily      = true       -- an ability family in one slot only (a picker swap moves it)        V-RC-13
+cfg.PerkApply             = "full"     -- "full" (zero base build, affix slots raised in memory for the call, every field
+                                       --   written and read back, traits at PRERACE) | "passives" (parts + traits as
+                                       --   passives at PRERACE only) | "off" (the classic build)    VERIFY(V-RC-19/21)
+cfg.PerkTraits            = true       -- traits applied as passives at PRERACE (Server_ApplyPassive)          V-RC-22
+cfg.PerkSetRacerStyle     = false      -- also write ps.RacerStyle (its traits might then apply twice)
+cfg.PerkVerify            = true       -- PRERACE / RACING check of each human's build and abilities           V-RC-21
+cfg.PerkLateFallback      = true       -- parts lost in the travel are re-applied as passives (flaws skipped)  V-PRK-06
+cfg.PerkRamjet            = "keep"     -- speeders' ramjet: "keep" (the base build's) | "on" | "off"
+cfg.PerkCritMalfunctions  = "keep"     -- critical malfunctions: "keep" | "on" | "off"
+cfg.PerkPodRamjet         = false      -- podracers get the ramjet (RamjetInstalled = true); false = the game's own "Memory
+                                       --   Pod [No Ramjet]", ramjet items hidden on pods (RC-2)       VERIFY(V-RC-32)
+cfg.PerkHideInert         = true       -- items for a system the car lacks (ramjet / critical malfunctions) are hidden;
+                                       --   false = shown dimmed, tagged NO RAMJET / NO CRITICAL MALFUNCTIONS    V-RC-32
+cfg.PerkLaunchBase        = "zero"     -- launch build of a cards race: "zero" (VBD_000_1Mastiff / _Plane: no abilities,
+                                       --   no parts, PL 0) | "pilot" (speeders launch on P1's style build VBD_PvP_IA_*,
+                                       --   PL 26-31: the fallback before PerkApply "off" when the AI scale with the
+                                       --   launch build, RC-14; pods keep the zero base)              VERIFY(V-RC-27)
 
 ---------------------------------------------------------------------------------------------------- Pause (pause.lua)
 -- 0.7.0 (run H: a guest's Start soft-locked the game in [PauseMenu] with no screen, no pause screen of a split race took
@@ -781,6 +909,7 @@ cfg.Defaults = {
     LastRaceCondition  = "",             -- gameplay tag string
     LastRaceMaxRacers  = 0,              -- RACE SETUP grid size (0 = the class limit)
     LastRaceVehicles   = "",             -- RACE SETUP per-player picks "1=PRE_Car_Orca@<build path>;2=..."
+    LastRaceRacers     = "",             -- 0.10.0 RACERS step per pad "<ControllerId>=<pilot>@<preset>@<loadout code>;..."
 }
 
 ---------------------------------------------------------------------------------------------------- override checks
@@ -804,6 +933,8 @@ local ENUMS = {
     JoinButtons = { "a_or_start", "start" },
     DeviceDetectMode = { "hook", "both", "poll" },
     HotplugPadToP1 = { "front", "always", "off" },
+    SetupTrackSet = { "quickrace", "arcade", "game", "all" },
+    FrontEndMenuOwner = { "p1", "game" },
     ConditionPassMode = { "table", "trackdefault" },
     P1HudMode = { "rehost", "clone", "leave" },
     MemoryLapMode = { "hook", "collapse" },
@@ -880,13 +1011,32 @@ local ENUMS = {
     SetupCMapManualTick = { "auto", "always", "off" },
     PauseDialogGuestUi = { "lower", "keep" },
     MenuBridgeGuestNative = { "skip", "bridge" },
+    -- 0.10.0 RACERS step
+    SetupPlayerFlow = { "cards", "classic" },
+    CardP1Input = { "sink", "geometric", "ring" },
+    CardFrame = { "darkpanel", "solid" },
+    CardHighlight = { "pill", "solid" },
+    CardDetail = { "game", "plain" },
+    CardThumbMask = { "mid", "plain" },
+    CardDiamond = { "disc", "hud" },
+    CardGlyphs = { "xbox", "text" },
+    CardSounds = { "match", "accept", "off" },
+    PilotP1Default = { "shade", "favourite" },
+    PilotSeatCheck = { "log", "refresh", "off" },
+    PerkApply = { "full", "passives", "off" },
+    PerkRamjet = { "keep", "on", "off" },
+    PerkCritMalfunctions = { "keep", "on", "off" },
+    PerkLaunchBase = { "zero", "pilot" },
+    SetupPreviewSpinStage = { "vehicle", "all", "none" },
 }
 -- Keys whose value is a string selector OR a number (FinishGraceSec: "all" | seconds >= 0; PauseMenuZ: "auto" | Z >= 0;
 -- UxSplitSubHalfFrac: "auto" | a fraction 0..1). max is optional.
 local MIXED = { FinishGraceSec = { strings = { "all" }, min = 0 }, PauseMenuZ = { strings = { "auto" }, min = 0 },
                 UxSplitSubHalfFrac = { strings = { "auto" }, min = 0, max = 1 } }
 -- Table-valued keys that also accept false (= feature off).
-local FALSEABLE = { GfxSingleViewCvars = true, GuestPilots = true }
+local FALSEABLE = { GfxSingleViewCvars = true, GuestPilots = true, PilotExtras = true }
+-- Table-valued keys with a fixed shape: n numbers >= min (one per player count), or a colour { R, G, B, A }.
+local SHAPES = { CardW = { n = 4, min = 1 }, CardGap = { n = 4, min = 0 }, CardPanelColour = { colour = true } }
 -- Numbers that must be > 0 (a 0 period would run a loop on every engine tick).
 local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
                    LobbyNavRepeatMs = true, LobbyFocusKeepMs = true, SetupMaxRacers = true, SetupMaxRacersPlane = true,
@@ -895,7 +1045,8 @@ local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, Fast
                    IgnitionSilentPresses = true, IgnitionSilentPressesP1 = true, TestCommandPollMs = true,
                    PauseLostMenuMs = true, IgnitionMapReprobeMs = true, WreckRigFov = true, UxSplitFadeMax = true,
                    PauseInputsBackMs = true, PauseNoSubStateMs = true,
-                   -- 0.8.0 (SetupPreviewCaptureMs / SetupPreviewFillLux accept 0 and SetupPreviewSpinDps any sign: unchecked)
+                   -- 0.8.0 (SetupPreviewFillLux accepts 0 and SetupPreviewSpinDps any sign: unchecked;
+                   -- SetupPreviewCaptureMs accepts 0: NONNEG below)
                    UxSplitSubPendingMs = true, UxSplitSubAiRadiusUU = true, UxSplitSubSideScale = true,
                    SetupPreviewSpacing = true, SetupPreviewW = true, SetupPreviewH = true, SetupPreviewFov = true,
                    SetupPreviewFrame = true, SetupPreviewMaxRadius = true, SetupPreviewDebounceMs = true,
@@ -903,7 +1054,17 @@ local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, Fast
                    -- 0.9.0
                    SetupCMapAreaW = true, SetupCMapAreaH = true, SetupCMapArcScale = true, SetupCMapArcAngle = true,
                    SetupCMapInfoW = true, SetupCMapMapW = true, SetupCMapMapH = true, SetupCMapPlanetScale = true,
-                   SetupCMapCardW = true, SetupCMapNodeMax = true }
+                   SetupCMapCardW = true, SetupCMapNodeMax = true,
+                   -- 0.10.0 RACERS step (PerkPartSlots / PerkTraitSlots are also clamped: CLAMP)
+                   CardBackTapMaxMs = true, CardP1BackConfirmMs = true, CardRowW = true, CardH = true, CardPad = true,
+                   CardBuildsPerTick = true, CardRendersPerTick = true, CardLoadsPerTick = true, CardLoadBigBytes = true,
+                   PerkPartSlots = true, PerkTraitSlots = true, SetupPreviewStillBurst = true,
+                   SetupPreviewCaptureBudget = true, SetupPreviewSpawnGapMs = true }
+-- 0.10.0: numbers that must be >= 0 (0 = off / at once).
+local NONNEG = { CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
+                 SetupPreviewCaptureMs = true }
+-- 0.10.0: integers clamped into [min, max] after the checks (an override outside is clamped, with a warning).
+local CLAMP = { PerkPartSlots = { 1, 10 }, PerkTraitSlots = { 1, 4 } }
 
 -- nil when v may replace cfg[k], else the reason it is ignored.
 local function overrideProblem(k, v)
@@ -923,6 +1084,19 @@ local function overrideProblem(k, v)
         if not hit then return "must be one of: " .. table.concat(allowed, ", ") end
     end
     if POSITIVE[k] and not (v > 0) then return "must be > 0" end
+    if NONNEG[k] and not (v >= 0) then return "must be >= 0" end
+    local shape = SHAPES[k]
+    if shape and shape.colour then
+        for _, c in ipairs({ "R", "G", "B", "A" }) do
+            if type(v[c]) ~= "number" then return "must be a colour { R = <n>, G = <n>, B = <n>, A = <n> }" end
+        end
+    elseif shape then
+        for i = 1, shape.n do
+            if type(v[i]) ~= "number" or not (v[i] >= shape.min) then
+                return "must be a list of " .. shape.n .. " numbers >= " .. shape.min
+            end
+        end
+    end
     return nil
 end
 
@@ -976,6 +1150,15 @@ do
                             print("[SWGRCouch][config] WARN config_user.lua: " .. tostring(k) .. " " .. why
                                 .. " (ignored)\n")
                         else
+                            local r = CLAMP[k]
+                            if r then
+                                local c = math.max(r[1], math.min(r[2], math.floor(v)))
+                                if c ~= v then
+                                    print("[SWGRCouch][config] WARN config_user.lua: " .. tostring(k) .. " = "
+                                        .. tostring(v) .. " clamped to " .. tostring(c) .. "\n")
+                                end
+                                v = c
+                            end
                             cfg[k] = v
                             n = n + 1
                         end

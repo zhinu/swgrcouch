@@ -1,10 +1,10 @@
 /* swgr_inputfilter.dll - per-player filter for STAR WARS: Galactic Racer's raw vehicle input (SWGRCouch).
  *
  * Why (notes/research/input-isolation.md): every UGfnRawInputSubsystem (one per local player) registers its own
- * Slate input pre-processor ("GfnRawInput", vtable 0x14991a9c0). Its key/analog/mouse handlers record the event's
- * FKey into a TMap<FKey, FInputActionValue> and IGNORE FInputEvent::UserIndex, so every subsystem sees every
- * keyboard, mouse and pad. Car steering/throttle/brake/boost are read from that map
- * (UGfnRawInputSubsystem::GetActionValue 0x143a07d1a), so one device drives every human car.
+ * Slate input pre-processor ("GfnRawInput", vtable 0x14991a9c0 in both builds). Its key/analog/mouse handlers record
+ * the event's FKey into a TMap<FKey, FInputActionValue> and IGNORE FInputEvent::UserIndex, so every subsystem sees
+ * every keyboard, mouse and pad. Car steering/throttle/brake/boost are read from that map
+ * (UGfnRawInputSubsystem::GetActionValue 0x143a07d1a, hotfix 0x143a0840a), so one device drives every human car.
  *
  * What: this DLL swaps 5 slots of that vtable (KeyDown, KeyUp, AnalogInput, MouseButtonDown, MouseButtonUp) for
  * wrappers. A wrapper drops the event (returns false = not handled, exactly what the original returns) when the
@@ -22,10 +22,27 @@
  * done outside the lock. A read that looks torn (empty, or no final newline: Lua truncates then writes) is retried
  * on the next check, up to 4 times, before it is applied as it is.
  * cfg lines:  enabled=0|1   offset=0|1   seq=<n>   p <ControllerId> <subsystem address, 0x hex or decimal>
+ *             wo <tag> <dst> <obj>   w <tag> <dst> <src> <len>: one-shot writes, each tag applied once; the lines of
+ *             one cfg text may come in any tag order (all tags above the last applied one are applied)
  *
- * Build: build.sh (clang --target=x86_64-pc-windows-msvc, no CRT, imports kernel32 only). Addresses are for
- * SWGR-Win64-Shipping.exe build 381121 (fixed image base 0x140000000, no DYNAMIC_BASE). Every slot is compared with
- * its expected value first; any mismatch = nothing is patched (status reason=mismatch).
+ * Build: build.sh (clang --target=x86_64-pc-windows-msvc, no CRT, imports kernel32 only).
+ *
+ * GAME BUILDS (2026-10-09). SWGR-Win64-Shipping.exe has a fixed image base 0x140000000 (no DYNAMIC_BASE), so every
+ * address is hard-coded, once per known build, in the BUILDS table below:
+ *     CL381121  488,290,328 bytes  (input-isolation.md)
+ *     CL382493  490,551,832 bytes  hotfix (notes/research/inputfilter-hotfix-port.md)
+ * The hotfix moved only the 6 code pointers (GetDebugName and the 5 handlers). The vtables, the subsystem layout,
+ * GUObjectArray and every struct offset are unchanged (static evidence in the port notes; the old DLL's 'wo' bind
+ * already worked live on the hotfix, run N1). install() picks the set whose GetDebugName slot (vt[11], a different
+ * function address in each build: the build fingerprint) matches AND whose 5 handler slots hold the expected originals
+ * (or this module's wrappers: "ok (already patched)"). Status line build=<CL> names the identified build
+ * (build=unknown when no set matches), builds= lists the sets this DLL knows. On a mismatch nothing is patched and
+ * reason= starts with "mismatch: GetDebugName slot" or "mismatch: handler slot", followed by what each set expected,
+ * e.g. "(381121: GetDebugName slot 0x... != 0x14300b61a; 382493: GetDebugName slot 0x... != 0x14300bd0a)".
+ * The 'wo' weak write (the only car binding path once UE4SS refuses the Lua weak write) uses the identified build's
+ * GUObjectArray; on an unknown build it tries each known set and only writes when the GUObjectArray item it finds
+ * points back to the object, as before. New build: re-derive with scripts/input (input-isolation.md section 3, port
+ * notes section 4) and append a set.
  */
 typedef unsigned long long u64;
 typedef unsigned int u32;
@@ -57,19 +74,41 @@ __declspec(dllimport) void __stdcall Sleep(u32);
 
 #define INVALID_HANDLE ((HANDLE)(long long)-1)
 
-/* ---- build 381121 constants (scripts/input, input-isolation.md section 2) ---- */
-#define PROC_VTABLE    0x14991a9c0ULL  /* FGfnRawInputProcessor (IInputProcessor) vtable                  */
-#define SUBSYS_VTABLE  0x149913950ULL  /* UGfnRawInputSubsystem instance vtable (jmap instance_vtable)     */
-#define SUBSYS_PROC    0x48            /* UGfnRawInputSubsystem: TSharedPtr<processor>.Object             */
+/* ---- engine (UE 5.7.4) struct offsets, the same in both builds (input-isolation.md section 2.3, port notes) ---- */
 #define EV_USERINDEX   0x0c            /* FInputEvent::UserIndex (KismetInputLibrary::GetUserIndex thunk)   */
 #define KEV_CHARCODE   0x40            /* FKeyEvent::CharacterCode (Key at 0x28, 0x18 bytes)               */
 #define KEV_KEYCODE    0x44            /* FKeyEvent::KeyCode; both 0 for gamepad buttons                   */
-#define DEBUGNAME_SLOT 11
-#define DEBUGNAME_FN   0x14300b61aULL  /* returns L"GfnRawInput" */
+#define OBJ_INDEX      0x0c            /* UObjectBase::InternalIndex                                       */
+#define ITEM_STRIDE    24              /* FUObjectItem: Object +8, SerialNumber +0x10                      */
+#define DEBUGNAME_SLOT 11              /* IInputProcessor::GetDebugName, returns L"GfnRawInput"            */
 
 enum { K_DOWN, K_UP, K_ANALOG, K_MDOWN, K_MUP, NSLOT };
 static const int SLOT[NSLOT] = { 2, 3, 4, 6, 7 };
-static const u64 EXPECT[NSLOT] = { 0x1470f0be6ULL, 0x1470f0d14ULL, 0x140d046c8ULL, 0x1470f0d84ULL, 0x1470f0df4ULL };
+
+/* ---- per-build constants (scripts/input; input-isolation.md section 2, inputfilter-hotfix-port.md) ---- */
+typedef struct {
+    u32 cl;              /* changelist, status build=<cl>                                                 */
+    u64 procVtable;      /* FGfnRawInputProcessor (IInputProcessor) vtable                                */
+    u64 subsysVtable;    /* UGfnRawInputSubsystem instance vtable (old: jmap instance_vtable; hotfix: the
+                          * InternalConstructor passed to its GetPrivateStaticClassBody stores it)        */
+    u64 subsysProc;      /* UGfnRawInputSubsystem: TSharedPtr<processor>.Object                           */
+    u64 debugNameFn;     /* vt[DEBUGNAME_SLOT]: lea rax, L"GfnRawInput"; ret (the build fingerprint)      */
+    u64 expect[NSLOT];   /* vt[SLOT[i]] before the patch: KeyDown, KeyUp, AnalogInput, MouseButtonDown/Up  */
+    u64 objChunks;       /* GUObjectArray.ObjObjects.Objects (chunk table pointer) = GUObjectArray + 0x10 */
+    u64 objNum;          /* GUObjectArray.ObjObjects.NumElements                     = GUObjectArray + 0x24 */
+    u64 serialCounter;   /* GUObjectArray.MasterSerialNumber                         = GUObjectArray + 0xb8 */
+} Build;
+static const Build BUILDS[] = {
+    { 381121, 0x14991a9c0ULL, 0x149913950ULL, 0x48, 0x14300b61aULL,
+      { 0x1470f0be6ULL, 0x1470f0d14ULL, 0x140d046c8ULL, 0x1470f0d84ULL, 0x1470f0df4ULL },
+      0x14ac5e920ULL, 0x14ac5e934ULL, 0x14ac5e9c8ULL },
+    /* hotfix: only debugNameFn and expect[] moved (GUObjectArray 0x14ac5e910 by the 0.9.3 UE4SS signature) */
+    { 382493, 0x14991a9c0ULL, 0x149913950ULL, 0x48, 0x14300bd0aULL,
+      { 0x1470f1180ULL, 0x1470f12aeULL, 0x140d04678ULL, 0x1470f131eULL, 0x1470f138eULL },
+      0x14ac5e920ULL, 0x14ac5e934ULL, 0x14ac5e9c8ULL },
+};
+#define NBUILD ((int)(sizeof BUILDS / sizeof BUILDS[0]))
+static const Build *g_b;        /* the build install() identified (GetDebugName slot); 0 = unknown */
 
 typedef u8 (*HandlerFn)(void *self, void *app, const u8 *ev);
 static HandlerFn g_orig[NSLOT];
@@ -127,15 +166,38 @@ static int uappend(char *b, int n, int cap, u64 v, int hex) {
     b[n] = 0; return n;
 }
 
-/* Resolve each owner's processor from its subsystem address (both vtables checked). */
+/* The processor of a subsystem under build b's layout (both vtables checked); 0 = none. */
+static u64 procOf(const Build *b, u64 s) {
+    if (!readable(s, b->subsysProc + 8) || rd64(s) != b->subsysVtable) return 0;
+    u64 p = rd64(s + b->subsysProc);
+    return (readable(p, 8) && rd64(p) == b->procVtable) ? p : 0;
+}
+
+/* Resolve each owner's processor from its subsystem address, with the identified build's layout (unknown build:
+ * every known set is tried; that only feeds the status, no wrapper is installed then). */
 static void resolve(void) {
     for (int i = 0; i < g_nown; i++) {
         Owner *o = &g_own[i];
         o->proc = 0;
-        if (!readable(o->subsys, SUBSYS_PROC + 8) || rd64(o->subsys) != SUBSYS_VTABLE) continue;
-        u64 p = rd64(o->subsys + SUBSYS_PROC);
-        if (readable(p, 8) && rd64(p) == PROC_VTABLE) o->proc = p;
+        if (g_b) o->proc = procOf(g_b, o->subsys);
+        else for (int k = 0; k < NBUILD && !o->proc; k++) o->proc = procOf(&BUILDS[k], o->subsys);
     }
+}
+
+/* The GUObjectArray item of obj (readable: the caller checks) under build b's addresses, refused unless the chunk
+ * table is readable and the item points back to obj. Returns the item address (0 = not found), obj's InternalIndex
+ * in *pidx. */
+static u64 objItem(const Build *b, u64 obj, u32 *pidx) {
+    if (!readable(b->objChunks, 8) || !readable(b->objNum, 4)) return 0;
+    u32 idx = *(volatile u32 *)(obj + OBJ_INDEX);
+    u32 num = *(volatile u32 *)b->objNum;
+    u64 chunks = rd64(b->objChunks);
+    if (idx >= num || !readable(chunks + (u64)(idx >> 16) * 8, 8)) return 0;
+    u64 chunk = rd64(chunks + (u64)(idx >> 16) * 8);
+    u64 item = chunk + (u64)(idx & 0xffff) * ITEM_STRIDE;
+    if (!chunk || !readable(item, ITEM_STRIDE) || rd64(item + 8) != obj) return 0;
+    *pidx = idx;
+    return item;
 }
 
 static void writeStatus(void) {
@@ -145,6 +207,10 @@ static void writeStatus(void) {
     lockOwners();       /* snapshot of the owner table; the file write itself happens after the unlock */
     n = sappend(b, n, cap, "installed="); n = uappend(b, n, cap, (u64)g_installed, 0);
     n = sappend(b, n, cap, "\nreason="); n = sappend(b, n, cap, g_reason);
+    n = sappend(b, n, cap, "\nbuild=");
+    if (g_b) n = uappend(b, n, cap, g_b->cl, 0); else n = sappend(b, n, cap, "unknown");
+    n = sappend(b, n, cap, "\nbuilds=");
+    for (int k = 0; k < NBUILD; k++) { if (k) n = sappend(b, n, cap, ","); n = uappend(b, n, cap, BUILDS[k].cl, 0); }
     n = sappend(b, n, cap, "\nenabled="); n = uappend(b, n, cap, (u64)g_enabled, 0);
     n = sappend(b, n, cap, "\noffset="); n = uappend(b, n, cap, (u64)g_offset, 0);
     n = sappend(b, n, cap, "\nseq="); n = uappend(b, n, cap, g_seq, 0);
@@ -201,6 +267,11 @@ static void applyCfg(const char *b, int missing) {
     Owner keep[MAXOWN]; int nkeep = g_nown;
     for (int i = 0; i < nkeep; i++) keep[i] = g_own[i];
     g_nown = 0; g_enabled = 0; g_offset = 0;
+    /* 'w'/'wo' lines are applied once per tag. wSeen = the highest tag applied from an EARLIER cfg text: every line of
+     * this text above it is applied, whatever the line order (verification 2026-10-09: inputfix.lua lists its pending
+     * writes in pairs() order, so a 4-player race start can list tag 3 before tags 1 and 2; comparing each line with
+     * the running maximum skipped tags 1 and 2 for good and left those cars unbound). g_wTag stays the maximum. */
+    const u64 wSeen = g_wTag;
     for (const char *p = b; *p;) {
         const char *line = p;
         while (*p && *p != '\n') p++;
@@ -213,56 +284,54 @@ static void applyCfg(const char *b, int missing) {
         } else if (line[0] == 'w' && line[1] == 'o' && line[2] == ' ') {
             /* 'wo <tag> <dst> <obj>': build a TWeakObjectPtr {ObjectIndex, SerialNumber} for <obj> and store it at
              * <dst>. Index = UObjectBase::InternalIndex (+0x0c). Serial from GUObjectArray: chunk table pointer at
-             * 0x14ac5e920, 65536 items per chunk, item stride 24, Object at +8, SerialNumber at +0x10 (layout read
-             * from UPlayerInputComponent::GetActionValue 0x1401f4b00). Refused unless the item points back to <obj>
-             * and the serial is already assigned. */
+             * 0x14ac5e920 (both builds), 65536 items per chunk, item stride 24, Object at +8, SerialNumber at +0x10
+             * (layout read from UPlayerInputComponent::GetActionValue 0x1401f4b00, the same address and code in both
+             * builds). Refused unless the item points back to <obj> (objItem). The identified build's GUObjectArray
+             * is used; on an unknown build each known set is tried (as the single fixed set was before). */
             const char *q = line + 3; u64 tag = parseNum(&q), dst = parseNum(&q), obj = parseNum(&q);
-            if (tag > g_wTag) {
+            if (tag > wSeen) {
                 int done = 0;
-                if (readable(obj, 0x10) && writable(dst, 8) && readable(0x14ac5e920ULL, 0x18)) {
-                    u32 idx = *(volatile u32 *)(obj + 0x0c);
-                    u32 num = *(volatile u32 *)0x14ac5e934ULL;
-                    u64 chunks = rd64(0x14ac5e920ULL);
-                    if (idx < num && readable(chunks + (u64)(idx >> 16) * 8, 8)) {
-                        u64 chunk = rd64(chunks + (u64)(idx >> 16) * 8);
-                        u64 item = chunk + (u64)(idx & 0xffff) * 24;
-                        if (chunk && readable(item, 24) && rd64(item + 8) == obj) {
-                            u32 serial = *(volatile u32 *)(item + 0x10);
-                            if (!serial && readable(0x14ac5e9c8ULL, 4)) {
-                                /* FUObjectArray::AllocateSerialNumber, as inlined at 0x14013e805: MasterSerialNumber
-                                 * (GUObjectArray+0xb8) += 1; the old value must be > 999 (START_SERIAL_NUMBER);
-                                 * CAS item.SerialNumber 0 -> new, keep the winner if another thread was first. */
-                                i32 old = __sync_fetch_and_add((volatile i32 *)0x14ac5e9c8ULL, 1);
-                                if (old > 999) {
-                                    u32 want = (u32)old + 1;
-                                    u32 prev = __sync_val_compare_and_swap((volatile u32 *)(item + 0x10), 0u, want);
-                                    serial = prev ? prev : want;
-                                }
+                if (readable(obj, 0x10) && writable(dst, 8)) {
+                    const Build *b = g_b; u32 idx = 0; u64 item = 0;
+                    if (b) item = objItem(b, obj, &idx);
+                    else for (int k = 0; k < NBUILD && !item; k++) { b = &BUILDS[k]; item = objItem(b, obj, &idx); }
+                    if (item) {
+                        u32 serial = *(volatile u32 *)(item + 0x10);
+                        if (!serial && writable(b->serialCounter, 4)) {
+                            /* FUObjectArray::AllocateSerialNumber, as inlined at 0x14013e805 (both builds):
+                             * MasterSerialNumber (GUObjectArray+0xb8) += 1; the old value must be > 999
+                             * (START_SERIAL_NUMBER); CAS item.SerialNumber 0 -> new, keep the winner if another
+                             * thread was first. (Port: writable, was readable: this is an atomic add.) */
+                            i32 old = __sync_fetch_and_add((volatile i32 *)b->serialCounter, 1);
+                            if (old > 999) {
+                                u32 want = (u32)old + 1;
+                                u32 prev = __sync_val_compare_and_swap((volatile u32 *)(item + 0x10), 0u, want);
+                                serial = prev ? prev : want;
                             }
-                            if (serial) {
-                                /* 0.6.0: this now runs on the reload thread, not the game's input thread: one
-                                 * aligned 8-byte store, so the game never reads a half-written {index, serial}. */
-                                if ((dst & 7) == 0) *(volatile u64 *)dst = (u64)idx | ((u64)serial << 32);
-                                else { *(volatile u32 *)dst = idx; *(volatile u32 *)(dst + 4) = serial; }
-                                done = 1;
-                            }
+                        }
+                        if (serial) {
+                            /* 0.6.0: this now runs on the reload thread, not the game's input thread: one
+                             * aligned 8-byte store, so the game never reads a half-written {index, serial}. */
+                            if ((dst & 7) == 0) *(volatile u64 *)dst = (u64)idx | ((u64)serial << 32);
+                            else { *(volatile u32 *)dst = idx; *(volatile u32 *)(dst + 4) = serial; }
+                            done = 1;
                         }
                     }
                 }
                 if (done) g_wOk++; else g_wFail++;
-                g_wTag = tag;
+                if (tag > g_wTag) g_wTag = tag;
             }
         } else if (line[0] == 'w' && line[1] == ' ') {
             /* SWGRCouch: one-shot checked copy, e.g. a TWeakObjectPtr from GfnPlayerController+0x8d8 into
              * PlayerInputComponent+0xc0 (UE4SS cannot write that weak property from Lua). Applied once per tag. */
             const char *q = line + 2; u64 tag = parseNum(&q), dst = parseNum(&q), src = parseNum(&q), len = parseNum(&q);
-            if (tag > g_wTag && len >= 1 && len <= 16) {
+            if (tag > wSeen && len >= 1 && len <= 16) {
                 if (readable(src, len) && writable(dst, len)) {
                     volatile u8 *d = (volatile u8 *)dst; const volatile u8 *sp = (const volatile u8 *)src;
                     for (u64 i = 0; i < len; i++) d[i] = sp[i];
                     g_wOk++;
                 } else g_wFail++;
-                g_wTag = tag;
+                if (tag > g_wTag) g_wTag = tag;
             }
         } else if (prefix(line, "enabled=")) { const char *q = line + 8; g_enabled = (int)parseNum(&q); }
         else if (prefix(line, "offset=")) { const char *q = line + 7; g_offset = (int)parseNum(&q); }
@@ -360,18 +429,69 @@ static u8 W_MUp(void *s, void *a, const u8 *e)     { maybeReload(0, 0); return g
 static const HandlerFn WRAP[NSLOT] = { W_KeyDown, W_KeyUp, W_Analog, W_MDown, W_MUp };
 
 /* ---- install ---- */
-static void install(void) {
-    volatile u64 *vt = (volatile u64 *)PROC_VTABLE;
-    if (!readable(PROC_VTABLE, 8 * 16)) { g_reason = "vtable not readable"; return; }
-    if (vt[DEBUGNAME_SLOT] != DEBUGNAME_FN) { g_reason = "mismatch: GetDebugName slot"; return; }
-    for (int i = 0; i < NSLOT; i++) g_orig[i] = (HandlerFn)EXPECT[i];
+/* Build b against the live processor vtable: 0 = matches (unpatched), 1 = already patched by this module,
+ * -1 = vtable not readable, -2 = GetDebugName slot differs, -3 = handler slot index *bad differs. */
+static int checkBuild(const Build *b, int *bad) {
+    const volatile u64 *vt = (const volatile u64 *)b->procVtable;
+    if (!readable(b->procVtable, 8 * 16)) return -1;
+    if (vt[DEBUGNAME_SLOT] != b->debugNameFn) return -2;
     int already = 1;
     for (int i = 0; i < NSLOT; i++) if (vt[SLOT[i]] != (u64)WRAP[i]) already = 0;
-    if (already) { g_installed = 1; g_reason = "ok (already patched)"; return; }
-    for (int i = 0; i < NSLOT; i++)
-        if (vt[SLOT[i]] != EXPECT[i]) { g_reason = "mismatch: handler slot"; return; }
+    if (already) return 1;
+    for (int i = 0; i < NSLOT; i++) if (vt[SLOT[i]] != b->expect[i]) { *bad = i; return -3; }
+    return 0;
+}
+
+/* g_reason when no set matched: the kind of the closest mismatch, then what each set expected. */
+static char g_reasonBuf[512];
+static void mismatchReason(const int *verdict, const int *bad) {
+    char *b = g_reasonBuf; int n = 0, cap = sizeof g_reasonBuf, anyHandler = 0, anyName = 0;
+    for (int k = 0; k < NBUILD; k++) { if (verdict[k] == -3) anyHandler = 1; if (verdict[k] == -2) anyName = 1; }
+    n = sappend(b, n, cap, anyHandler ? "mismatch: handler slot (" : anyName ? "mismatch: GetDebugName slot ("
+                                                                             : "vtable not readable (");
+    for (int k = 0; k < NBUILD; k++) {
+        const Build *s = &BUILDS[k];
+        const volatile u64 *vt = (const volatile u64 *)s->procVtable;
+        if (k) n = sappend(b, n, cap, "; ");
+        n = uappend(b, n, cap, s->cl, 0);
+        if (verdict[k] == -1) {
+            n = sappend(b, n, cap, ": vtable "); n = uappend(b, n, cap, s->procVtable, 1);
+            n = sappend(b, n, cap, " not readable");
+        } else if (verdict[k] == -2) {
+            n = sappend(b, n, cap, ": GetDebugName slot "); n = uappend(b, n, cap, vt[DEBUGNAME_SLOT], 1);
+            n = sappend(b, n, cap, " != "); n = uappend(b, n, cap, s->debugNameFn, 1);
+        } else {
+            int i = bad[k];
+            n = sappend(b, n, cap, ": handler slot "); n = uappend(b, n, cap, (u64)SLOT[i], 0);
+            n = sappend(b, n, cap, " "); n = uappend(b, n, cap, vt[SLOT[i]], 1);
+            n = sappend(b, n, cap, " != "); n = uappend(b, n, cap, s->expect[i], 1);
+        }
+    }
+    n = sappend(b, n, cap, ")");
+    g_reason = g_reasonBuf;
+}
+
+static void install(void) {
+    int verdict[NBUILD], bad[NBUILD];
+    const Build *pick = 0;
+    int pv = 0;
+    for (int k = 0; k < NBUILD; k++) {
+        bad[k] = 0;
+        verdict[k] = checkBuild(&BUILDS[k], &bad[k]);
+        if (verdict[k] >= 0 && !pick) { pick = &BUILDS[k]; pv = verdict[k]; }
+    }
+    if (!pick) {
+        /* nothing patched; a set whose GetDebugName matched still names the build (status, resolve, 'wo') */
+        for (int k = 0; k < NBUILD && !g_b; k++) if (verdict[k] == -3) g_b = &BUILDS[k];
+        mismatchReason(verdict, bad);
+        return;
+    }
+    g_b = pick;
+    volatile u64 *vt = (volatile u64 *)pick->procVtable;
+    for (int i = 0; i < NSLOT; i++) g_orig[i] = (HandlerFn)pick->expect[i];
+    if (pv == 1) { g_installed = 1; g_reason = "ok (already patched)"; return; }
     u32 old = 0, tmp = 0;
-    void *page = (void *)(PROC_VTABLE + 8 * 2);
+    void *page = (void *)(pick->procVtable + 8 * 2);
     if (!VirtualProtect(page, 8 * 6, 0x04 /*PAGE_READWRITE*/, &old)) { g_reason = "VirtualProtect failed"; return; }
     for (int i = 0; i < NSLOT; i++) vt[SLOT[i]] = (u64)WRAP[i];     /* aligned 8-byte stores: atomic */
     VirtualProtect(page, 8 * 6, old, &tmp);

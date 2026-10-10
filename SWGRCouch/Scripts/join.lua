@@ -867,7 +867,7 @@ function M.resync()
              or St.menu.visible == "lobby"))
     St.join.keep = false
     if not keep then
-        M.close("resync: not returning to the SPLIT SCREEN tab")   -- guests kept, join session closed
+        M.close("resync: not returning to the FREE MODE tab")   -- guests kept, join session closed
     elseif St.menu.visible == "lobby" and not St.join.frozen and not St.join.active then
         M.open()                                      -- the lobby page survived the round trip (rare)
     else

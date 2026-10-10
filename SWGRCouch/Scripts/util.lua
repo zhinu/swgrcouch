@@ -697,6 +697,54 @@ end
 -- `post` (or, if it has none, its `pre`) runs there. RegisterHook throws when the UFunction is not in memory,
 -- so the path is checked with StaticFindObject first and otherwise queued in St.pendingHooks;
 -- U.retryPendingHooks() (SLOW loop + NotifyOnNewObject callbacks) registers it once the class is loaded.
+---------------------------------------------------------------------------------------------------- hook thread anchor
+-- 0.10.0, defense in depth. UE4SS runs every RegisterHook / NotifyOnNewObject / LoopInGameThread* / ExecuteInGameThread*
+-- callback of this mod on ONE shared Lua thread (LuaMod.cpp ensure_hook_thread_exists). Its only GC anchor is the
+-- registry ref handed to the registration that created it (make_hook_state; later callers get LUA_REFNIL). If that
+-- registration is ever released (native hook removed, NotifyOnNewObject callback returning true), the GC may free the
+-- thread while callbacks keep running on it (upstream RE-UE4SS issue #1345). In this mod the creator is the permanent
+-- gfx hook (1,2), so it does not happen today (notes/research/ue4ss-hook-thread-gc.md §2); the 13_27_33 crash was the
+-- keybind race fixed by keyq.lua. We still keep our own strong reference to every non-main thread a callback runs on
+-- (sched wrappers + the hook dispatcher call this). VERIFY(V-CORE-12): "hook thread anchored by the mod (UE4SS
+-- registry anchor present)" once per session, and a WARN if UE4SS later drops its anchor (U.checkThreadAnchor). The
+-- registry walk can miss a key that another thread inserts mid-walk; with keyq no other thread inserts after load.
+local anchoredThreads = {}
+_G.SWGRCouch_hookThreads = anchoredThreads
+local anchorWatch = { thread = nil, inRegistry = nil, dropped = false, lastCheckMs = nil }
+
+local function registryHolds(co)
+    local ok, found = pcall(function()
+        for _, v in pairs(debug.getregistry()) do
+            if v == co then return true end
+        end
+        return false
+    end)
+    return ok and found == true
+end
+
+function U.anchorThread()
+    local co, isMain = coroutine.running()
+    if co == nil or isMain or anchoredThreads[co] then return end
+    anchoredThreads[co] = true
+    anchorWatch.thread = co
+    anchorWatch.inRegistry = registryHolds(co)
+    U.log("core", "hook thread anchored by the mod (UE4SS registry anchor %s) (V-CORE-12)",
+        anchorWatch.inRegistry and "present" or "MISSING")
+end
+
+-- SLOW loop, every 30 s: one WARN when UE4SS's own anchor disappears (the mod's reference keeps the thread alive).
+function U.checkThreadAnchor()
+    local co = anchorWatch.thread
+    if co == nil or anchorWatch.dropped or anchorWatch.inRegistry ~= true then return end
+    local now = St.nowMs()
+    if anchorWatch.lastCheckMs and now - anchorWatch.lastCheckMs < 30000 then return end
+    anchorWatch.lastCheckMs = now
+    if not registryHolds(co) then
+        anchorWatch.dropped = true
+        U.warn("core", "UE4SS released its registry anchor of the shared hook thread; the mod's own reference keeps it alive (V-CORE-12)")
+    end
+end
+
 -- Callback params are RemoteUnrealParams (use :get()). Dispatchers always return nil (no return override).
 local hookSubs = {}     -- path -> array of {tag=, pre=, post=}
 local hookFailed = {}   -- path -> error text (UFunction exists but is not hookable: never retried)
@@ -704,6 +752,7 @@ local hookFailed = {}   -- path -> error text (UFunction exists but is not hooka
 local function isNativePath(path) return ssub(path, 1, 8) == "/Script/" end
 
 local function dispatch(path, which, ...)
+    U.anchorThread()
     local list = hookSubs[path]
     if not list then return nil end
     for i = 1, #list do

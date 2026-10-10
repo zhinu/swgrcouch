@@ -9,9 +9,9 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION   = "0.9.3"
+C.VERSION   = "0.10.1"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
-C.TAB_LABEL = "SPLIT SCREEN"
+C.TAB_LABEL = "FREE MODE"     -- 0.10.1: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 
 -- Game tab id (FName string) -> WS_ScreenContent index of the game's own pane [MT§2]
 C.GAME_TABS = {

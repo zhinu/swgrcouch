@@ -519,7 +519,7 @@ local function armDropped(reason)
       local gen = St.worldGen
       sched.after(TAG, 200, function()
         if St.worldGen ~= gen or not inFrontEnd() or St.launch.pending then return end
-        U.log(TAG, "%s: reopening the SPLIT SCREEN tab on the installed menu", reason)
+        U.log(TAG, "%s: reopening the FREE MODE tab on the installed menu", reason)
         U.try(TAG, function() U.mod("menu_tab").selectOurTab() end)
       end)
     end

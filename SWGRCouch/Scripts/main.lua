@@ -42,10 +42,18 @@ local TAG = "main"
 -- 0.8.0 (integration of the 0.7.2 work): vpreview (3D render of each RACE SETUP vehicle pick, front end only) is listed
 -- right after setup so a load error shows at boot (setup requires it itself and ticks it from its FAST pollNav; no init,
 -- no loop of its own) and persisted for hot reload (its photo-bay actors are destroyed by the next Lua state).
+-- 0.10.0 RACERS step (notes/design/vehicle-step-v2.md): pilots (pilot table), perkdata (generated perk catalog, pure
+-- data), perks (pure loadout logic), perkapply (launch writes: base-build patch, pilots, loadouts, PRERACE traits),
+-- cards (card widgets) and racers (the step's per-player state machines) are listed right after cmap so a load error
+-- shows at boot. No init, no loop of their own: setup.lua reaches racers / cards / perkapply lazily and ticks racers
+-- from its FAST pollNav; launch.raceTick ticks perkapply. perkapply is persisted for hot reload (the in-memory
+-- base-build patch record: the next Lua state restores the asset by path).
 local MODULES = { "phase", "fastboot", "ui", "menu_tab", "lobby", "join", "split", "vehicles", "setup", "vpreview", "cmap",
+                  "pilots", "perkdata", "perks", "perkapply", "cards", "racers",
                   "builder", "launch", "inputfix", "hud", "uxsplit", "subsplit", "present", "ignition", "ignpad", "wreck",
                   "crashcam", "nametags", "gfx", "pause",
-                  "roster", "takeover", "net", "netfix", "diag", "keys", "testcmd", "viewguard", "menubridge" }
+                  "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
+                  "feowner" }
 local mods = {}
 for _, name in ipairs(MODULES) do
   local ok, m = pcall(require, name)
@@ -119,7 +127,7 @@ end
 --    lazily on the game thread (first armed race timeout), never here.
 local INIT_ORDER = { "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
                      "uxsplit", "subsplit", "hud", "present", "wreck", "crashcam", "gfx", "pause", "net", "netfix", "diag",
-                     "testcmd", "viewguard", "menubridge" }
+                     "testcmd", "viewguard", "menubridge", "feowner" }
 for _, name in ipairs(INIT_ORDER) do
   if name ~= "present" or cfg.PresentFromMain == true then call(name, "init") end
 end
@@ -140,7 +148,7 @@ call("keys", "init")
 --     duplicate page/HUD; cvars are restored in the next front end.
 local SHARED_PREFIX = C.MOD .. "."
 local PERSIST_MODULES = { "join", "net", "gfx", "takeover", "launch", "inputfix", "wreck", "crashcam", "subsplit",
-                          "vpreview" }
+                          "vpreview", "perkapply" }
 
 local function sharedPut(name, v)
   local ok, err = pcall(function() ModRef:SetSharedVariable(SHARED_PREFIX .. name, v) end)
@@ -196,6 +204,8 @@ local function measureFast()
 end
 
 local function fastTick()
+  -- 0.10.0: keyboard presses queued by keyq's event-loop callbacks run here, on the game thread, in every phase
+  U.try(TAG, mods.keyq and mods.keyq.drain or function() end)
   measureFast()
   if St.join.active then call("join", "poll") end
   -- every ClickMode: ui.pollClicks runs the lobby's pad/keyboard navigation (cfg.LobbyPadNav) and, in ClickMode
@@ -238,6 +248,7 @@ local function mainTick()
     if mt and (type(mt.pollWanted) ~= "function" or mt.pollWanted()) then call("menu_tab", "pollTab") end
     -- guests get their own names already in the menu (feedback 5; 1 s throttle inside, cheap without guests)
     call("nametags", "namesTick")
+    call("feowner", "mainTick")    -- 0.10.0: Multiplayer tab hidden while split-screen guests exist (V-FEO-07)
   elseif isRace() then
     call("roster", "tick")
     call("launch", "raceTick")     -- LOADING: per-player vehicle override retries (cheap no-op otherwise)
@@ -257,6 +268,7 @@ local function mainTick()
 end
 
 local function slowTick()
+  U.try(TAG, U.checkThreadAnchor)  -- 0.10.0 V-CORE-12: log when UE4SS drops its anchor of the shared hook thread
   U.try(TAG, U.retryPendingHooks)
   if isFrontEnd() then call("menu_tab", "ensure") end
   call("net", "slowTick")
