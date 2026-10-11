@@ -9,9 +9,11 @@ the game's mod folder (`ue4ss/Mods/SWGRCouch/README.md`).
 > **⚠ Offline play only.** With the mod installed, the game's online mode may stop working: by default the mod turns off
 > the game's Epic account link in the game profile (`FastBootEpic = "off"`, §2.6), as accepting the game's own "EOS
 > linking will be disabled" prompt does, and online play may need that link. On our test machine, starts with Steam
-> online stopped at the main menu; starts with Steam in Offline Mode worked. Play with Steam in Offline Mode. Before
-> installing, keep a copy of the game's `Saved` folder if you may want online play later: putting it back restores the
-> link setting (removing the mod alone does not; see the README's *Uninstall*).
+> online stopped at the main menu; starts with Steam in Offline Mode worked. Play with Steam in Offline Mode, with Steam
+> Cloud turned off for the game (its saves are synced through Steam Cloud). Before installing, keep a copy of the game's
+> `Saved` folder, and put it back before you play online again: the game may upload race times set offline to its
+> online leaderboards later, so a save used with the mod should not go online. Putting it back also restores the link
+> setting (removing the mod alone does not; see the README's *Uninstall*).
 
 > **Status: first live runs done (2026-10-06, session A, Proton GE-Proton11-7, UE4SS v3.0.1-1160 (the UE4SS of that
 > time; the hotfixed game needs the Galactic Racer Edition, §2.1) + the custom signatures in `ue4ss_signatures/`);

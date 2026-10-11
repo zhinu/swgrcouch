@@ -17,10 +17,15 @@ complete loadout**: abilities, parts, upgrade levels, racer style and traits, al
 > online stopped at the main menu, while starts with Steam in Offline Mode worked. So:
 > - Start Steam in **Offline Mode** (Steam menu > Go Offline) before you play with the mod, and do not use the mod for
 >   online play.
-> - If you may want to play online later, keep a copy of the game's `Saved` folder from before the install (Proton:
+> - **Turn off Steam Cloud for the game** while you use the mod (Steam: right-click the game > Properties > General).
+>   The game's saves are synced through Steam Cloud: otherwise Steam can upload the save you played with the mod, and
+>   later replace a copy you put back.
+> - Keep a copy of the game's `Saved` folder from before the install (Proton:
 >   `steamapps/compatdata/4078430/pfx/drive_c/users/steamuser/AppData/Local/StarWarsGalacticRacer/Saved`; Windows:
->   `%LOCALAPPDATA%\StarWarsGalacticRacer\Saved`). Putting it back restores the link setting, and your progress as it
->   was then. Removing the mod alone may not bring online play back (see *Uninstall*).
+>   `%LOCALAPPDATA%\StarWarsGalacticRacer\Saved`) and **put it back before you play online again**: the game may upload
+>   race times set offline to its online leaderboards later, so a save used with the mod should not go online. Putting
+>   it back also restores the link setting, and your progress as it was then. Removing the mod alone may not bring
+>   online play back (see *Uninstall*).
 
 ![RACERS with four players](docs/screenshots/0.12/14-racers-4-players.jpg)
 
@@ -327,7 +332,8 @@ main menu has a **FREE MODE** tab with four posters. In a race with two pads, th
   `install.sh --prefix <wine prefix> --net-off` removes the network override, and `--fastboot-ini-undo` turns the
   Epic link setting in `GameUserSettings.ini` back on.
 - The Epic link setting in your game profile stays off after an uninstall. To play online again, put back the `Saved`
-  folder you copied before the install (see the warning at the top).
+  folder you copied before the install, with Steam Cloud still off for the game so Steam does not replace it (see the
+  warning at the top).
 
 ## Play
 1. Main menu > **FREE MODE** (LB / RB).
