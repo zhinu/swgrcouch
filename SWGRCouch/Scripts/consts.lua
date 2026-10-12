@@ -9,7 +9,7 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION = "0.13.0"
+C.VERSION = "0.13.1"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
 C.TAB_LABEL = "FREE MODE"     -- 0.11.0: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 
@@ -241,6 +241,8 @@ C.UX = {
     TintNone      = { R = 1, G = 1, B = 1, A = 1 },
     TintLastCrash = { R = 1.009, G = 0.093, B = 0.3045, A = 1 },   -- AfterburnerColor_LastCrash / _Default per channel
     TintRamjet    = { R = 0.0517, G = 0.544, B = 15.0, A = 1 },    -- RamjetColor / AfterburnerColor_Default per channel
+    TintOverheat  = { R = 2.2, G = 0.12, B = 0.05, A = 1 },        -- ramjet overheat: hot red (OverheatColor-like), the
+                                                                   -- game's "stop accelerating" warning per view
     FadeColour    = { R = 0.45, G = 0.02, B = 0.0, A = 1 },        -- final-life camera tint (dark red)
     FlashColour   = { R = 1.0, G = 0.85, B = 0.6, A = 1 },         -- system-malfunction camera flash (warm white)
     IconDim       = { R = 0.1, G = 0.1, B = 0.1, A = 0.1 },        -- BotEngineInfo icon "off" (its own SelectColor value)

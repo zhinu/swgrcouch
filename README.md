@@ -5,7 +5,7 @@ race **any track on any planet, in any vehicle class (podracers included), in an
 AI grid. Play **alone or with up to 4 local players** on one screen. Every player picks their own **pilot, vehicle and
 complete loadout**: abilities, parts, upgrade levels, racer style and traits, all unlocked.
 
-> **Version 0.13.0.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
+> **Version 0.13.1.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
 > 1280x720 test window; account names are blurred. The game itself is not included: you need a legitimately bought
 > copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It contains no game
 > code and no game files: its pages are drawn with the art and fonts of your installed game, and the perk menus use
@@ -48,7 +48,7 @@ then loads to the max - and shows the overheat up to the explosion), the ramjet 
 player's view, no global recolour), **P1's chase camera** (it sat rigid on the car's back until the first crash),
 **P1's camera stick** after an earlier wreck (stale spectate controls leaked into the next race), and the **race
 audio** no longer goes quiet for everyone when player 1 is out while others still race. Also: one podium hologram and
-your own placement on the finish screen, no QUIT GAME flash on B, and P1's B can recover a critical malfunction.
+your own placement on the finish screen, no QUIT GAME flash on B, and P1's B can recover a critical malfunction. **0.13.1:** holding the ramjet into the overheat turns that player's own view red - the "stop accelerating" warning - and back when they let go; blue while it fires. Only that player's screen.
 
 ![A two-player split race](docs/screenshots/0.13/02-race-2-players.jpg)
 ![A four-player split race](docs/screenshots/0.13/03-race-4-players.jpg)

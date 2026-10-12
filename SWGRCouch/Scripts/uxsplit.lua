@@ -1387,7 +1387,7 @@ end
 
 -- "own": each HUD root is tinted from ITS player's state, written only on a change (UserWidget:SetColorAndOpacity
 -- multiplies every child; WBP_Hud_Race's animations target children only). Last crash (health 1) wins over ramjet.
-local TINTS = { none = FX.TintNone, danger = FX.TintLastCrash, ramjet = FX.TintRamjet }
+local TINTS = { none = FX.TintNone, danger = FX.TintLastCrash, ramjet = FX.TintRamjet, overheat = FX.TintOverheat }
 local function tintTick(ps)
     for _, e in ipairs(E.list) do
         local want = "none"
@@ -1400,9 +1400,13 @@ local function tintTick(ps)
                 want = "danger"
             elseif A.ramjet then
                 local vs = st.vs
-                local bs
+                local bs, rs
                 if vs then pcall(function() bs = vs.BoostState end) end        -- EBoostState: 3 MovingToRamjet, 4 Ramjet
-                if type(bs) == "number" and bs >= 3 then want = "ramjet" end
+                if vs then pcall(function() rs = tonumber(vs.RamjetState) end) end
+                -- 0.13.0 (Jules: "second box in red, as in warning stop accelerating"): the ramjet OVERHEAT (RamjetState
+                -- 4-6, bypass filling toward the explosion) turns THIS view red; firing (<=3) keeps the blue tint
+                if type(rs) == "number" and rs >= 4 and rs <= 6 then want = "overheat"
+                elseif type(bs) == "number" and bs >= 3 then want = "ramjet" end
             end
         end
         -- review 0.7.0: validated first; and a HUD with no record gets TintNone once too (a tint left by a quiet disarm
