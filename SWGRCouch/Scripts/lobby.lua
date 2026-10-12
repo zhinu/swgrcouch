@@ -19,14 +19,20 @@
 -- lobby-2p.png, lobby-1p.png, options.png. With cfg.UiStyle = "v2" (the default; read at page build, a live switch
 -- rebuilds the page content at its next show) the emptied WBP_Setting_List root holds ONE FuseCanvasPanel
 -- (St.ui.canvas, VerticalBoxSlot Fill) and everything is placed on it in screen su (theme.pageGeometry):
---   * four painted posters (theme.poster): the RACE event card (the chosen track's Arcade tile from setup.raceArt),
---     START RACE (T_UI_FE_Tile_03), PLAYERS (T_UI_FE_Tiles_MP_Custom_01) and OPTIONS (T_UI_Difficulty_Tile_04), each
---     over an invisible ghost button (theme.ghost = ui.ghost) that keeps its ROW_ORDER id ("race", "start", "pads"; new
---     "options"), so St.ui.rows, refresh, focusedId, activate and ui.pollClicks work as before. The painted focus look
---     follows the ghosts' CommonUI focus / mouse hover every FAST tick (v2Tick, run from lobby.keepFocus);
---   * tile states (§4.2): START locked with its reason (C11; still focusable, A posts the reason as a RUST warn pill)
---     or "Launching…"; PLAYERS with the RUST "Press again to confirm" badge of the 2-press opt-in, locked while the
---     player set is frozen;
+--   * five painted posters (theme.poster), 0.13.0 FREE MODE redesign (the user, 2026-10-12: "free mode should have
+--     quick race, custom race and galaxy run (and add players and options)"): QUICK RACE (T_UI_FE_Tile_03), CUSTOM
+--     RACE (T_UI_FE_Tile_05) and GALAXY RUN (T_UI_MapEvent_Bg) on the top row, ADD PLAYERS (T_UI_FE_Tiles_MP_Custom_01)
+--     and OPTIONS (T_UI_Difficulty_Tile_04) below, each over an invisible ghost button (theme.ghost = ui.ghost) with
+--     the ids "quick", "custom", "galaxy", "pads", "options", so St.ui.rows, refresh, focusedId, activate and
+--     ui.pollClicks work as for the rows. QUICK / CUSTOM set PlayMode and open RACE SETUP; GALAXY RUN arms a run of
+--     RunPick races and opens RACE SETUP, between run races it opens the next race, and RIGHT on it (a focus trap, as
+--     OPTIONS' value rows) steps the run length or switches the route. The painted focus look follows the ghosts'
+--     CommonUI focus / mouse hover every FAST tick (v2Tick, run from lobby.keepFocus);
+--   * the START card (no ghost) under GALAXY RUN: what P1's pad Start does (race again / the run's next race / start
+--     the armed run, or the C11 lock reason), read on the release of P1's Start (tilesTick);
+--   * tile states (§4.2): QUICK / CUSTOM locked while a Galaxy run is on; the check badge on the mode START plays;
+--     PLAYERS with the RUST "Press again to confirm" badge of the 2-press opt-in, locked while the player set is
+--     frozen;
 --   * the players strip (§4.3: join.slotStates; heads from racers.lastPilotThumb through an
 --     M_UI_CharacterProfilePicture MID) and, while NETWORK is not OFFLINE, the network line (§4.4, net.statusText);
 --     a change of that text is posted once to the pill;
@@ -38,7 +44,8 @@
 --     up / down chain, pad left / right through two invisible focus traps, keyboard left / right through onKey).
 -- UiStyle = "classic" (and a v2 page that cannot be built) keeps the 0.11.0 rows below unchanged.
 -- VERIFY ids (spec §14): V-FIN-01 (page origin measured at the show vs the build), V-FIN-04 (ghost focus, explicit
--- navigation, clicks, focus traps), V-FIN-12 (the pill, theme.lua), V-FIN-15 (OPTIONS back route).
+-- navigation, clicks, focus traps), V-FIN-12 (the pill, theme.lua), V-FIN-15 (OPTIONS back route), V-FIN-17 (0.13.0:
+-- P1's pad Start runs START on the FREE MODE page and opens no game screen).
 
 local C = require("consts")
 local cfg = require("config")
@@ -67,6 +74,8 @@ local LAYOUT_TEXT = {["top-bottom"] = "TOP / BOTTOM", ["side-by-side"] = "SIDE B
 local GFX_WORD = {auto = "Auto", performance = "Performance", quality = "Quality", off = "My settings"}
 local LAYOUT_WORD = {["top-bottom"] = "Top / bottom", ["side-by-side"] = "Side by side"}
 local NET_WORD = {offline = "Offline", host = "Host", join = "Join"}
+local MODE_WORD = {quick = "Quick race", custom = "Custom race"}       -- 0.13.0 settings PlayMode (quick.lua)
+local RUN_PICKS = {"4", "6", "9"}                                     -- 0.13.0 GALAXY RUN lengths (settings RunPick)
 
 local function onOff(v) return v and "ON" or "OFF" end
 
@@ -90,24 +99,26 @@ local nav = { idx = nil, hl = nil, primed = false, prev = {}, vdir = 0, vNextMs 
 
 ---------------------------------------------------------------------------------------------------- UI v2 state
 -- (spec §4 / §5; the code is in the "UI v2" section near the end of this file)
-local TILE_IDS = {"race", "start", "pads", "options"}                 -- the lobby ghosts (tiles mode, §4.6)
-local OPT_IDS = {"layout", "gfx", "takedown", "tags", "kbp1", "net", "netact", "adv"}   -- OPTIONS list (§5.3)
-local RIGHT_COLUMN = {start = true, pads = true, options = true}
+local TILE_IDS = {"quick", "custom", "galaxy", "pads", "options"}     -- the lobby ghosts (tiles mode, §4.6; 0.13.0)
+local OPT_IDS = {"layout", "gfx", "takedown", "tags", "kbp1", "run", "net", "netact", "adv"}   -- OPTIONS (§5.3)
 
 -- One page instance (lobby.resetNav replaces it: the widgets die with their page). style: the UiStyle the page was
 -- built for ("v2" | "classic"; a v2 build that failed falls back to the rows and keeps "v2", so no rebuild loop);
 -- active: the v2 canvas is up; mode: "tiles" | "options"; geo: the page geometry the content was placed with (screen
 -- su; theme's builders convert with it), geoNow: the latest measurement, shift: the canvas render translation that
--- corrects the difference (alignCanvas, V-FIN-01); posters / race / badge / strip / pill / opt: theme elements;
--- painted: the tile with the focus look; lastRight: the right-column tile focused last (race -> right, §4.6); sig:
--- refresh signatures; ghostKeys: registry keys of our ghosts (dropped when the v2 build fails); bPrev / wasCovered:
--- the OPTIONS back route's B edge; lrAtMs: last left / right step (a focus trap skips a second step of one press).
+-- corrects the difference (alignCanvas, V-FIN-01); posters / galaxy / again / badge / strip / pill / opt: theme
+-- elements (galaxy: the GALAXY RUN poster's event texts, again: the START card); painted: the tile with the focus look;
+-- sig: refresh signatures; ghostKeys: registry keys of our ghosts (dropped when the v2 build fails); bPrev / wasCovered:
+-- the OPTIONS back route's B edge; lrAtMs: last left / right step (a focus trap skips a second step of one press);
+-- trapR: GALAXY RUN's right focus trap; sPrev / sArmed: P1's pad Start (held at the last tick / pressed while nothing
+-- covered the lobby: the release runs START).
 local function newV2()
   return { style = nil, active = false, mode = "tiles", ctx = nil, root = nil, geo = nil, geoNow = nil,
-           shift = {0, 0}, canvas = nil, tilesCv = nil, posters = {}, race = {}, badge = {}, badgeOn = false,
-           strip = nil, pill = nil, opt = nil, painted = nil, lastRight = "start", sig = {}, ghostKeys = {},
+           shift = {0, 0}, canvas = nil, tilesCv = nil, posters = {}, galaxy = {}, again = nil, badge = {},
+           badgeOn = false, strip = nil, pill = nil, opt = nil, painted = nil, sig = {}, ghostKeys = {},
            bPrev = true, wasCovered = false, lrAtMs = -1e9, optLast = nil, headWait = false, focusSeen = false,
-           raceRacers = nil, startState = nil, fitIn = nil, fitOut = nil }
+           raceRacers = nil, startState = nil, againKey = nil, againView = nil, fitIn = nil, fitOut = nil,
+           trapR = nil, sPrev = true, sArmed = false }
 end
 local V2 = newV2()
 
@@ -220,6 +231,24 @@ local function validChoice()
   return okB and valid == true
 end
 
+-- 0.13.0 GALAXY RUN (run.lua): a run is on / between two of its races / armed (RunLength: the next launch starts one).
+local function runIs(what)
+  local ok, v = pcall(function()
+    local run = U.mod("run")
+    if what == "on" then return run.active() end
+    if what == "between" then return run.betweenRaces() end
+    return (not run.active()) and run.lengthSetting() ~= nil
+  end)
+  return ok and v == true
+end
+
+-- 0.13.0: the poster of the mode START plays (its check badge, the default focus): GALAXY RUN while a run is on or
+-- armed, else the PlayMode's.
+local function modeTile()
+  if runIs("on") or runIs("armed") then return "galaxy" end
+  return (settings.get("PlayMode") == "custom") and "custom" or "quick"
+end
+
 local function netMode()
   return settings.get("NetMode") or "offline"
 end
@@ -280,6 +309,16 @@ local LABEL = {
     return "", "", "action"
   end,
   adv = function() return "Race builder", "OPEN", "action" end,   -- v2 OPTIONS > ADVANCED (§4.7: the word DEV goes)
+  -- 0.13.0 GALAXY RUN (run.lua): off / 4 / 6 / 9 races; while a run is on: its race and hull, A twice abandons it
+  run = function()
+    local okR, r = pcall(function() return U.mod("run") end)
+    local st = okR and r and r.state and r.state() or nil
+    if st and st.status == "on" then
+      return "Galaxy run", string.format("RACE %d / %d · HULL %d", st.race or 1, st.length or 0, st.hull or 0), "action"
+    end
+    local v = tostring(settings.get("RunLength") or "off")
+    return "Galaxy run", (v == "off") and "OFF" or (v .. " RACES"), "cycle"
+  end,
 }
 
 local CLASSIC_NAME = {layout = "2P LAYOUT", gfx = "SPLIT GRAPHICS", takedown = "TAKEDOWN CAMERAS", tags = "NAME TAGS",
@@ -409,9 +448,11 @@ local BUTTON_ACTIONS = {
   netact = function() lobby.onNetAction() end,
   start = function() lobby.onStart() end,
   options = function() lobby.openOptions() end,       -- 0.12.0 v2: the OPTIONS tile
+  run = function(dir) lobby.onRun(dir) end,            -- 0.13.0 OPTIONS > Galaxy run
 }
 
--- 0.12.0 v2 START tile: locked = A posts the reason as a warn pill (the tile keeps the focus); launching = A ignored.
+-- 0.12.0 v2 START (0.13.0: P1's pad Start on the FREE MODE page, the START card shows what it does): locked = the
+-- reason as a warn pill; launching = ignored.
 local function startTile()
   local st = startStateV2()
   if st.kind == "launching" then
@@ -423,9 +464,9 @@ local function startTile()
     St.ui.dirty = true
     return
   end
-  -- review fix (task #14): a guest's A can also click P1's CommonUI focus, and START is the v2 default focus (§4.6;
-  -- 0.11.0 focused RACE, where the leak only opened RACE SETUP): a click within CardGuestClickGuardMs of a guest pad's
-  -- A is that guest's join / press, not P1's START (racers.lua's V-RC-07 guard on P1's sink)
+  -- review fix (task #14): a guest's A can also click P1's CommonUI focus (START was the 0.12.0 default focus, §4.6):
+  -- a START within CardGuestClickGuardMs of a guest pad's A is that guest's join / press, not P1's START (racers.lua's
+  -- V-RC-07 guard on P1's sink)
   local okG, gid, age = pcall(function()
     return U.mod("join").guestPressWithin(tonumber(opt("CardGuestClickGuardMs", 150)) or 150)
   end)
@@ -437,8 +478,28 @@ local function startTile()
   lobby.onStart()
 end
 
+-- 0.13.0 (task #14): the same guest-press guard on every poster (a joining guest's A also clicked RACE / ADD PLAYERS /
+-- OPTIONS under P1's cursor: RACE SETUP opened on a join).
+local function guarded(id, fn)
+  return function(...)
+    local okG, gid, age = pcall(function()
+      return U.mod("join").guestPressWithin(tonumber(opt("CardGuestClickGuardMs", 150)) or 150)
+    end)
+    if okG and gid ~= nil then
+      U.log(TAG, "%s tile click dropped: guest pad %s pressed A %d ms before it (task #14, V-RC-07)", id,
+        tostring(gid), math.floor(tonumber(age) or 0))
+      return
+    end
+    return fn(...)
+  end
+end
+
 -- Actions of the v2 page that differ from the rows' (resolved per call: a page may change style after a rebuild).
-local V2_ACTIONS = {start = startTile}
+local V2_ACTIONS = {quick = guarded("QUICK RACE", function() lobby.onQuick() end),
+                    custom = guarded("CUSTOM RACE", function() lobby.onCustom() end),
+                    galaxy = guarded("GALAXY RUN", function() lobby.onGalaxy() end),
+                    pads = guarded("ADD PLAYERS", function() lobby.onPads() end),
+                    options = guarded("OPTIONS", function() lobby.openOptions() end)}
 local function actionOf(id)
   if V2.active and V2_ACTIONS[id] then return V2_ACTIONS[id] end
   return BUTTON_ACTIONS[id]
@@ -503,9 +564,9 @@ local function buildContent(page, root, pc)
   return "classic"
 end
 
--- v2 default focus (§4.6): START with a valid race, else RACE.
+-- v2 default focus (§4.6; 0.13.0): the poster of the mode START plays.
 local function desiredFocusV2()
-  local w = St.ui.rows[validChoice() and "start" or "race"]
+  local w = St.ui.rows[modeTile()]
   if U.ok(w) and U.ok(St.menu.lobby) then St.menu.lobby:SetDesiredFocusWidget(w) end
 end
 
@@ -539,7 +600,7 @@ end
 -- false when a theme.forget dropped this page's elements while the page lives on: every builder of a dead generation
 -- is a silent no-op (the tiles would freeze), so the page content is rebuilt at its next show (setup's v2.alive twin).
 local function v2Alive()
-  local p = V2.posters and V2.posters.start
+  local p = V2.posters and V2.posters.quick
   if not (p and p.e) then return true end
   local ok, r = pcall(function() return theme().set(p.e, {}) end)
   return (not ok) or r ~= nil
@@ -597,8 +658,8 @@ function lobby.build(menu)
   St.ui.dirty = true
   U.try(TAG, lobby.refresh)                           -- correct texts before the page is ever shown
   if style == "v2" then
-    U.log(TAG, "lobby page built (UI v2: 4 posters over the ghosts race / start / pads / options, players strip, "
-      .. "status pill; OPTIONS is built at its first open) (V-FIN-04)")
+    U.log(TAG, "lobby page built (UI v2: 5 posters over the ghosts quick / custom / galaxy / pads / options, START "
+      .. "card, players strip, status pill; OPTIONS is built at its first open) (V-FIN-04)")
   else
     U.log(TAG, "lobby page built (%d rows)", #ROW_ORDER)
   end
@@ -738,7 +799,18 @@ end
 
 -- CHOOSE RACE: the RACE SETUP flow (setup.lua); the dev panel when cfg.SetupMode = "builder" or the setup page could
 -- not be built.
-function lobby.onRace()
+-- 0.13.0 GALAXY RUN: between run races START (and RACE) open the run's next race on the racer cards. -> "opened" |
+-- "failed" (between run races, but the next race could not be opened: nothing else is launched) | nil (no run race)
+local function runNext()
+  local okB, between = pcall(function() return U.mod("run").betweenRaces() end)
+  if not (okB and between) then return nil end
+  local ok, handled = pcall(function() return U.mod("run").openNext() end)
+  if ok and handled == true then return "opened" end
+  say("GALAXY RUN: THE NEXT RACE DID NOT OPEN. OPTIONS > GALAXY RUN: A TWICE ENDS THE RUN", true)
+  return "failed"
+end
+
+local function openSetup()
   local useSetup = U.mod("ui").opt("SetupMode", "setup") ~= "builder"
   local opened = false
   if useSetup then
@@ -748,6 +820,83 @@ function lobby.onRace()
   if not opened then
     if useSetup then U.warn(TAG, "race setup unavailable: opening the dev race builder") end
     U.mod("builder").open()
+  end
+  St.ui.dirty = true
+end
+
+-- The classic page's RACE row (0.13.0: between run races it switches the route; the v2 page has GALAXY RUN for that).
+function lobby.onRace()
+  local okR, sw = pcall(function()
+    local run = U.mod("run")
+    if run.betweenRaces() then
+      local sw = run.switchRoute()
+      if not sw then say("GALAXY RUN: ONE ROUTE LEFT, PRESS START") end
+      return true
+    end
+    return nil
+  end)
+  if okR and sw then St.ui.dirty = true; return end
+  if runNext() then St.ui.dirty = true; return end
+  openSetup()
+end
+
+-- 0.13.0 FREE MODE posters QUICK RACE / CUSTOM RACE: the play mode (settings PlayMode), then RACE SETUP. An armed run
+-- (RunLength) is disarmed (RunPick keeps its length for GALAXY RUN); while a run is on, its builds own every launch
+-- (run.prelaunch), so these posters refuse.
+local function playMode(mode)
+  if St.launch.pending then return end
+  if runIs("on") then
+    say("A GALAXY RUN IS ON: PLAY IT ON GALAXY RUN, OR END IT IN OPTIONS", true)
+    St.ui.dirty = true
+    return
+  end
+  settings.set("PlayMode", mode)
+  if tostring(settings.get("RunLength") or "off") ~= "off" then settings.set("RunLength", "off") end
+  U.log(TAG, "FREE MODE: %s (RACE SETUP)", MODE_WORD[mode] or mode)
+  openSetup()
+end
+
+function lobby.onQuick() playMode("quick") end
+function lobby.onCustom() playMode("custom") end
+
+-- The run length GALAXY RUN starts (settings RunPick; a length set in OPTIONS > Galaxy run updates it).
+local function runPick()
+  local v = tostring(settings.get("RunPick") or "4")
+  for _, p in ipairs(RUN_PICKS) do if p == v then return v end end
+  return RUN_PICKS[1]
+end
+
+-- 0.13.0 GALAXY RUN poster (A): between run races the run's next race on the racer cards (runNext); with no run on, the
+-- run is armed with RunPick races (run.prelaunch starts it at the launch) and RACE SETUP opens for race 1.
+function lobby.onGalaxy()
+  if St.launch.pending then return end
+  if runNext() then St.ui.dirty = true; return end
+  if runIs("on") then                                 -- on, but no race to open (a race still in flight)
+    local okT, t = pcall(function() return U.mod("run").statusText() end)
+    say(okT and t or "GALAXY RUN", false)
+    St.ui.dirty = true
+    return
+  end
+  local len = runPick()
+  settings.set("RunLength", len)
+  say("GALAXY RUN: THE NEXT RACE STARTS A " .. len .. "-RACE RUN")
+  openSetup()
+end
+
+-- 0.13.0 GALAXY RUN poster (RIGHT, its focus trap / keyboard right): between run races the route (A <-> B), else the
+-- run length 4 -> 6 -> 9 -> 4 (an armed run takes the new length).
+function lobby.onGalaxyRight()
+  if runIs("between") then
+    local okS, sw = pcall(function() return U.mod("run").switchRoute() end)
+    if not (okS and sw) then say("GALAXY RUN: ONE ROUTE LEFT") end
+  elseif not runIs("on") then
+    local cur, nxt = runPick(), RUN_PICKS[1]
+    for i, p in ipairs(RUN_PICKS) do
+      if p == cur then nxt = RUN_PICKS[i % #RUN_PICKS + 1] end
+    end
+    settings.set("RunPick", nxt)
+    if runIs("armed") then settings.set("RunLength", nxt) end
+    say("GALAXY RUN: " .. nxt .. " RACES")
   end
   St.ui.dirty = true
 end
@@ -827,7 +976,35 @@ function lobby.onNetAction()
 end
 
 function lobby.onStart()
+  if runNext() then St.ui.dirty = true; return end
   U.mod("launch").start()
+  St.ui.dirty = true
+end
+
+local runAbandonUntil = 0
+function lobby.onRun(dir)
+  local run = U.mod("run")
+  if run.active() then
+    local now = St.nowMs()
+    if now <= runAbandonUntil then
+      runAbandonUntil = 0
+      run.abandon("OPTIONS")
+      settings.set("RunLength", "off")
+      say("GALAXY RUN ABANDONED")
+    else
+      runAbandonUntil = now + 3000
+      say("PRESS A AGAIN TO ABANDON THE GALAXY RUN", true)
+    end
+  else
+    cycle("RunLength", {"off", "4", "6", "9"}, dir)
+    local v = tostring(settings.get("RunLength") or "off")
+    if v ~= "off" then
+      settings.set("RunPick", v)                        -- 0.13.0: the GALAXY RUN poster shows / starts this length
+      say("GALAXY RUN: THE NEXT RACE STARTS A " .. v .. "-RACE RUN")
+    else
+      say("GALAXY RUN OFF")
+    end
+  end
   St.ui.dirty = true
 end
 
@@ -869,6 +1046,7 @@ local LR_ACTIONS = {
   tags = function() lobby.onTags() end,
   kbp1 = function() lobby.onKbP1() end,
   net = function(dir) lobby.onNet(dir) end,
+  galaxy = function(dir) if dir > 0 then lobby.onGalaxyRight() end end,   -- 0.13.0 v2 tiles: RIGHT on GALAXY RUN
 }
 
 local PAD_KEYS = {
@@ -954,10 +1132,11 @@ local function nearest(list, id)
   return list[1]
 end
 
--- First row to focus when nothing is chosen yet: v2 tiles START with a valid race, else RACE (§4.6); else the first.
+-- First row to focus when nothing is chosen yet: v2 tiles the poster of the mode START plays (§4.6; 0.13.0); else the
+-- first.
 local function defaultIdx(list)
   if V2.active and V2.mode == "tiles" then
-    local d = validChoice() and "start" or "race"
+    local d = modeTile()
     if indexOf(list, d) then return d end
   end
   return list[1]
@@ -972,8 +1151,12 @@ local function focusedId(list, p1)
 end
 
 -- 0.12.0 v2 OPTIONS: P1's focus on BACK (command row) or on a focus trap belongs to the page too -> "back" | "trap" |
--- nil (always nil in classic and in tiles mode).
+-- nil (always nil in classic). 0.13.0 tiles mode: GALAXY RUN's right focus trap -> "trap".
 local function heldExtra(p1)
+  if V2.active and V2.mode == "tiles" then
+    if U.ok(V2.trapR) and U.mod("ui").hasFocus(V2.trapR, p1) then return "trap" end
+    return nil
+  end
   if not (V2.active and V2.mode == "options" and V2.opt) then return nil end
   local O, ui = V2.opt, U.mod("ui")
   local back = O.cmd and O.cmd.widget("back")
@@ -1263,6 +1446,7 @@ function lobby.onPageShown(which)
     if V2.active then
       U.try(TAG, alignCanvas)
       V2.bPrev, V2.wasCovered = true, false            -- a B held through the show is no edge
+      V2.sPrev, V2.sArmed = true, false                -- 0.13.0: nor is a Start (the START release)
     end
   end
   if which == "builder" then
@@ -1293,13 +1477,16 @@ local function stepRow(list, pos, step)
 end
 
 -- 0.12.0 v2 tiles mode (§4.6): the tile graph for our own poll / keybinds (the ghosts carry the same explicit rules).
--- "@right" = the right-column tile focused last.
-local GRAPH = { race = { right = "@right" }, start = { down = "pads", left = "race" },
-                pads = { up = "start", down = "options", left = "race" }, options = { up = "pads", left = "race" } }
+-- 0.13.0: QUICK / CUSTOM / GALAXY on top, PLAYERS / OPTIONS below (the START card under GALAXY takes no focus: GALAXY's
+-- down is OPTIONS); GALAXY's right is no move but its RIGHT action (focus trap, LR_ACTIONS.galaxy).
+local GRAPH = { quick = { right = "custom", down = "pads" },
+                custom = { left = "quick", right = "galaxy", down = "options" },
+                galaxy = { left = "custom", down = "options" },
+                pads = { up = "quick", right = "options" },
+                options = { up = "custom", left = "pads" } }
 local function graphMove(id, dir)
   local e = GRAPH[id or ""]
   local t = e and e[dir]
-  if t == "@right" then t = V2.lastRight or "start" end
   if t and U.ok(St.ui.rows[t]) then return t end
   return nil
 end
@@ -1413,6 +1600,9 @@ function lobby.pollNav()
           nav.idx = t
           if focusRow(t) then nav.lastFocus = t end
           setHighlight(t)
+        elseif hdir > 0 and LR_ACTIONS[nav.idx] then   -- 0.13.0: RIGHT on GALAXY RUN (no tile to its right)
+          V2.lrAtMs = now
+          activate(nav.idx, hdir)
         end
       end
     end
@@ -1467,6 +1657,17 @@ function lobby.onKey(name)
     V2.lrAtMs = St.nowMs()
     activate(nav.idx, name == "left" and -1 or 1)
     return
+  end
+  -- 0.13.0 tiles: keyboard right on GALAXY RUN (or on its focus trap) is its RIGHT action, one step per press (the trap
+  -- does not step for keyboard input, tilesTick)
+  if V2.active and V2.mode == "tiles" and name == "right" then
+    local id = focused or ((heldExtra(p1) == "trap") and "galaxy") or nav.idx
+    if id == "galaxy" then
+      nav.idx = id
+      V2.lrAtMs = St.nowMs()
+      activate(id, 1)
+      return
+    end
   end
   if focused ~= nil or heldExtra(p1) ~= nil then
     -- CommonUI holds focus on a row: it navigates and clicks with the keyboard itself; only follow its focus
@@ -1525,21 +1726,29 @@ end
 ---------------------------------------------------------------------------------------------------
 -- UI v2 (0.12.0): canvas page, posters, players strip, status pill, OPTIONS (spec §4, §5; see the file header)
 ---------------------------------------------------------------------------------------------------
--- Tile rects, screen su (spec §4.2; the mockup's LOBBY table, final/py/screens.py).
-local TILE = { race = {128, 345, 1030, 1170}, start = {1203, 345, 1005, 420}, pads = {1203, 810, 1005, 330},
-               options = {1203, 1185, 1005, 330} }
--- Event-card texts on the RACE poster, poster-local su (mockup event_card): the planet line at 70.5 % of the height,
--- the caption 70 below it, the track name 110 below it (posterTitle 54, 2 lines, wrap 902), the footer's baseline 56
--- above the bottom (box bottom = baseline + Overpass's descent 0.383 em), the focus kicker at the top.
-local RACE_TXT = { x = 64, kicker = 70, planet = 825, caption = 895, name = 935, wrap = 902, footBottom = 1128 }
+-- Tile rects, screen su (spec §4.2). 0.13.0: the 0.12.0 posters' area (x 128-2208, y 345-1515) in three columns of
+-- 663 / 663 / 664 with the 45-su gaps of the mockup: QUICK / CUSTOM / GALAXY 700 tall, PLAYERS / OPTIONS and the START
+-- card (AGAIN, no ghost) 425 tall below them.
+local TILE = { quick = {128, 345, 663, 700}, custom = {836, 345, 663, 700}, galaxy = {1544, 345, 664, 700},
+               pads = {128, 1090, 663, 425}, options = {836, 1090, 663, 425} }
+local AGAIN = { x = 1544, y = 1090, w = 664, h = 425, pad = 48, glyph = 72 }
+local TILE_TRAP = {40, 140, 24, 24}                    -- GALAXY RUN's right focus trap (OPTIONS' traps: y 100)
+-- GALAXY RUN's event texts (between run races / after a run), poster-local su, the RACE event card's stack (0.12.0
+-- mockup event_card) moved to the top of a 535-su column: planet line, the caption 60 below it (Overpass Medium Italic
+-- 30: the RACE card's letter-spaced artCaption fits 15 characters here; up to 2 lines of 40), the track name below the
+-- caption (posterTitle 54, up to 2 lines of 58), the standings below the name (one line): all above y 374, the top of
+-- the bottom text stack (kicker + 2 title lines at 69 + the focus desc). The planet line stops short of the check badge.
+local GAL_TXT = { x = 64, planet = 48, caption = 108, capLine = 40, gap = 4, nameLine = 58, standGap = 12, wrap = 535,
+                  planetW = 470 }
+local TXM = "/Game/Griffin/UI/Library/Textures/Content/MainMenu/"
+-- CUSTOM RACE's art: the chosen class's MODE strip (setup.lua MODE_V2.race)
+local CLASS_STRIP = { Car = "T_UI_FE_Tile_05", Bike = "T_UI_FE_Tile_05_Bike", Skimmer = "T_UI_FE_Tile_05_Skim",
+                      Plane = "T_UI_FE_Tile_05_Plane" }
 -- Players strip (§4.3): white @0.42 RoundedBox r 21; 270 tall, 330 with the network line; cells at x 164 + 502 i;
 -- content top = strip top + 73 (offline) / + 34 (network line). Text boxes are placed by their top = baseline - the
 -- face's ascent (Moki 0.826 em, Overpass 0.883 em; em = size x 4/3).
 local STRIP = { x = 128, y = 1560, w = 2080, h = 270, hNet = 330, top = 73, topNet = 34, cell = 164, pitch = 502,
                 ruleX0 = 164, ruleX1 = 2172, netTextX = 438, netTextW = 1700 }
-local TXA = "/Game/Griffin/UI/Library/Textures/Content/Arcade/"
--- setup.raceArt fallback (setup.lua changes in parallel): the class's CLASS-step poster tile (spec §7.1)
-local CLASS_TILE = { Car = "Mas_Car", Bike = "Dal_Bike", Skimmer = "Cor_Skimmer", Plane = "Spa_Plane" }
 local JOINED = { host = true, ready = true, disconnected = true, leaving = true }
 local CANVAS_CLS = { "/Script/Griffin.FuseCanvasPanel", "/Script/UMG.CanvasPanel" }
 local KML = "/Script/Engine.Default__KismetMaterialLibrary"
@@ -1663,7 +1872,7 @@ local function lastThumb(ctrlId)
   return nil
 end
 
----------------------------------------------------------------------------------------------------- RACE card data
+---------------------------------------------------------------------------------------------------- race data
 local function facing(o)
   if not U.ok(o) then return "" end
   local ok, t = pcall(function() return U.str(o.PlayerFacingName) end)
@@ -1673,23 +1882,8 @@ local function facing(o)
   return ""
 end
 
--- setup.raceArt(choice) (WI-05: the track's Arcade tile, else the planet x class tile), else the class's fixed tile.
-local function raceArt(c, cls)
-  local ok, p = pcall(function()
-    local S = U.mod("setup")
-    if type(S.raceArt) == "function" then return S.raceArt(c) end
-    return nil
-  end)
-  if ok and type(p) == "string" and p ~= "" then return p end
-  U.logOnce("lobby.raceArt", TAG, "setup.raceArt %s: the RACE card shows the class's fixed Arcade tile",
-    ok and "not available" or ("failed (" .. tostring(p) .. ")"))
-  local k = cls and CLASS_TILE[cls.key]
-  if k then return TXA .. "T_UI_Arcade_" .. k .. "_Tile.T_UI_Arcade_" .. k .. "_Tile" end
-  return nil
-end
-
--- The RACE event card's facts for choice c (§4.2): planet line + tone, "LANDSPEEDER · RACE", the track name, the
--- footer "REVERSE · SUNSET · 12 RACERS", the art; racers = the grid size when known (START's kicker).
+-- The facts of choice c (§4.2; 0.13.0: the START card's race line): planet line + tone, "LANDSPEEDER · RACE", the
+-- track name, the footer "REVERSE · SUNSET · 12 RACERS", the class key; racers = the grid size when known.
 local function raceView(c)
   local T = theme()
   local S = nil
@@ -1736,22 +1930,42 @@ local function raceView(c)
   end
   v.footer = table.concat(foot, " " .. DOT .. " ")
   v.racers = n
-  v.art = raceArt(c, cls)
+  v.classKey = cls and cls.key or nil
   return v
 end
 
 ---------------------------------------------------------------------------------------------------- build
-local function buildRaceTexts()
-  local T, ctx, R = theme(), V2.ctx, V2.race
-  local rc, x = V2.posters.race.cv, RACE_TXT.x
-  R.kicker = T.text(ctx, rc, "posterKicker", { text = "Change race", rect = { x, RACE_TXT.kicker }, z = 5,
-                                               visible = false })
-  R.planet = T.text(ctx, rc, "planetLine", { rect = { x, RACE_TXT.planet }, z = 5, visible = false })
-  R.caption = T.text(ctx, rc, "artCaption", { rect = { x, RACE_TXT.caption }, z = 5, visible = false })
-  R.name = T.text(ctx, rc, "posterTitle", { size = 54, colour = T.COL.WHITE, wrapW = RACE_TXT.wrap,
-                                           rect = { x, RACE_TXT.name }, z = 5, visible = false })
-  R.footer = T.text(ctx, rc, "artCaption", { align = { 0, 1 }, rect = { x, RACE_TXT.footBottom }, z = 5,
-                                             visible = false })
+-- GALAXY RUN's event texts (GAL_TXT): the next race between run races, the last run's result after one.
+local function buildGalaxyTexts()
+  local T, ctx, G = theme(), V2.ctx, V2.galaxy
+  local gc, x = V2.posters.galaxy.cv, GAL_TXT.x
+  G.planet = T.text(ctx, gc, "planetLine", { rect = { x, GAL_TXT.planet }, z = 5, visible = false })
+  G.caption = T.text(ctx, gc, "posterDesc", { rect = { x, GAL_TXT.caption }, z = 5, visible = false })
+  G.name = T.text(ctx, gc, "posterTitle", { size = 54, colour = T.COL.WHITE, wrapW = GAL_TXT.wrap,
+                                           rect = { x, GAL_TXT.caption + GAL_TXT.capLine + GAL_TXT.gap }, z = 5,
+                                           visible = false })
+  G.stand = T.text(ctx, gc, "posterDesc", { rect = { x, GAL_TXT.caption + 3 * GAL_TXT.capLine }, z = 5,
+                                            visible = false })
+end
+
+-- START card (AGAIN, 0.13.0): the strip's backer (white @0.42 RoundedBox r 21), P1's Start glyph, the action ("RACE
+-- AGAIN" / "NEXT RACE" / "START RUN", Moki 39 INK), the track (Moki 30), its class / mode caption (the strip's NETWORK
+-- label role) and the play mode / lock line (Overpass Medium Italic 30, 2 lines). No ghost: pad Start (tilesTick) is
+-- its button. Placed once; refreshAgain writes the texts.
+local function buildAgain()
+  local T, ctx, cv = theme(), V2.ctx, V2.tilesCv
+  local A, x, y, p = {}, AGAIN.x, AGAIN.y, AGAIN.pad
+  A.back = T.image(ctx, cv, { tex = T.TEX.SolidFill, drawAs = 4, radius = 21, size = { AGAIN.w, AGAIN.h },
+                              tint = T.alpha(T.COL.WHITE, 0.42), z = 0, rect = LR(x, y, AGAIN.w, AGAIN.h) })
+  if not A.back then error("START card backer not built") end
+  A.glyph = T.image(ctx, cv, { tex = T.glyph("START"), tint = T.COL.INK, z = 2,
+                               rect = LR(x + p, y + p, AGAIN.glyph, AGAIN.glyph) })
+  A.title = T.text(ctx, cv, "statusText", { colour = T.COL.INK, z = 2, rect = LP(x + p + AGAIN.glyph + 24, y + p + 12) })
+  A.line = T.text(ctx, cv, "value", { size = 30, colour = T.COL.INK, z = 2, rect = LP(x + p, y + 156) })
+  A.sub = T.text(ctx, cv, "rank", { colour = T.COL.INK, z = 2, rect = LP(x + p, y + 202) })
+  A.desc = T.text(ctx, cv, "posterDesc", { colour = T.COL.INK, wrapW = AGAIN.w - 2 * p, z = 2,
+                                           rect = LP(x + p, y + 252) })
+  V2.again = A
 end
 
 -- PLAYERS "Press again to confirm" (§4.2): MI_UI_Pill_Generic RUST + Overpass Medium Italic 30 WHITE, top-right
@@ -1800,17 +2014,20 @@ local function buildStrip()
   V2.strip = S
 end
 
--- Explicit navigation of the §4.6 graph on the four ghosts (CommonUI would move geometrically; RACE -> right must be
--- START or the right-column tile focused last, tilesTick keeps that rule current). VERIFY(V-FIN-04).
+-- Explicit navigation of the §4.6 graph (GRAPH) on the five ghosts (CommonUI would move geometrically), and GALAXY
+-- RUN's right onto its focus trap (tilesTick runs the RIGHT action and puts the focus back). VERIFY(V-FIN-04).
 local function linkTiles()
   local T, r = theme(), St.ui.rows
-  local n = 0
-  local function link(a, dir, b) if T.nav(r[a], dir, r[b]) then n = n + 1 end end
-  link("race", "right", "start")
-  link("start", "left", "race"); link("start", "down", "pads")
-  link("pads", "left", "race"); link("pads", "up", "start"); link("pads", "down", "options")
-  link("options", "left", "race"); link("options", "up", "pads")
-  U.log(TAG, "tile navigation: %d of 8 explicit rule(s) of the §4.6 graph on the ghosts (V-FIN-04)", n)
+  local n, total = 0, 0
+  for _, id in ipairs(TILE_IDS) do
+    for dir, to in pairs(GRAPH[id] or {}) do
+      total = total + 1
+      if T.nav(r[id], dir, r[to]) then n = n + 1 end
+    end
+  end
+  total = total + 1
+  if T.nav(r.galaxy, "right", V2.trapR) then n = n + 1 end
+  U.log(TAG, "tile navigation: %d of %d explicit rule(s) of the §4.6 graph on the ghosts (V-FIN-04)", n, total)
 end
 
 buildV2 = function(page, root, pc)
@@ -1841,18 +2058,27 @@ buildV2 = function(page, root, pc)
     if not p then error("poster '" .. id .. "' not built (see the [theme] log)") end
     V2.posters[id] = p
   end
-  poster("race", { titleSize = 54, ax = 0.5, ay = 0.92 })
-  poster("start", { art = T.TEX.LobbyStart, ax = 0.5, ay = 0.08, title = "START RACE", titleSize = 69 })
-  poster("pads", { art = T.TEX.LobbyPlayers, ax = 0.5, ay = 0.36, title = "ADD PLAYERS", titleSize = 60 })
+  -- 0.13.0: one word per title line (the columns are 663 su wide: "CUSTOM RACE" on one line needs 763 at 60 su)
+  -- 0.13.0 live: the tile's lower half is cream (title and texts unreadable): zoomed on its dark pods
+  poster("quick", { art = T.TEX.LobbyStart, ax = 0.5, ay = 0.2, zoom = 2.0, title = "QUICK\nRACE", titleSize = 69 })
+  poster("custom", { art = TXM .. CLASS_STRIP.Car .. "." .. CLASS_STRIP.Car, ax = 0.5, ay = 0.5,
+                     title = "CUSTOM\nRACE", titleSize = 69 })
+  poster("galaxy", { art = T.TEX.MapEventBg, ax = 0.6, ay = 0.5, title = "GALAXY\nRUN", titleSize = 69 })
+  poster("pads", { art = T.TEX.LobbyPlayers, ax = 0.5, ay = 0.36, title = "ADD\nPLAYERS", titleSize = 60 })
   poster("options", { art = T.TEX.LobbyOptions, ax = 0.5, ay = 0.62, title = "OPTIONS", titleSize = 60 })
-  buildRaceTexts()
+  buildGalaxyTexts()
   U.try(TAG, buildBadge)
+  if not U.try(TAG, buildAgain) then U.warn(TAG, "START card not built: pad Start still runs START") end
   for _, id in ipairs(TILE_IDS) do
     local w = T.ghost(ctx, V2.tilesCv, TILE[id], id, ghostFn(id), { geo = V2.geo })
     if not U.ok(w) then error("ghost '" .. id .. "' not created") end
     noteGhost(w)
     St.ui.rows[id] = w
   end
+  -- GALAXY RUN's right focus trap: an invisible ghost out of every geometric sweep (above-left of the posters), reached
+  -- only through GALAXY's explicit right rule (OPTIONS' traps)
+  V2.trapR = T.ghost(ctx, V2.tilesCv, TILE_TRAP, "tile:trapR", function() end, { geo = V2.geo })
+  noteGhost(V2.trapR)
   linkTiles()
   if not U.try(TAG, buildStrip) then U.warn(TAG, "players strip not built: the lobby works without it") end
   V2.pill = T.statusPill(ctx, canvas, V2.geo)          -- on the page canvas: tiles and OPTIONS share it
@@ -1883,33 +2109,137 @@ alignCanvas = function()
 end
 
 ---------------------------------------------------------------------------------------------------- refresh: tiles
-local function refreshRace()
+-- One line of `role` (size: nil = the role's), cut with "…" at maxW su (the network line §4.4, the GALAXY RUN / START
+-- card lines). Upper-case roles: pass the upper-case text (the width is measured on what is given).
+local function fitTo(s, role, size, maxW)
+  s = tostring(s or "")
   local T = theme()
-  local p = V2.posters.race
-  if not p then return end
-  local valid = validChoice()
-  local c = valid and St.race.choice or nil
-  local key = valid and (tostring(c) .. "|" .. tostring(c.label)) or "none"
-  if V2.sig.race == key then return end
-  V2.sig.race = key
-  local R = V2.race
-  R.valid = valid
-  if not valid then
-    V2.raceRacers = nil
-    p.set({ art = T.TEX.ScenarioEmpty, ax = 0.5, ay = 0.5, title = "CHOOSE RACE",
-            kicker = "Class, planet, track, mode" })
-    for _, e in ipairs({ R.planet, R.caption, R.name, R.footer, R.kicker }) do T.set(e, { visible = false }) end
-    return
+  if T.textWidth(s, role, size) <= maxW then return s end
+  local cut = s
+  while #cut > 0 do
+    local shorter = (cut:gsub("[\0-\127\194-\244][\128-\191]*$", ""))   -- drop the last UTF-8 character
+    -- review fix: a string ending in an invalid UTF-8 byte (0xC0, 0xC1, 0xF5-0xFF, a lone continuation byte: a
+    -- Latin-1 JoinAddress in net.statusText) matches nothing above, and this loop never ended (a game-thread hang)
+    if #shorter >= #cut then shorter = cut:sub(1, -2) end
+    cut = shorter
+    local try = (cut:gsub("[%s%p]+$", "")) .. ELLIPSIS
+    if T.textWidth(try, role, size) <= maxW then return try end
   end
-  local v = raceView(c)
-  V2.raceRacers = v.racers
-  p.set({ art = v.art or T.TEX.ScenarioEmpty, ax = 0.5, ay = v.art and 0.92 or 0.5, title = "", kicker = "" })
-  T.set(R.planet, { text = v.planet, colour = v.tone, visible = v.planet ~= "" })
-  T.set(R.caption, { text = v.caption, visible = v.caption ~= "" })
-  T.set(R.name, { text = v.track, visible = v.track ~= "" })
-  T.set(R.footer, { text = v.footer, visible = v.footer ~= "" })
-  T.set(R.kicker, { visible = V2.painted == "race" })
-  U.dbg(TAG, "RACE card: %s | %s | %s | %s | art %s", v.planet, v.caption, v.track, v.footer, tostring(v.art))
+  return ELLIPSIS
+end
+
+-- s in at most maxLines lines of maxW su: whole " · " parts packed greedily, the last line cut with "…" (fitTo).
+-- -> text ("\n" between the lines), the line count.
+local function packLines(s, role, size, maxW, maxLines)
+  s = tostring(s or "")
+  if s == "" then return "", 0 end
+  local T, sep = theme(), " " .. DOT .. " "
+  local parts, lines = {}, {}
+  for part in (s .. sep):gmatch("(.-)" .. sep) do parts[#parts + 1] = part end
+  local cur = nil
+  for i, part in ipairs(parts) do
+    local try = cur and (cur .. sep .. part) or part
+    if cur and #lines < maxLines - 1 and T.textWidth(try, role, size) > maxW then
+      lines[#lines + 1] = cur
+      cur = part
+    else
+      cur = try
+    end
+    if i == #parts then lines[#lines + 1] = fitTo(cur, role, size, maxW) end
+  end
+  return table.concat(lines, "\n"), #lines
+end
+
+-- "PRO" -> "Pro" (quick.name's difficulty words in the posters' sentence case)
+local function word(s)
+  s = string.lower(tostring(s or ""))
+  return (s:gsub("^%l", string.upper))
+end
+
+-- 0.13.0 QUICK RACE / CUSTOM RACE: the play mode's sub-texts (kicker on focus, desc under the title), the check badge
+-- on the mode START plays, CUSTOM's art = the chosen class's MODE strip; both locked while a Galaxy run is on (its
+-- builds own every launch, run.prelaunch).
+local function refreshModes()
+  local tier, name = 1, "Rookie"
+  pcall(function()
+    local q = U.mod("quick")
+    tier = q.quickTier()
+    name = word(q.name(tier))
+  end)
+  local match = settings.get("OpponentMatch") == true
+  local on, mt, cls = runIs("on"), modeTile(), "Car"
+  local v = validChoice() and V2.againView or nil       -- the chosen race's facts (refreshAgain runs first)
+  if v and CLASS_STRIP[v.classKey] then cls = v.classKey end
+  local sig = table.concat({ name, tostring(tier), tostring(match), tostring(on), mt, cls }, "|")
+  if V2.sig.modes == sig then return end
+  V2.sig.modes = sig
+  local lock = on and "A Galaxy run is on" or false
+  local q, c = V2.posters.quick, V2.posters.custom
+  if q then
+    q.set({ kicker = name .. " difficulty", desc = "Same build for everyone", lock = lock, check = mt == "quick" })
+  end
+  if c then
+    c.set({ art = TXM .. CLASS_STRIP[cls] .. "." .. CLASS_STRIP[cls], kicker = "Your own builds",
+            desc = match and "AI match the players" or ("AI on tier " .. tier), lock = lock, check = mt == "custom" })
+  end
+end
+
+-- 0.13.0 GALAXY RUN: between run races "Race n / len · Hull h" (always shown) and the next race on the event texts
+-- (route caption, planet, track, standings); after a run its result until a new one starts; with no run the length
+-- RIGHT steps (armed: the next launch starts it).
+local function refreshGalaxy()
+  local T = theme()
+  local p = V2.posters.galaxy
+  if not p then return end
+  local okR, ri = pcall(function()
+    local run = U.mod("run")
+    local st = run.state()
+    return { on = run.active(), between = run.betweenRaces(), view = run.cardView(), st = st,
+             status = st and run.statusText() or nil, stand = st and run.standingsText() or nil,
+             routes = (st and type(st.options) == "table") and #st.options or 0 }
+  end)
+  ri = (okR and type(ri) == "table") and ri or {}
+  local st, pick, armed = ri.st, runPick(), runIs("armed")
+  local f = { kickerAlways = false, check = modeTile() == "galaxy" }
+  local ev = {}                                        -- the event texts: planet, caption, name, stand
+  if ri.on and st then
+    f.kicker = string.format("Race %d / %d %s Hull %d", st.race or 1, st.length or 0, DOT, st.hull or 0)
+    f.kickerAlways = ri.between == true
+    f.desc = ""
+    if ri.between then
+      local v = type(ri.view) == "table" and ri.view or {}
+      f.desc = (ri.routes > 1) and "RIGHT: switch route" or "A: next race"
+      ev = { planet = v.planet, caption = v.caption, name = v.track,      -- the hull is in the kicker
+             stand = (tostring(v.footer or ""):gsub(" " .. DOT .. " HULL %d+$", "")) }
+    end
+  else
+    f.kicker = armed and string.format("Starts a %s-race run", pick) or (pick .. " races")
+    f.desc = "RIGHT: 4 / 6 / 9 races"
+    if st and (st.status == "won" or st.status == "lost") then      -- the last run until a new one starts
+      f.kicker = "New " .. pick .. "-race run"
+      ev = { caption = ri.status, stand = ri.stand }
+    end
+  end
+  local up = function(s) return string.upper(tostring(s or "")) end
+  ev = { planet = up(ev.planet), caption = up(ev.caption), name = tostring(ev.name or ""), stand = up(ev.stand) }
+  local sig = table.concat({ tostring(f.kicker), f.desc, tostring(f.check), tostring(f.kickerAlways), ev.planet,
+                             ev.caption, ev.name, ev.stand }, "|")
+  if V2.sig.galaxy == sig then return end
+  V2.sig.galaxy = sig
+  p.set(f)
+  local G = V2.galaxy
+  T.set(G.planet, { text = fitTo(ev.planet, "planetLine", nil, GAL_TXT.planetW), visible = ev.planet ~= "",
+                    colour = T.planet(ev.planet) or T.COL.BEIGE })
+  -- the stack below the planet line follows the line counts (the RACE card had 1030 su for one line each)
+  local X = GAL_TXT.x
+  local cap, nCap = packLines(ev.caption, "posterDesc", nil, GAL_TXT.wrap, 2)
+  T.set(G.caption, { text = cap, visible = nCap > 0, rect = { X, GAL_TXT.caption } })
+  local y = GAL_TXT.caption + math.max(1, nCap) * GAL_TXT.capLine + GAL_TXT.gap
+  local nName = (ev.name == "") and 0 or ((T.textWidth(string.upper(ev.name), "posterTitle", 54) > GAL_TXT.wrap) and 2 or 1)
+  T.set(G.name, { text = ev.name, visible = nName > 0, rect = { X, y } })
+  y = y + nName * GAL_TXT.nameLine + GAL_TXT.standGap
+  T.set(G.stand, { text = fitTo(ev.stand, "posterDesc", nil, GAL_TXT.wrap), visible = ev.stand ~= "", rect = { X, y } })
+  U.dbg(TAG, "GALAXY RUN poster: %s | %s | %s | %s", tostring(f.kicker), ev.caption, ev.name, ev.stand)
 end
 
 -- "2 players · 10 AI" (§4.2): local humans (+ remote ones while hosting) and the grid of the chosen race.
@@ -1926,17 +2256,65 @@ local function startKicker()
   return who
 end
 
-local function refreshStart()
-  local p = V2.posters.start
-  if not p then return end
+-- 0.13.0 START card: what P1's pad Start runs now, with startStateV2's precedence (launching, the C11 lock reasons):
+-- between run races the run's next race, an armed run, else the chosen race again in the current play mode.
+local function refreshAgain()
   local st = startStateV2()
   V2.startState = st
-  local launching = st.kind == "launching"
-  local kicker = launching and ("Launching" .. ELLIPSIS) or startKicker()
-  local sig = st.kind .. "|" .. kicker
-  if V2.sig.start == sig then return end
-  V2.sig.start = sig
-  p.set({ kicker = kicker, kickerAlways = launching, dim = launching and 0.5 or 1, lock = st.lock or false })
+  local c = validChoice() and St.race.choice or nil
+  local key = c and (tostring(c) .. "|" .. tostring(c.label)) or nil
+  if V2.againKey ~= key then                          -- raceView reads a dozen properties: once per choice
+    V2.againKey, V2.againView = key, c and raceView(c) or nil
+  end
+  local v = V2.againView
+  V2.raceRacers = v and v.racers or nil
+  local A = V2.again
+  if not A then return end
+  local T = theme()
+  local function join(list)
+    local out = {}
+    for _, s in ipairs(list) do if s and s ~= "" then out[#out + 1] = s end end
+    return table.concat(out, " " .. DOT .. " ")
+  end
+  local title, line, sub, desc, dim = "RACE AGAIN", "", "", "", 1
+  if st.kind == "launching" then
+    title, dim = "LAUNCHING" .. ELLIPSIS, 0.5
+    line, sub = v and v.track or "", v and v.caption or ""
+  elseif runIs("between") then
+    local okV, rv = pcall(function() return U.mod("run").cardView() end)
+    local okS, rs = pcall(function() return U.mod("run").state() end)
+    rv = (okV and type(rv) == "table") and rv or {}
+    title = "NEXT RACE"
+    line, sub = tostring(rv.track or ""), tostring(rv.planet or "")   -- the route / event: on GALAXY RUN
+    desc = (okS and rs) and string.format("Galaxy run %s race %d / %d", DOT, rs.race or 1, rs.length or 0)
+      or "Galaxy run"
+  elseif v then
+    line, sub = v.track, v.caption
+    if runIs("armed") then
+      title = "START RUN"
+      desc = string.format("Starts a %s-race Galaxy run", tostring(settings.get("RunLength")))
+    elseif runIs("on") then
+      desc = "Galaxy run"
+    else
+      local mode = (settings.get("PlayMode") == "custom") and "custom" or "quick"
+      local diff = ""
+      if mode == "quick" then pcall(function() diff = word(U.mod("quick").name()) end) end
+      desc = join({ MODE_WORD[mode], diff, startKicker() })
+    end
+  else
+    title, line, desc, dim = "START", "NO RACE YET", "Choose one: Quick race or Custom race", 0.5
+  end
+  if st.lock and st.kind ~= "norace" then desc, dim = st.lock, 0.5 end
+  line = fitTo(string.upper(line), "value", 30, AGAIN.w - 2 * AGAIN.pad)
+  sub = fitTo(string.upper(sub), "rank", nil, AGAIN.w - 2 * AGAIN.pad)
+  local sig = table.concat({ title, line, sub, desc, tostring(dim) }, "|")
+  if V2.sig.again == sig then return end
+  V2.sig.again = sig
+  T.set(A.title, { text = title, opacity = dim })
+  T.set(A.glyph, { opacity = dim })
+  T.set(A.line, { text = line, visible = line ~= "" })
+  T.set(A.sub, { text = sub, visible = sub ~= "" })
+  T.set(A.desc, { text = desc, visible = desc ~= "" })
 end
 
 -- "pads 2 to 4" (KeyboardIsP1: pads 1 to 3; cfg.MaxLocalPlayers).
@@ -1958,7 +2336,7 @@ local function refreshPads()
   local sig = tostring(on) .. "|" .. tostring(refused) .. "|" .. tostring(range)
   if V2.sig.pads == sig then return end
   V2.sig.pads = sig
-  p.set({ title = on and "PADS ON" or "ADD PLAYERS",
+  p.set({ title = on and "PADS ON" or "ADD\nPLAYERS",
           kicker = on and "Until the game restarts" or (range and ("Join with " .. range) or ""),
           desc = "Pads stay on until the game restarts.",
           lock = refused and "Disconnect to change players" or false })
@@ -1980,24 +2358,7 @@ end
 local function fitLine(s, maxW)
   s = tostring(s or "")
   if V2.fitIn == s then return V2.fitOut end
-  local T = theme()
-  local out = s
-  if T.textWidth(s, "value", 30) > maxW then
-    local cut = s
-    out = ELLIPSIS
-    while #cut > 0 do
-      local shorter = (cut:gsub("[\0-\127\194-\244][\128-\191]*$", ""))   -- drop the last UTF-8 character
-      -- review fix: a string ending in an invalid UTF-8 byte (0xC0, 0xC1, 0xF5-0xFF, a lone continuation byte: a
-      -- Latin-1 JoinAddress in net.statusText) matches nothing above, and this loop never ended (a game-thread hang)
-      if #shorter >= #cut then shorter = cut:sub(1, -2) end
-      cut = shorter
-      local try = (cut:gsub("[%s%p]+$", "")) .. ELLIPSIS
-      if T.textWidth(try, "value", 30) <= maxW then
-        out = try
-        break
-      end
-    end
-  end
+  local out = fitTo(s, "value", 30, maxW)
   V2.fitIn, V2.fitOut = s, out
   return out
 end
@@ -2128,7 +2489,7 @@ end
 -- lives on its own canvas that moves one pitch up while the NETWORK action row is collapsed (offline).
 local OPT_GROUPS = {
   { label = "SPLIT SCREEN", ids = {"layout", "gfx", "takedown", "tags"} },
-  { label = "PLAYERS", ids = {"kbp1"} },
+  { label = "PLAYERS", ids = {"kbp1", "run"} },   -- 0.13.0: Play mode left for the QUICK / CUSTOM posters
   { label = "NETWORK", ids = {"net", "netact"} },
   { label = "ADVANCED", ids = {"adv"}, shift = true },
 }
@@ -2160,6 +2521,11 @@ local HELP = {
   end },
   netact = { body = netStatus },
   adv = { body = "The game's own race builder, for any race this screen cannot make." },
+  run = { def = "RunLength", body = "A rogue-style career for 1-4 players. The next race starts the run, everyone on "
+    .. "a <H1>starter build</>. Races and <H1>challenges</> (time trial, hot lap, boost, takedowns) score every player; "
+    .. "a missed <H1>team target</> costs a hull point, 0 hull ends the run. Between races: a free reward, then the "
+    .. "<H1>shop</> with your credits. The <H1>GALAXY RUN</> poster starts a run and its next races; RIGHT on it "
+    .. "switches the route. While a run is on, A twice here ends it." },
 }
 
 -- The default value in words (config.Defaults, so the text follows a changed default).
@@ -2346,6 +2712,7 @@ local function leaveOptions()
   end
   showW(V2.tilesCv, true)
   V2.painted = nil                                     -- the tiles repaint on the next tick
+  V2.sPrev, V2.sArmed = true, false                    -- 0.13.0: a Start held over OPTIONS is no START
   nav.primed = false
 end
 
@@ -2354,7 +2721,6 @@ local function paintTiles(painted)
   if V2.painted == painted then return end
   V2.painted = painted
   for id, p in pairs(V2.posters) do p.focus(id == painted) end
-  theme().set(V2.race.kicker, { visible = painted == "race" and V2.race.valid == true })
 end
 
 local function tilesTick(p1, now)
@@ -2372,10 +2738,33 @@ local function tilesTick(p1, now)
     U.log(TAG, "P1's CommonUI focus is on the '%s' ghost; the painted look follows it (V-FIN-04)", focused)
   end
   if focused then nav.idx = focused end                -- the cursor follows CommonUI (also with LobbyPadNav off)
-  if focused and RIGHT_COLUMN[focused] and focused ~= V2.lastRight then
-    V2.lastRight = focused
-    theme().nav(St.ui.rows.race, "right", St.ui.rows[focused])   -- race -> the right-column tile focused last (§4.6)
+  -- 0.13.0 pad right on GALAXY RUN: CommonUI moved P1's focus onto its focus trap -> its RIGHT action, focus back
+  -- (keyboard right steps through onKey; the trap only puts the focus back then)
+  if U.ok(V2.trapR) and ui.hasFocus(V2.trapR, p1) then
+    if not checkCovered() and p1PadInput() and now - V2.lrAtMs > 300 then
+      V2.lrAtMs = now
+      U.logOnce("lobby.tileTrap", TAG, "GALAXY RUN: pad right through the focus trap (V-FIN-04)")
+      activate("galaxy", 1)
+    end
+    nav.idx = "galaxy"
+    focusRow("galaxy")
   end
+  -- 0.13.0 START (no poster any more): P1's pad Start, run on its RELEASE when the press began and ends with nothing
+  -- covering the lobby (a game screen Start opens covers it first). Not with KeyboardIsP1 (pad 1 is a guest then).
+  -- VERIFY(V-FIN-17): pad Start on FREE MODE races again and opens no game screen.
+  local kbp1 = settings.get("KeyboardIsP1") == true
+  local sDown = (not kbp1) and U.ok(p1) and ui.keyDown(p1, C.KEY.Start) or false
+  if sDown and not V2.sPrev then V2.sArmed = not checkCovered() end
+  if V2.sPrev and not sDown and V2.sArmed then
+    V2.sArmed = false
+    if not checkCovered() and ui.claimAction("pad:start") then
+      U.log(TAG, "P1's pad Start: START (%s)", tostring(V2.startState and V2.startState.kind or "?"))
+      U.try(TAG, startTile)
+      St.ui.dirty = true
+      if St.menu.visible == "lobby" then U.try(TAG, lobby.refresh) end
+    end
+  end
+  V2.sPrev = sDown
   -- one focus look per surface (rule 5): the hovered tile, else the focused one, else the poll's cursor
   paintTiles(hovered or focused or nav.idx)
   local badge = now <= padsConfirmUntilMs              -- PLAYERS 2-press window (lobby.onPads resets it on enable)
@@ -2443,8 +2832,9 @@ v2Tick = function()
 end
 
 v2Refresh = function()
-  U.try(TAG, refreshRace)
-  U.try(TAG, refreshStart)
+  U.try(TAG, refreshAgain)                             -- first: the chosen race's facts (V2.againView)
+  U.try(TAG, refreshModes)
+  U.try(TAG, refreshGalaxy)
   U.try(TAG, refreshPads)
   U.try(TAG, refreshOptionsTile)
   U.try(TAG, refreshStrip)
@@ -2562,12 +2952,13 @@ function lobby.setSetupMode(on)
     if on and V2.mode == "options" then leaveOptions() end   -- the setup opened over OPTIONS (debugJump)
     showW(V2.canvas, not on)
     nav.primed = false
+    V2.sPrev, V2.sArmed = true, false                  -- 0.13.0: RACE SETUP's Start is no START of the page
     if not on then
       St.ui.dirty = true
       V2.painted = nil
       U.try(TAG, lobby.refresh)
       if St.menu.visible == "lobby" then
-        nav.idx = "race"
+        nav.idx = (V2.mode == "tiles") and modeTile() or nav.idx   -- 0.13.0: the poster of the mode START plays
         U.try(TAG, lobby.focusFirst)
         lobby.armFocusKeeper("race setup closed")
       end

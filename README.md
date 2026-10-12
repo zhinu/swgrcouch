@@ -5,7 +5,7 @@ race **any track on any planet, in any vehicle class (podracers included), in an
 AI grid. Play **alone or with up to 4 local players** on one screen. Every player picks their own **pilot, vehicle and
 complete loadout**: abilities, parts, upgrade levels, racer style and traits, all unlocked.
 
-> **Version 0.12.0.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
+> **Version 0.13.0.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
 > 1280x720 test window; account names are blurred. The game itself is not included: you need a legitimately bought
 > copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It contains no game
 > code and no game files: its pages are drawn with the art and fonts of your installed game, and the perk menus use
@@ -30,6 +30,28 @@ complete loadout**: abilities, parts, upgrade levels, racer style and traits, al
 ![RACERS with four players](docs/screenshots/0.12/14-racers-4-players.jpg)
 
 ---
+
+
+## 0.13.0: play modes, and the split-screen HUD is finally per player
+
+**New (in short):** the FREE MODE page now has three ways to play - **QUICK RACE** (everyone and the AI on the same
+tier build: fair races between friends, one difficulty knob), **CUSTOM RACE** (the full setup, with *Opponents: match
+the players*) and **GALAXY RUN** (a 2-4 player career-style run: races, credits, a shop between events). RESTART RACE
+in the pause menu now relaunches the same race with its AI on every track, and the offline sign-in wait at boot is
+skipped.
+
+![The FREE MODE page](docs/screenshots/0.13/01-free-mode-modes.jpg)
+
+**Fixed (the important part).** The game's HUD assumes one local player; in split screen every view silently showed
+player 1's values. 0.13.0 fixes, per player: the **boost (afterburner) bar**, the **two-box ramjet bar** (charges,
+then loads to the max - and shows the overheat up to the explosion), the ramjet **screen tint** (only the firing
+player's view, no global recolour), **P1's chase camera** (it sat rigid on the car's back until the first crash),
+**P1's camera stick** after an earlier wreck (stale spectate controls leaked into the next race), and the **race
+audio** no longer goes quiet for everyone when player 1 is out while others still race. Also: one podium hologram and
+your own placement on the finish screen, no QUIT GAME flash on B, and P1's B can recover a critical malfunction.
+
+![A two-player split race](docs/screenshots/0.13/02-race-2-players.jpg)
+![A four-player split race](docs/screenshots/0.13/03-race-4-players.jpg)
 
 ## Screenshots
 
@@ -195,6 +217,63 @@ SETUP frame and the 0.11 RACERS cards (`cards.lua`); the new player colours stay
 row is part of the new MODE step only: with the classic pages, races use the `OpponentTier` saved in `settings.txt`.
 
 ---
+
+## What's new in 0.13.0-dev (private, not released)
+
+- **New FREE MODE page: three ways to play, one poster each.** The tab now shows **QUICK RACE**, **CUSTOM RACE** and
+  **GALAXY RUN** on top, **ADD PLAYERS** and **OPTIONS** below, and a **START card** that says what the pad's
+  **Start** button does right now: *RACE AGAIN* (the last race, in the mode you played it), *NEXT RACE* between
+  Galaxy run races, or *START RUN*. A tick marks the mode Start plays.
+  - **QUICK RACE** (the default) for playing with friends: nobody builds anything. Each player only picks
+    a pilot and a vehicle (or Y for a surprise); there is no PERKS step. One **Difficulty** for the whole race
+    (RACE SETUP > MODE: ROOKIE, CADET, PRO, ACE, VETERAN, LEGEND = tiers 1-6) gives **the players and the AI the
+    same build**: the same upgrade levels, abilities and crash ability, no traits. The racer cards say so
+    ("PRO · TIER 3, SAME AS THE AI").
+  - **CUSTOM RACE**: the full per-kart builds, as before. The *Opponents* row gains **MATCH THE PLAYERS**
+    after TIER 6: the AI get the players' average upgrade levels, so a maxed group meets maxed opponents.
+  - **GALAXY RUN**: the career below. **Right** on the poster picks 4, 6 or 9 races, **A** starts the run and
+    opens RACE SETUP for its first race. QUICK RACE and CUSTOM RACE are locked while a run is on.
+  - A on QUICK RACE or CUSTOM RACE opens RACE SETUP in that mode (the *Play mode* row left OPTIONS).
+- **Podracer opponents have a strength now.** The game has no tier builds for pods, so every AI pod raced at
+  power 0 against any player build. The mod now writes the build into each AI pod (QUICK RACE difficulty, MATCH,
+  and the Galaxy run's rising tiers).
+- **No more 10-second SIGN IN STATUS wait** at the main menu (at boot and after every race): with Steam offline the
+  game always waited for its login to time out; the mod now lets the menu through at once (*FastBootSignIn*).
+- **B on RACE SETUP / OPTIONS goes back without flashing the game's QUIT GAME dialog.**
+- **The finish screen of a split race**: one podium hologram instead of one per player stacked on the same spot, and
+  P1's own place ("FINISHED · You came 1st") instead of the last player's.
+- **RESTART RACE fixed**: the in-place reload brought every racer back except the AI cars, which never spawned
+  again. RESTART RACE now goes back to the menu and launches the same race again right away (same track, players,
+  builds and grid), with one extra loading screen.
+- **GALAXY RUN**, a rogue-style career for 1–4 players (the GALAXY RUN poster, or *OPTIONS > PLAYERS > Galaxy run*:
+  4, 6 or 9 races):
+  - The next race you start begins the run. Everyone starts on a **starter build** (the pilot's vehicle, two
+    abilities, every level at 0, no parts, no traits) and **200 credits**.
+  - **Challenges for every player at once.** Besides races, the run offers challenges, each scored for every player:
+    **TIME TRIAL** (no AI, fastest race time, everybody must finish), **HOT LAP** (best single lap; a lap in the top
+    3 of the field, top 4 for two players, top 5 solo), **BOOST CHALLENGE** (seconds of afterburner burn, ramjet counts double), **TAKEDOWN HUNT**
+    (full grid, most takedowns), plus an **ELIMINATOR** and a full-grid **FINAL** you must win (a lost final costs a
+    hull point and is raced again). During a challenge each player's HUD shows its counter next to the race timer
+    (BOOST 41 S, TAKEDOWNS 2, BEST LAP 34.21); in races it names your **rival**.
+  - **Points** by rank among the players (25 / 18 / 15 / 12), **credits** (300 / 220 / 160 / 120, ×1.5 on the
+    risky route, +100 for finishing ahead of the rival: the AI that placed best last race), and a **team target**
+    per event; a missed target costs one of the team's **3 hull points**, 0 hull ends the run. Fewer players get looser
+    targets (solo: 2 places looser and a top-2 final; two players: 1 place looser).
+  - **Between races** the GALAXY RUN poster shows the next event and the standings; **Right on it switches the
+    route** (A: a race, B: a challenge for ×1.5 credits). **A on it** (or **Start**) opens the racer cards: each player first picks **one free
+    reward out of three** (the last player picks out of four; sometimes a **TEAM REPAIR**), then the **shop**:
+    perks and a level-cap upgrade for credits, a reroll, and repairs. A **wreck breaks one of your parts** until it
+    is repaired in the shop.
+  - In a run the PERKS pickers only list what you own and levels stop at your cap. A race left before its end does
+    not count. The run is kept in `Mods/SWGRCouch/run.txt` (a quit game continues it) and never touches the game's
+    campaign or save. To stop a run: *OPTIONS > Galaxy run*, A twice.
+- **Easy builds for friends** on the racer cards: a guest's **Y** (SURPRISE ME) picks a random free pilot, its
+  vehicle and a random kit and goes to READY; **X** (COPY P1) gives the guest P1's loadout on their own pilot. P1
+  can still start with START AGAIN TO RACE ANYWAY while friends are choosing.
+- **P1 wrecked first in a split race**:
+  - the other players' race timers kept running (they read `--:--.--` before);
+  - every player still racing keeps their pad buttons over the game's menu input layer (that was only done for P1);
+  - P1's view no longer stays on the crash camera (the game kept taking the view back).
 
 ## What's new in 0.12.0 (since 0.10.1)
 
@@ -402,7 +481,9 @@ A layout key you set here (`CardW`, `CardH`, `SetupCMapVideoW`...) applies to bo
 - **Joining**: a guest's A press that joins can also click the poster P1's cursor is on. START ignores it
   (`CardGuestClickGuardMs`, 150 ms); the RACE, ADD PLAYERS and OPTIONS posters, the OPTIONS rows and the
   `UiStyle = "classic"` rows do not yet.
-- **P1 crashes out while others race**: P1's view can stay on a frozen crash camera instead of following a racer.
+- **P1 crashes out while others race** (0.13.0-dev): the timers, input and P1's view are fixed (see *What's new*);
+  the full loss of control two players saw with real pads was not reproduced with the test pads. If it happens,
+  a log with `Debug = true` helps (*Test it*).
 - With two wrecked guests, both may follow the same AI car.
 - Pads that are connected but not joined race as AI-driven players with their own view.
 - The game pauses itself after about a minute without any game input from any player (the game's own inactivity

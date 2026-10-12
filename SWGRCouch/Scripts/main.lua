@@ -48,6 +48,7 @@ local TAG = "main"
 -- shows at boot. No init, no loop of their own: setup.lua reaches racers / cards / perkapply lazily and ticks racers
 -- from its FAST pollNav; launch.raceTick ticks perkapply. perkapply is persisted for hot reload (the in-memory
 -- base-build patch record: the next Lua state restores the asset by path).
+-- 0.13.0 QUICK RACE: quick (settings PlayMode, the tier kit of the friends' mode; pure, no init) right after perks.
 -- 0.11.0 RESTART RACE (notes/research/restart-race.md): restart (the pause menu's RESTART RACE entry: pause.lua hands it
 -- every WBP_PauseRacing_C; its RequestRestartEvent hook exists only while an eligible race is RACING). Init after
 -- menubridge, FAST right after menubridge's tick, persisted for hot reload (the cleared LastPlayedArcadeEvent's path).
@@ -56,11 +57,11 @@ local TAG = "main"
 -- cards2 (the v2 RACERS cards, cards.lua's API) right after cards, so a load error shows at boot like cards / cmap. No
 -- init, no loop of their own: lobby / setup / cmap / racers reach them lazily (U.mod) and tick them from their polls.
 local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join", "split", "vehicles", "setup", "vpreview",
-                  "cmap", "pilots", "perkdata", "perks", "perkapply", "cards", "cards2", "racers",
+                  "cmap", "pilots", "perkdata", "perks", "quick", "perkapply", "cards", "cards2", "racers",
                   "builder", "launch", "inputfix", "hud", "uxsplit", "subsplit", "present", "ignition", "ignpad", "wreck",
                   "crashcam", "nametags", "gfx", "pause",
                   "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
-                  "restart", "feowner", "backprompt" }
+                  "restart", "feowner", "backprompt", "run" }
 local mods = {}
 for _, name in ipairs(MODULES) do
   local ok, m = pcall(require, name)
@@ -134,7 +135,7 @@ end
 --    lazily on the game thread (first armed race timeout), never here.
 local INIT_ORDER = { "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
                      "uxsplit", "subsplit", "hud", "present", "wreck", "crashcam", "gfx", "pause", "net", "netfix", "diag",
-                     "testcmd", "viewguard", "menubridge", "restart", "feowner" }
+                     "testcmd", "viewguard", "menubridge", "restart", "feowner", "run" }
 for _, name in ipairs(INIT_ORDER) do
   if name ~= "present" or cfg.PresentFromMain == true then call(name, "init") end
 end
@@ -232,6 +233,7 @@ local function fastTick()
   if St.menu.visible and not frontHeld() then call("ui", "pollClicks") end
   -- 0.12.0: P1's B on OPTIONS / RACE SETUP reaches only the game (its QuitGame prompt): answered No + the page's back
   call("backprompt", "fastTick")
+  call("fastboot", "signInTick")   -- 0.13.0: the 10 s SIGN IN STATUS wait of every front-end visit skipped
   -- guests (GuestPauseMode "poll", or "hud" + GuestPauseFallback) and P1 while its HUD is re-hosted (P1PausePoll);
   -- pause.poll decides who. 0.7.0: it also runs the split-race pause layers A-G (HUD input guard, request hook arming,
   -- pre-created screen, guests' IMC_UI, focus, safety net, after-wreck restart). It must stay FIRST in this block:
@@ -253,6 +255,12 @@ local function fastTick()
     -- 0.5.1: a local human's crash (not a wreck): guest crash view, fades, emulated slow-mo (wreck.lua owns wrecks)
     call("crashcam", "fastTick")
     call("viewguard", "fastTick")
+    call("hud", "fastTimer")      -- 0.13.0: guests' race timers once P1 is out of the race (task #35)
+    call("run", "fastTick")       -- 0.13.0 v2: GALAXY RUN boost challenge seconds per car
+    call("hud", "fastChallenge")  -- 0.13.0 v2: the live challenge line in each player's HUD
+    call("ignpad", "raceTick")     -- 0.13.0: P1's B recovers a critical malfunction (fed like a guest's)
+    call("hud", "fastAfterburner") -- 0.13.0: guests' boost bars read their own car (the game reads player 0)
+    call("hud", "fastRamjet")     -- 0.13.0: every player's ramjet bar shows its own car's heat (split races)
     -- 0.7.0: hidden message copies kept hidden, waiting copies matched, per-player danger tints / fades (~100 ms)
     call("uxsplit", "fastTick")
     -- 0.7.2: subtitle line poll (fallback of its config hook), line end -> clones idle, clone visibility; after pause.poll

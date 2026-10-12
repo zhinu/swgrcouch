@@ -814,6 +814,10 @@ end
 
 -- Rows of one picker category: {id | false, name, icon, iconKind, rarity, pips, lvl, sub, faulty, tiers, equipped,
 -- empty, inert, usedBy}. Ability, part and trait lists start with EMPTY (id false), the crash list with NONE.
+-- 0.13.0 GALAXY RUN: M.itemFilter(kind, id) -> false hides a perk from a picker (racers.lua sets it around its picker
+-- calls for a card in a run: owned perks only); the EMPTY / NONE rows always stay.
+M.itemFilter = nil
+
 local function catItems(kind, n, lo, arch, sys, cat)
     local items = {}
     if kind == "ab" or kind == "crash" then
@@ -866,6 +870,14 @@ local function catItems(kind, n, lo, arch, sys, cat)
                 items[#items + 1] = it
             end
         end
+    end
+    if type(M.itemFilter) == "function" then
+        local kept = {}
+        for _, it in ipairs(items) do
+            local okF, keep = pcall(M.itemFilter, kind, it.id)
+            if it.id == false or not okF or keep ~= false then kept[#kept + 1] = it end
+        end
+        items = kept
     end
     local sel = 1
     for i, it in ipairs(items) do if it.equipped then sel = i; break end end

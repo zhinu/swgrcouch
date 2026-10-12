@@ -473,4 +473,33 @@ function M.status()
     }
 end
 
+-- 0.13.0 (Jules 2026-10-12: "bypass the small wait time with sign in status"): every front-end visit (boot and every
+-- return from a race) shows WBP_SignInCheck ("SIGN IN STATUS · In Progress") over the main menu until
+-- FrontEndGameMode::IsAnyLoginPending() turns false, i.e. until AFrontEndGameMode.LoginTimeoutTime (10.0 s) has passed
+-- since StartLoginAttemptTimer(): with Steam offline the login never completes, so it always waits the full 10 s
+-- (notes/research/signin-offline.md). cfg.FastBootSignIn "always" (default): on each new front-end game mode the
+-- timeout is set to 0 and the timer restarted, the vanilla state after the timeout, reached at once (the menu's own
+-- completion steps still run; a real login continues in the background). "off": the game's wait.
+local signGm = nil
+function M.signInTick()
+    if St.phase ~= "FRONTEND" then signGm = nil; return end
+    local mode = cfg.FastBootSignIn
+    if mode == "off" then return end
+    local gm = U.gm()
+    if not U.ok(gm) or U.key(gm) == signGm then return end
+    if not U.isA(gm, "FrontEndGameMode") then return end
+    signGm = U.key(gm)
+    local before = nil
+    local ok, err = pcall(function()
+        before = gm.LoginTimeoutTime
+        gm.LoginTimeoutTime = 0.0
+        gm:StartLoginAttemptTimer()
+    end)
+    if ok then
+        U.log(TAG, "sign-in wait skipped: LoginTimeoutTime %s -> 0, login timer restarted (V-FB-SIGNIN)", tostring(before))
+    else
+        U.warn(TAG, "sign-in wait not skipped: %s", tostring(err))
+    end
+end
+
 return M

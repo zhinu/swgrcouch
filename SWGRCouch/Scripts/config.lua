@@ -26,6 +26,8 @@ cfg.MenuBridgeGuestNative = "skip"  -- "skip": a guest's presses on its OWN scre
                                     --   row twice) | "bridge" (the 0.7.1 behaviour)                  VERIFY(V-MB-04)
 cfg.UiMokiWidthScale      = 1.0     -- 0.12.0: the Moki (display font) width estimate x this (the table matched Slate at
                                     --   size 100; small text at 720p runs a few % wider: cards2 keeps a margin)
+cfg.BackPromptHide        = true    -- 0.13.0: that QUIT GAME prompt is made invisible on its first frame and the page steps
+                                    -- back at once (no flash of the quit dialog); false = visible until answered (0.12)
 cfg.BackPromptAsBack      = true    -- 0.12.0: P1's pad B on OPTIONS / RACE SETUP (which before the first race only reaches the
                                     --   game: its "QUIT GAME?" prompt, ACCEPT focused) answers that prompt No and goes
                                     --   back instead (backprompt.lua) | false = the game's prompt stays     VERIFY(V-BP-01)
@@ -60,6 +62,7 @@ cfg.MenuBridgeP1Catcher   = true      -- 0.10.1: on a shared screen another play
                                     -- plain Button added to that screen and focused for P1 (Slate still routes P1's A to
                                     -- its focus; live probe 2026-10-10)                              VERIFY(V-MB-09)
 cfg.TestCommands        = false     -- testcmd.lua: run <ModDir>/test.cmd blocks (unattended live tests); off for players
+cfg.TestBots            = false     -- 0.13.0 with TestCommands: every local car is driven by the game's AI from 2.5 s after RACING
 cfg.AllowHotReload      = false     -- 0.10.0: Ctrl+F11 / "couch reload" (RestartCurrentMod). Off: UE4SS's lua_close of a
                                     -- state other threads still use can crash the game (RE-UE4SS #1445); restart instead
 cfg.TestCommandPollMs   = 300
@@ -250,6 +253,8 @@ cfg.HudFallbackP1Clone    = false      -- in that fallback also give P1 a clone 
                                        --   cannot be hidden then: P1's data would show twice)
 cfg.HudSearchFallback     = true       -- FindAllOf("FuseHudWidget") every 2 s if UIManager fails  VERIFY(V-HUD-01)
 cfg.HudVisibilityMode     = "csm"      -- "csm" | "always"                                  VERIFY(V-HUD-05)
+cfg.HudGuestTimer         = true       -- 0.13.0 (#35): once P1 is out of the race the game's event timer stops for everyone;
+                                         -- the mod writes the race time into the HUD of each guest still racing
 cfg.LocalResultsMode      = "hide"     -- P1 finished, guests still racing: WBP_PostRace_Info_C is "hide"-n until every
                                        --   local human finished | "hide_inactive" (hide + DeactivateWidget while hidden:
                                        --   its CommonUI bindings/input config stop acting on P1's pad) | "rehost"-ed into
@@ -283,8 +288,11 @@ cfg.UxSplitDanger         = "own"      -- danger visuals: "own" (the global last
                                        --   one player's danger on every view)                       VERIFY(V-UX-07..09)
 cfg.UxSplitHudColours     = true       -- part of UxSplitDanger: MPC_HUD_Parameters Afterburner/HighThreat/MalfunctionColor
                                        --   never written by a HUD's last crash; "own": that player's HUD tinted red  V-UX-07
-cfg.UxSplitRamjetColour   = true       -- part of UxSplitDanger: BotEngineInfo's Engage/DisengageRamjet animations (global
+cfg.UxSplitRamjetColour   = true       -- 0.13.0: pinned orange ALWAYS (no global blue; the bars fill via HudRamjetBarStyle
+                                       --   "afterburner", immune to the pin). Part of UxSplitDanger: BotEngineInfo's Engage/DisengageRamjet animations (global
                                        --   FadeDirection sweep) stopped, icons set, MPC pinned; "own": HUD tinted blue  V-UX-08
+cfg.UxSplitRamjetFiringBlue = false     -- 0.13.0: every HUD in the ramjet colours only while a local car fires its ramjet (the
+                                       --   bar's fill needs it); R3 / charging keeps them orange. false = always orange V-UX-08
 cfg.UxSplitFullScreenFx   = true       -- part of UxSplitDanger: the game's full-screen danger post-process (last life,
                                        --   malfunction flash, concussion / wreck blur, frost, heat, blind: one actor
                                        --   following one player, drawn over every view) off while split and not paused;
@@ -334,6 +342,19 @@ cfg.UxSplitSubHalfFrac    = "auto"     -- height of the box bottom above its vie
 ---------------------------------------------------------------------------------------------------- Presentation (present.lua)
 -- Feedback 2026-10-07 (session B): the track intro / cinematics showed in P1's (top) view only, the pre-flight checks
 -- (ignition minigame) for P1 only. notes/research/presentation.md.
+cfg.PresentOutroP1Hud     = true       -- 0.13.0: the post-race full-screen view shows P1's race HUD only (the guests'
+                                       -- stacked on top showed the last player's "You came Nth")
+cfg.WreckKeepRaceMix      = true       -- 0.13.0: P1 wrecked / finished while guests race: the game's post-race audio mix
+                                       -- (CBM_PostEvent ducks every race sound) is put back to the race mix  V-WR-MIX
+cfg.HudAfterburnerDrive   = true       -- 0.13.0: split races: each guest's boost (afterburner) bar shows its own car's
+                                       -- energy (the game's gauge function reads player 0 only)              V-HUD-AB1
+cfg.HudRamjetBarStyle     = "game"     -- 0.13.0: the game's two-box ramjet shader; its fill renders under the orange pin
+                                       --   with FadeProgress pinned +1 (matrix test). "afterburner" = plain fill  V-HUD-RJ2
+cfg.HudRamjetDrive        = true       -- 0.13.0: split races: each player's ramjet bar shows its car's ramjet heat (the
+                                       -- bar's own update shows nothing in the mod's HUDs)
+cfg.HudGuestRamjetFix     = true       -- 0.13.0: a guest's ramjet bar / overheat widgets bound to the guest's car (they
+                                       -- were never bound: the guest HUD exists before the car)
+cfg.PresentPodiumDedupe   = true       -- 0.13.0: one podium hologram after a split race (the game spawns one per player)
 cfg.PresentFromMain       = true       -- main.lua initialises and ticks present.lua (false: hud.lua drives it, the
                                        --   pre-integration wiring)
 cfg.PresentViewMode       = "auto"     -- "auto": ONE full-screen view during loading, track intro, grid intro, side bets,
@@ -365,6 +386,10 @@ cfg.IgnitionFixPcComp     = true       -- before a replay, the PC's cached "Pre 
 cfg.IgnitionPadAssist     = "auto"     -- ignpad: "auto" (a check press the game's own path did not deliver within
                                        --   IgnitionPadAssistWindowMs is replayed with TestPreflightCheckInput; delivered
                                        --   presses are never doubled) | "always" | "off" (log only)   VERIFY(V-PRE-06/09)
+cfg.ViewRearmP1          = true       -- 0.13.0: split race: ~1 s after the start P1's chase camera is re-armed (it stayed in its
+                                       --   rest pose until P1's first crash: no speed pull-back / FOV)        V-VG-REARM
+cfg.RaceCritAssist       = "p1"       -- 0.13.0: split race, B during a critical malfunction calls the player's own recover
+                                       --   event: "p1" (P1's native path fails in split) | "all" | "off"     V-PRE-CRIT
 cfg.IgnitionPadAssistWindowMs = 250    -- see IgnitionPadAssist
 cfg.IgnitionPadPrompts    = "pads"     -- "pads": a pad player's CommonInput type is set to Gamepad while the checks run
                                        --   (P1 showed keyboard/mouse prompts) | "off"         VERIFY(V-PRE-07)
@@ -645,6 +670,8 @@ cfg.CardP1DirGuardMs      = 50         -- a P1 sink direction within this many m
                                        --   dropped and logged (insurance against task #14, RC-10; >= 0, 0 = off)  V-RC-07
 cfg.CardGuestClickGuardMs = 150        -- P1's sink accept is dropped while a guest's A is down or had an edge within this
                                        --   many ms (task #14: a guest's A clicking P1's focus; >= 0)          V-RC-07
+cfg.RunRepairChance       = 0.15       -- 0.13.0 GALAXY RUN: chance that a reward offer holds TEAM REPAIR (hull +1) while the hull is damaged
+cfg.CardEasyBuilds        = true       -- 0.13.0: guests' Y = SURPRISE ME (random pilot/vehicle/kit, READY), X = COPY P1's build
 cfg.CardBackTapMaxMs      = 600        -- a guest's B is "back" on release when held shorter (held 1 s = leave, join.lua;
                                        --   > 0)                                                               V-RC-04
 cfg.CardP1BackConfirmMs   = 3000       -- P1 at PILOT: a second back within this window goes to MODE (> 0)    V-RC-08
@@ -820,6 +847,13 @@ cfg.PauseRestartConfirm   = "dialog"   -- "dialog": the game's Btn_RetryRace + i
                                        --   such a race is RACING) | "twice": an own row, confirmed by a second press
                                        --   within PauseRestartConfirmMs (no hook, no dialog: if V-RST-03 fails)  V-RST-03/12
 cfg.PauseRestartConfirmMs = 3000       -- "twice": the second press must come within this time (> 0)  VERIFY(V-RST-12)
+cfg.FastBootSignIn        = "always"   -- 0.13.0 "always": the 10 s SIGN IN STATUS wait at every main menu visit is skipped
+                                       -- (Steam offline never signs in; online the login goes on in the background);
+                                       -- "off": the game's wait
+cfg.PauseRestartHow       = "relaunch" -- 0.13.0 "relaunch": RESTART RACE goes to the menu and launches the same race again
+                                       -- (the in-place reload never respawns the AI cars); "reset": the in-place reload
+cfg.PauseRestartRelaunchMs = 1200      -- 0.13.0 delay between the FREE MODE page coming back and the relaunch
+cfg.PauseRestartRelaunchWindowMs = 15000 -- 0.13.0 the FREE MODE page must show within this after the menu, else no relaunch
 cfg.PauseRestartSequence  = "direct"   -- "direct": RequestResetRace in the FAST tick after the confirm, from the pause (the
                                        --   live-proven state: the 2026-10-10 restart test ran from P1's auto-pause) |
                                        --   "resume": RESUME first, the call PauseRestartAfterResumeMs after the pause ended
@@ -875,6 +909,8 @@ cfg.WreckCrashCamHoldMs   = 4000       -- the wreck camera (the pawn's CrashCam)
                                        --   human wreck; 0 = no wreck-camera hold                     VERIFY(V-WD-18)
 cfg.WreckTargetStaticMs   = 4000       -- WreckView "car": a watched car standing still this long is replaced
 cfg.WreckViewReapplyMs    = 1500       -- WreckView "car": the view moved by something else is put back at most this often
+cfg.WreckSpectateReasserts = 30        -- 0.13.0 (#15): native spectate re-selects allowed while the game's crash camera holds a
+                                         -- wrecked player's view (every 2 s; 3 for any other view)
 cfg.WreckViewBlendSec     = 0.0        -- WreckView "car": SetViewTargetWithBlend blend time
 cfg.WreckCarCam           = "auto"     -- 0.7.2: "auto": a car without a camera (AI) through the chase rig (the rig's
                                        --   post-process letterbox is now off: it rendered BLACK in a guest's half);
@@ -961,9 +997,14 @@ cfg.GfxPresets = {
         ["sg.EffectsQuality"] = 1, ["sg.ViewDistanceQuality"] = 1, ["r.Shadow.Virtual.Enable"] = 0,
         ["r.Lumen.DiffuseIndirect.Allow"] = 0, ["r.ScreenPercentage"] = 50,
     },
+    -- 0.13.0 (measured live 2026-10-12 00:00, 2P Jakku, both cars still, 1280x720, RTX 5070 Ti, uncapped): user Epic
+    -- 112 fps; the 0.12 "quality" (GI 1, refl 1, shadows 1, ScreenPercentage 62) 112.5 = no gain; Lumen GI + reflections
+    -- off 143; + shadows 2 without virtual shadow maps 161 (= "performance" 164, at full resolution and full effects /
+    -- view distance); ScreenPercentage 50 on top: 159 (no gain). So "quality" keeps the resolution and drops Lumen
+    -- and the virtual shadow maps.
     quality = {
-        ["sg.GlobalIlluminationQuality"] = 1, ["sg.ReflectionQuality"] = 1, ["sg.ShadowQuality"] = 1,
-        ["r.ScreenPercentage"] = 62, ["r.Streaming.PoolSize"] = 3000,
+        ["sg.GlobalIlluminationQuality"] = 0, ["sg.ReflectionQuality"] = 0, ["sg.ShadowQuality"] = 2,
+        ["r.Shadow.Virtual.Enable"] = 0, ["r.Lumen.DiffuseIndirect.Allow"] = 0, ["r.Streaming.PoolSize"] = 3000,
     },
 }
 cfg.GfxAutoQualityMaxViews = 2         -- "auto": quality for <= 2 views, performance above
@@ -1046,6 +1087,13 @@ cfg.Defaults = {
     LastRaceRacers     = "",             -- 0.10.0 RACERS step per pad "<ControllerId>=<pilot>@<preset>@<loadout code>;..."
     OpponentTier       = 1,              -- 0.12.0 RACE SETUP > MODE "Opponents": the speeder build tier the race launches
                                          --   on, i.e. the AI's strength (1 = TIER 1 [0%] .. 6 = TIER 6 [58%]); pods: 1
+    RunLength          = "off",          -- 0.13.0 OPTIONS > Galaxy run: "off" | "4" | "6" | "9" races (run.lua; the run
+                                         --   itself is in run.txt)
+    OpponentMatch      = false,          -- 0.13.0 CUSTOM Opponents "MATCH THE PLAYERS" (perkapply.matchLoadout)
+    PlayMode           = "quick",        -- 0.13.0 FREE MODE QUICK RACE / CUSTOM RACE posters: "quick" (QUICK RACE: every
+                                         --   human on the Opponents tier kit, no PERKS stage, quick.lua) | "custom"
+    RunPick            = "4",            -- 0.13.0 FREE MODE GALAXY RUN poster: the run length its A starts ("4" | "6" |
+                                         --   "9"; RIGHT on the poster steps it, RunLength arms the run)
 }
 
 ---------------------------------------------------------------------------------------------------- override checks
@@ -1054,6 +1102,7 @@ local ENUMS = {
     SubsystemLookup = { "sbl", "findfirst" },
     ClickMode = { "hook", "poll" },
     FastBootEpic = { "off", "keep" },
+    FastBootSignIn = { "always", "off" },
     LobbyNavHighlight = { "both", "style", "focus" },
     LobbyNavKeyboard = { "always", "kbp1", "never" },
     BuilderAdopt = { "live", "go" },
@@ -1106,6 +1155,7 @@ local ENUMS = {
     -- 0.11.0 RESTART RACE
     PauseRestartConfirm = { "dialog", "twice" },
     PauseRestartSequence = { "direct", "resume" },
+    PauseRestartHow      = { "relaunch", "reset" },
     PauseRestartPosition = { "below_resume", "end" },
     IgnitionView = { "split", "single" },
     GuestNameMode = { "names", "off" },

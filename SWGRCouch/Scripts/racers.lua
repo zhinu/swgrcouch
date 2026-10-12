@@ -78,6 +78,7 @@ local function PA() return U.mod("perkapply") end
 local function ui() return U.mod("ui") end
 local function setupM() return U.mod("setup") end
 local function TH() return U.mod("theme") end              -- 0.12.0 v2 only: P1's input mode (theme.inputMode)
+local function Q() return U.mod("quick") end                -- 0.13.0 QUICK RACE (settings PlayMode)
 
 -- vpreview stays optional as in setup.lua: a load error leaves every card on its 2D art.
 local vpMod = nil
@@ -93,7 +94,11 @@ end
 ---------------------------------------------------------------------------------------------------- constants
 local STAGES = { "pilot", "vehicle", "perks", "ready" }
 local STAGE_WORD = { pilot = "PILOT", vehicle = "VEHICLE", perks = "PERKS", ready = "READY" }
-local EVENTS = { up = true, down = true, left = true, right = true, accept = true, back = true }
+-- 0.13.0 easy builds: "surprise" (guest Y: random pilot + vehicle + kit, READY) and "copy" (guest X: P1's loadout on the
+-- guest's own pilot, READY). P1's pad reaches the cards only through the 5-button sink (directions + accept), so these
+-- are the guests' (friends') shortcuts; P1 keeps the KIT row and START AGAIN TO RACE ANYWAY.
+local EVENTS = { up = true, down = true, left = true, right = true, accept = true, back = true, surprise = true,
+                 copy = true }
 local KEY_RACERS = "LastRaceRacers"
 local TOAST_MS = 2000            -- a toast replaces the hint line this long (§2.9)
 local SOUND_GAP_MS = 80          -- at most one card sound per 80 ms over all cards (§2.9)
@@ -126,13 +131,14 @@ local RING_DELTA = { [1] = "up", [4] = "down", [2] = "left", [3] = "right" }
 local PADK = {
     up = { "Gamepad_DPad_Up", "Gamepad_LeftStick_Up" }, down = { "Gamepad_DPad_Down", "Gamepad_LeftStick_Down" },
     left = { "Gamepad_DPad_Left", "Gamepad_LeftStick_Left" }, right = { "Gamepad_DPad_Right", "Gamepad_LeftStick_Right" },
-    a = { C.KEY.A }, b = { C.KEY.B },
+    a = { C.KEY.A }, b = { C.KEY.B }, x = { C.KEY.X or "Gamepad_FaceButton_Left" }, y = { C.KEY.Y },
 }
 
 -- Hint glyph keys of cards.lua (the Xbox pad images; CardGlyphs "text" writes them as words).
 local G_LR, G_UD = { "Dpad_Left", "Dpad_Right" }, { "Dpad_Top", "Dpad_Bottom" }
 local G_UP, G_DN = { "Dpad_Top" }, { "Dpad_Bottom" }
 local G_A, G_B, G_NONE = { "FaceButton_Bottom" }, { "FaceButton_Right" }, {}
+local G_X, G_Y = { "FaceButton_Left" }, { "FaceButton_Top" }
 
 -- 0.12.0 UI v2: hint entries per width class (§9.1 HINT.max), the CHOOSE MODEL window (§9.4; N has one title row
 -- instead), the pod styles' icon (§9.3: perkdata gives them the pilot's head shot, RP6) and this module's two entries
@@ -190,12 +196,22 @@ local function indexOf(list, v)
     return nil
 end
 
--- The stage strip: PILOT / PERKS can be switched off (their defaults are used, §2.1).
+-- 0.13.0 QUICK RACE (quick.lua): no PERKS stage, every card races the Opponents tier kit (no traits); the player's
+-- own build (pl.lo) stays as it was, for CUSTOM. A GALAXY RUN of this class (or one starting at the next launch) owns
+-- the builds: quick mode stays out of it.
+local function quickRace()
+    local s = St.racers
+    local ok, on = pcall(function() return Q().forRace(type(s) == "table" and s.arch or nil) end)
+    return ok and on == true
+end
+
+-- The stage strip: PILOT / PERKS can be switched off (their defaults are used, §2.1); QUICK RACE has no PERKS.
 local function stageList()
     local out = {}
+    local quick = quickRace()
     for _, st in ipairs(STAGES) do
         local off = (st == "pilot" and opt("PilotStage", true) == false)
-            or (st == "perks" and opt("PerkStage", true) == false)
+            or (st == "perks" and (quick or opt("PerkStage", true) == false))
         if not off then out[#out + 1] = st end
     end
     return out
@@ -239,6 +255,27 @@ local function p1Gamepad()
 end
 
 local function pilotStyle(pl) return P().styleKey(pl.pilotId, S().arch) end
+
+-- The loadout the card's player races: QUICK RACE the tier kit (quick.loadout), else the card's own.
+local function raceLo(pl)
+    if quickRace() then
+        local ok, lo = pcall(function() return Q().loadout(S().arch, pilotStyle(pl)) end)
+        if ok and type(lo) == "table" then return lo end
+    end
+    return pl.lo
+end
+
+-- 0.13.0 GALAXY RUN (run.lua): a card whose player is in the run plays the run build (owned perks, level cap).
+local function runM()
+    local ok, r = pcall(U.mod, "run")
+    return ok and type(r) == "table" and r or nil
+end
+local function inRun(pl)
+    local r = runM()
+    if not (r and r.active and r.active()) then return false end
+    local st = r.state()
+    return st ~= nil and st.players[pl.ctrlId] ~= nil and tonumber(st.arch) == tonumber(S().arch)
+end
 
 -- Width class of the card row ("W" 1-2 players, "M" 3, "N" 4) for the pilot crops and the roster tiles.
 local function widthClass()
@@ -285,7 +322,7 @@ local function remember(pl)
     local m = memOf(pl.ctrlId)
     m.pilot[arch], m.preset[arch] = pl.pilotId, pl.presetId
     m.last = pl.pilotId or m.last                -- 0.12.0: the lobby strip's head shot (M.lastPilotThumb)
-    m.lo = K().copy(pl.lo)
+    if not inRun(pl) then m.lo = K().copy(pl.lo) end   -- 0.13.0: a run build never replaces the player's own build
 end
 
 -- settings LastRaceRacers "<ctrlId>=<pilot>@<preset>@<loadout code>;..." (§7.1) -> {[ctrlId] = {pilot, preset, code}}.
@@ -382,6 +419,11 @@ local function defaultPicks(pl, how, old)
     local lo = mem.lo
     if type(lo) ~= "table" and per.code then lo = (Km.decode(per.code, arch, style)) end
     pl.lo = fitLoadout(lo, arch, style)
+    local r = runM()
+    if r and r.buildFor then
+        local okB, rb = pcall(r.buildFor, pl.ctrlId, arch, style)
+        if okB and type(rb) == "table" then pl.lo = rb end
+    end
 end
 
 local function freshRows() return { pilot = 1, vehicle = 1, perks = 1, ready = 1 } end
@@ -404,6 +446,26 @@ local function restart(pl, how, now, old)
     defaultPicks(pl, how, old)
     pl.follow.perks = isPilotKit(pl.lo)
     pl.pilotAt = now
+    if inRun(pl) then
+        local okO, pk = pcall(runM().offerPicker, pl.ctrlId)
+        local okS, sk = pcall(runM().shopPicker, pl.ctrlId)
+        if okO and type(pk) == "table" then
+            pl.stage, pl.picker = "perks", pk
+            pl.toast, pl.toastUntil = "PICK YOUR RUN REWARD", now + 4000
+        elseif okS and type(sk) == "table" then
+            pl.stage, pl.picker = "perks", sk
+            pl.toast, pl.toastUntil = "SHOP: BUY WITH A, B TO LEAVE", now + 4000
+        else
+            local okL, line = pcall(runM().cardLine, pl.ctrlId)
+            if okL and line then pl.toast, pl.toastUntil = line, now + 4000 end
+        end
+    else
+        local r = runM()
+        local okA, on = pcall(function() return r and r.active() and tonumber(r.state().arch) == tonumber(S().arch) end)
+        if okA and on then   -- a late joiner: in the run from the next launch, on a starter build + one free pick
+            pl.toast, pl.toastUntil = "JOINS THE GALAXY RUN ON A STARTER BUILD", now + 4000
+        end
+    end
     remember(pl)
     markDirty(pl, now)
     U.dbg(TAG, "%s card %s at %s: pilot %s, %s, kit %s", nameOf(pl), how, tostring(pl.stage), tostring(pl.pilotId),
@@ -639,7 +701,7 @@ local function setPilot(pl, id, now)
                 pl.lo.from = "pilot"
             end
         end
-        toast(pl, "LOADOUT KEPT", now)
+        if not quickRace() then toast(pl, "LOADOUT KEPT", now) end   -- QUICK RACE: nobody's build is shown
     end
     pl.follow.perks = isPilotKit(pl.lo)
     remember(pl)
@@ -693,6 +755,19 @@ end
 
 -- PERKS L/R quick change of the slot under the cursor (§2.5).
 local function cycleSlot(pl, slot, d, now)
+    local kindR, nR = K().slotKind(slot)
+    local capR = nil
+    if inRun(pl) then
+        if kindR ~= "tune" and kindR ~= "style" then
+            toast(pl, (kindR == "kit") and "GALAXY RUN: YOUR RUN BUILD" or "GALAXY RUN: PICK WITH A", now)
+            return "nav"
+        end
+        capR = runM().capFor(pl.ctrlId)
+        if kindR == "tune" and capR and d > 0 and (pl.lo.tune[nR] or 0) >= capR then
+            toast(pl, "LEVEL CAP " .. tostring(capR) .. ": WIN REWARDS TO RAISE IT", now)
+            return "nav"
+        end
+    end
     local _, changed, toastText = K().cycle(pl.lo, slot, d, S().arch, pilotStyle(pl))
     if not changed then return nil end
     afterEdit(pl, toastText, now)
@@ -700,8 +775,17 @@ local function cycleSlot(pl, slot, d, now)
 end
 
 -- PERKS A: the slot's picker, on the equipped item's category and row (§2.5).
+local function withRunFilter(pl, fn, ...)
+    local Km = K()
+    if inRun(pl) then Km.itemFilter = runM().filterFor(pl.ctrlId) end
+    local ok, a, b = pcall(fn, ...)
+    Km.itemFilter = nil
+    if not ok then error(a, 0) end
+    return a, b
+end
+
 local function openPicker(pl, slot)
-    local pk = K().picker(pl.lo, slot, S().arch)
+    local pk = withRunFilter(pl, K().picker, pl.lo, slot, S().arch)
     if not pk or #pk.items == 0 then return nil end
     pl.picker = { slot = slot, kind = pk.kind, cats = pk.cats, cat = pk.cat, items = pk.items, sel = pk.sel }
     return "accept"
@@ -717,6 +801,7 @@ local function equip(pl, slot, id, now)
 end
 
 local HANDLERS = {}
+local easyBuild                                  -- 0.13.0, defined before dispatch
 
 -- Row 0, the stage strip: left / right = previous / next stage (fresh presses only; left at the first stage = the back
 -- rule), down / A = the stage's last row (cursor memory), back = as left.
@@ -799,8 +884,73 @@ HANDLERS.ready = function(pl, ev, rep, now, r)
 end
 
 -- Picker: row 0 = the category row (left / right = category, wrapping; a fresh up there cancels), 1..n = items.
+local function onReward(pl, ev, now)
+    local pk = pl.picker
+    local n = #pk.items
+    if ev == "up" or ev == "down" then
+        local j = pk.sel + ((ev == "up") and -1 or 1)
+        if j < 1 or j > n then return nil end
+        pk.sel = j
+        pk.slot = pk.items[j].slot or pk.slot
+        return "nav"
+    end
+    if ev == "accept" then
+        local it = pk.items[pk.sel]
+        if not it then return nil end
+        local okC, lo, toastText = pcall(runM().claim, pl.ctrlId, it, S().arch, pilotStyle(pl))
+        pl.picker = nil
+        if okC and type(lo) == "table" then
+            pl.lo = lo
+            afterEdit(pl, toastText, now)
+        end
+        local okS, sk = pcall(runM().shopPicker, pl.ctrlId)       -- v2: the shop right after the free pick
+        if okS and type(sk) == "table" then pl.picker = sk end
+        return "accept"
+    end
+    if ev == "back" then toast(pl, "PICK ONE REWARD (A)", now); return "nav" end
+    return nil
+end
+
+-- 0.13.0 v2 GALAXY RUN shop: up / down choose, A buys (the picker is rebuilt with the new stock and credits),
+-- B or the LEAVE row closes it.
+local function onShop(pl, ev, now)
+    local pk = pl.picker
+    local n = #pk.items
+    if ev == "up" or ev == "down" then
+        local j = pk.sel + ((ev == "up") and -1 or 1)
+        if j < 1 or j > n then return nil end
+        pk.sel = j
+        pk.slot = pk.items[j].slot or pk.slot
+        return "nav"
+    end
+    if ev == "back" then
+        pcall(runM().buy, pl.ctrlId, { rkind = "leave" }, S().arch, pilotStyle(pl))
+        pl.picker = nil
+        return "nav"
+    end
+    if ev == "accept" then
+        local it = pk.items[pk.sel]
+        if not it then return nil end
+        local okB, lo, toastText, nextPk = pcall(runM().buy, pl.ctrlId, it, S().arch, pilotStyle(pl))
+        if not okB then pl.picker = nil; return "nav" end
+        if type(lo) == "table" then pl.lo = lo; afterEdit(pl, nil, now) end
+        if toastText then toast(pl, toastText, now) end
+        if type(nextPk) == "table" then
+            nextPk.sel = math.min(pk.sel, #nextPk.items)
+            nextPk.slot = nextPk.items[nextPk.sel].slot or nextPk.slot
+            pl.picker = nextPk
+        else
+            pl.picker = nil
+        end
+        return "accept"
+    end
+    return nil
+end
+
 local function onPicker(pl, ev, rep, now)
     local pk = pl.picker
+    if pk.kind == "reward" then return onReward(pl, ev, now) end
+    if pk.kind == "shop" then return onShop(pl, ev, now) end
     local n = #pk.items
     if ev == "up" then
         if pk.sel > 0 then pk.sel = pk.sel - 1; return "nav" end
@@ -815,7 +965,7 @@ local function onPicker(pl, ev, rep, now)
     if ev == "left" or ev == "right" then
         if #pk.cats < 2 then return nil end
         local ci = ((pk.cat - 1 + ((ev == "right") and 1 or -1)) % #pk.cats) + 1
-        local items, sel = K().pickerCat(pl.lo, pk.slot, S().arch, ci)
+        local items, sel = withRunFilter(pl, K().pickerCat, pl.lo, pk.slot, S().arch, ci)
         pk.cat, pk.items, pk.sel = ci, items, sel
         return "nav"
     end
@@ -836,6 +986,59 @@ local function onPicker(pl, ev, rep, now)
     return nil
 end
 
+-- 0.13.0 easy builds for friends (task #36). surprise: a random pilot nobody else holds, its signature vehicle (else a
+-- free model) and a random kit of the class's KIT row (the pilot's own kit, MAX, a tier or a racer style); copy: P1's
+-- loadout validated for this guest's class and pilot style (the guest keeps its pilot and vehicle). Both close a picker
+-- and go to READY with a toast; the card can still be changed (B). cfg.CardEasyBuilds = false turns them off.
+local seeded = false
+easyBuild = function(pl, ev, now)
+    if opt("CardEasyBuilds", true) == false then return nil end
+    if inRun(pl) then toast(pl, "NOT IN A GALAXY RUN", now); return "nav" end
+    local s = S()
+    local Km, Pm, arch = K(), P(), s.arch
+    if not seeded then seeded = true; math.randomseed(os.time() + math.floor(now or 0)) end
+    pl.picker = nil
+    local quick = quickRace()            -- QUICK RACE: one build for all, so no COPY and SURPRISE keeps the build
+    if ev == "copy" then
+        if pl.isP1 then return nil end
+        if quick then toast(pl, "QUICK RACE: SAME BUILD FOR ALL", now); return "nav" end
+        local p1 = s.players[0]
+        if not (p1 and type(p1.lo) == "table") then toast(pl, "P1 HAS NO BUILD YET", now); return "nav" end
+        pl.lo = Km.validate(Km.copy(p1.lo), arch, pilotStyle(pl))
+        pl.lo.kit = (p1.lo.kit == "pilot") and "custom" or pl.lo.kit
+        afterEdit(pl, nil, now)
+        goStage(pl, "ready", "forward", now)
+        toast(pl, "P1'S BUILD COPIED", now)
+        U.log(TAG, "%s copied P1's build (kit %s) (V-RC-20)", nameOf(pl), tostring(p1.lo.kit))
+        return "accept"
+    end
+    local taken, pool = takenMap(), {}
+    for _, e in ipairs(Pm.list(arch)) do
+        if e.id == pl.pilotId or not taken[e.id] then pool[#pool + 1] = e end
+    end
+    if #pool > 0 then
+        local e = pool[math.random(#pool)]
+        if e.id ~= pl.pilotId then setPilot(pl, e.id, now) end
+        local sig = Pm.signature(e, arch)
+        pl.presetId = (sig and V.presetById(arch, sig) and sig) or freePreset(pl) or pl.presetId
+    end
+    if quick then
+        remember(pl)
+    else
+        local style = pilotStyle(pl)
+        local kits = { "pilot", "max" }
+        for _, k in ipairs(Km.kits(arch, style)) do if k ~= "pilot" and k ~= "max" then kits[#kits + 1] = k end end
+        local kit = kits[math.random(#kits)]
+        pl.lo = (Km.fromKit(kit, arch, style, pl.lo))
+        afterEdit(pl, nil, now)
+    end
+    goStage(pl, "ready", "forward", now)
+    toast(pl, quick and "SURPRISE PICK" or "SURPRISE BUILD", now)
+    U.log(TAG, "%s surprise build: pilot %s, %s, kit %s (V-RC-20)", nameOf(pl), tostring(pl.pilotId),
+        tostring(pl.presetId), tostring(pl.lo and pl.lo.kit))
+    return "accept"
+end
+
 -- The one mutator of a card (pads, sink, keyboard, P1's B, tests). src: "pad" | "sink" | "key" | "padB" | "test".
 local function dispatch(pl, ev, rep, src, now)
     local s = S()
@@ -845,7 +1048,9 @@ local function dispatch(pl, ev, rep, src, now)
     pl.backHit = false
     local what
     local r = pl.row[pl.stage] or 1
-    if pl.picker then
+    if ev == "surprise" or ev == "copy" then
+        what = easyBuild(pl, ev, now)
+    elseif pl.picker then
         what = onPicker(pl, ev, rep, now)
     elseif r == 0 then
         what = onStrip(pl, ev, rep, now)
@@ -920,6 +1125,8 @@ local function pollGuest(pl, now)
     local events = {}
     if st.a and not prev.a then n.aDownMs = now; events[#events + 1] = { "accept", false } end
     if not st.a and prev.a then n.aUpMs = now end
+    if st.y and not prev.y then events[#events + 1] = { "surprise", false } end
+    if st.x and not prev.x then events[#events + 1] = { "copy", false } end
     if not padOneGuest(pl) then                  -- RC-11: that pad's B is P1's CommonUI Back
         if st.b and not prev.b then n.bDownMs = now end
         if not st.b and prev.b then
@@ -1325,7 +1532,8 @@ local function pilotVm(pl, e, style)
     local Pm = P()
     local st = D.STYLES[style] or {}
     local traits = {}
-    for k = 1, 3 do
+    -- QUICK RACE: nobody races traits (the AI have none), so the pilot card lists none
+    for k = 1, quickRace() and 0 or 3 do
         local t = st.traits and D.TRAITS[st.traits[k]]
         if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc } end
     end
@@ -1387,6 +1595,25 @@ local function perksVm(pl, style, e)
     if pk and pk.sel >= 1 and pk.items[pk.sel] then itemId = pk.items[pk.sel].id end
     local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, s.arch, itemId, style,
         v2 and "v2" or "classic")
+    -- 0.13.0 GALAXY RUN: the two rewards that are no perk get their own text (not the upgrade slot's)
+    local rit = pk and (pk.kind == "reward" or pk.kind == "shop") and pk.items[pk.sel] or nil
+    local SHOPTXT = { reroll = "New stock for this shop. The price rises with every reroll.",
+                      leave = "Close the shop. What you bought stays in your run build.",
+                      repairpart = "A wreck broke this part. Repair it to equip it again." }
+    if rit and SHOPTXT[rit.rkind] then
+        d = { kind = "reward", id = rit.id, title = rit.name, iconKind = "glyph", plain = SHOPTXT[rit.rkind],
+              tag = "GALAXY RUN" }
+        d.rich = d.plain
+    elseif rit and (rit.rkind == "upgrade" or rit.rkind == "repair") then
+        local cap = runM() and runM().capFor(pl.ctrlId) or nil
+        d = { kind = "reward", id = rit.id, title = rit.name, iconKind = "glyph",
+              plain = (rit.rkind == "upgrade")
+                  and string.format("Your upgrade levels may go one step higher for the rest of the run (now %s).",
+                      tostring(cap or "?"))
+                  or "Repairs one point of the team's hull. Every player keeps racing for the same hull.",
+              tag = "GALAXY RUN" }
+        d.rich = d.plain
+    end
     if d.costId then                             -- v2: d-pad abilities only ("LEVEL 2 · COST 3"; a crash costs nothing)
         local c = abilityCost(d.costId)
         if c then d.tag = (d.tag or "") .. " · COST " .. tostring(c) end
@@ -1413,8 +1640,9 @@ end
 local function readyVm(pl, e, style, live)
     local s = S()
     local Km = K()
-    local board = Km.board(pl.lo, s.arch, style)
-    local sum = Km.summary(pl.lo, s.arch)
+    local lo = raceLo(pl)
+    local board = Km.board(lo, s.arch, style)
+    local sum = Km.summary(lo, s.arch)
     local _, _, m = V.modelOf(s.arch, pl.presetId)
     local rows
     if pl.isP1 then
@@ -1428,7 +1656,7 @@ local function readyVm(pl, e, style, live)
         line = (e.name or "?") .. " · " .. classicModel(m), styleName = board.style and board.style.name or "",
         strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, style = board.style and board.style.icon,
                   traits = board.traits },
-        totals = sum.totals, rows = rows, cursor = pl.row.ready or 0,
+        totals = quickRace() and Q().text() or sum.totals, rows = rows, cursor = pl.row.ready or 0,
         -- §2.6: everybody READY -> P1's START row pulses (cards.tick animates it)
         pulse = (pl.isP1 and s.allReady == true and opt("CardStartPulse", true) ~= false) or nil,
     }
@@ -1463,26 +1691,36 @@ local function hintsV2(pl)
     local cls = widthClass()
     local r = pl.row[pl.stage] or 1
     local out
-    if pl.picker then
+    if pl.picker and pl.picker.kind == "reward" then
+        out = { hint(G_UD, "Choose"), hint(G_A, "Claim reward") }     -- 0.13.0 GALAXY RUN: one must be picked
+    elseif pl.picker and pl.picker.kind == "shop" then
+        out = { hint(G_UD, "Choose"), hint(G_A, "Buy"), hint(G_B, "Leave shop") }
+    elseif pl.picker then
         out = { hint(G_UD, "Choose"), hint(G_A, "Equip"), strip and hint(G_UP, "Top: cancel") or hint(G_B, "Cancel") }
     elseif r == 0 then
         out = { hint(G_LR, "Stage"), hint(G_DN, "Select") }      -- not "Options": v2 has an OPTIONS page (§5)
     elseif pl.stage == "pilot" then
-        out = { hint(G_LR, "Pilot"), hint(G_A, "Confirm"), pl.isP1 and back("Back") or leave }
+        if not pl.isP1 and opt("CardEasyBuilds", true) ~= false and not inRun(pl) and cls ~= "N" then
+            out = { hint(G_Y, "Surprise me"), hint(G_A, "Confirm"), leave }   -- 0.13.0: L/R arrows are on the card
+        else
+            out = { hint(G_LR, "Pilot"), hint(G_A, "Confirm"), pl.isP1 and back("Back") or leave }
+        end
     elseif pl.stage == "vehicle" then
         out = { hint(G_LR, (r == 2) and "Livery" or "Model"), hint(G_UD, "Row"), hint(G_A, "Confirm") }
     elseif pl.stage == "perks" then
         local Km = K()
         local slot = Km.slots(s.arch)[r]
         local kind = Km.slotKind(slot)
-        if kind == "kit" then
+        if kind == "kit" and inRun(pl) then
+            out = { hint(G_A, "Ready"), back("Back") }                -- 0.13.0: the run build has no KIT choice
+        elseif kind == "kit" then
             out = { hint(G_LR, "Kit"), hint(G_A, "Ready"), back("Back") }
         elseif kind == "tune" then
             out = { hint(G_LR, "Level"), hint(G_A, "Next"), back("Back") }
         else
             out = {}
             local lr = Km.lrMode(pl.lo, slot)           -- nil: a single part or an empty slot, L/R does nothing
-            if lr then out[#out + 1] = hint(G_LR, (lr == "tier") and "Tier" or "Change") end
+            if lr and not inRun(pl) then out[#out + 1] = hint(G_LR, (lr == "tier") and "Tier" or "Change") end
             out[#out + 1] = hint(G_A, "Pick")
             out[#out + 1] = back("Back")
         end
@@ -1496,6 +1734,9 @@ local function hintsV2(pl)
         end
     else
         out = { padOneGuest(pl) and hint(G_UP, "Stages") or hint(G_B, "Change"), leave }
+        if opt("CardEasyBuilds", true) ~= false and not inRun(pl) and not quickRace() and (HINT_MAX[cls] or 3) >= 3 then
+            table.insert(out, 2, hint(G_X, "Copy P1"))
+        end
     end
     local maxN = HINT_MAX[cls] or 3
     while #out > maxN do table.remove(out) end
@@ -1538,7 +1779,8 @@ local function pilotVmV2(pl, e, style)
     local Pm = P()
     local st = D.STYLES[style] or {}
     local traits = {}
-    for k = 1, 3 do
+    -- QUICK RACE: nobody races traits (the AI have none), so the pilot card lists none
+    for k = 1, quickRace() and 0 or 3 do
         local t = st.traits and D.TRAITS[st.traits[k]]
         if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc, rich = t.rich } end
     end
@@ -1584,10 +1826,11 @@ end
 local function readyVmV2(pl, e, style, live)
     local s = S()
     local Km = K()
-    local board = Km.board(pl.lo, s.arch, style)
-    local sum = Km.summary(pl.lo, s.arch)
+    local lo = raceLo(pl)
+    local board = Km.board(lo, s.arch, style)
+    local sum = Km.summary(lo, s.arch)
     local _, _, m = V.modelOf(s.arch, pl.presetId)
-    local st = D.STYLES[pl.lo and pl.lo.style]
+    local st = D.STYLES[lo and lo.style]
     local name, model = e.baseName or e.name or "?", modelName(m)
     local pad = modeOf(pl) == "pad"
     local rp = {
@@ -1595,7 +1838,8 @@ local function readyVmV2(pl, e, style, live)
         line = name .. " · " .. model, styleName = board.style and board.style.name or "",
         strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, traits = board.traits,
                   style = (st and st.pod) and tex(POD_STYLE_ICON) or (board.style and board.style.icon) },
-        totals = sum.totals, power = sum.power, powerMax = board.powerMax, energy = sum.energy,
+        totals = quickRace() and Q().text() or sum.totals, power = sum.power, powerMax = board.powerMax,
+        energy = sum.energy,
         allReady = s.allReady == true, pips = readyPips(), cursor = pl.row.ready or 0,
         pulse = (pl.isP1 and pad and s.allReady == true and opt("CardStartPulse", true) ~= false) or nil,
     }
@@ -2309,7 +2553,8 @@ function M.readyState()
 end
 
 -- setup.makeChoice: {[pnum] = {ctrlId, pilotId, presetId, buildPath, loadout = lo (a copy), code}}. buildPath = the
--- class's zero base build (LastRaceVehicles keeps its format for the classic flow).
+-- class's zero base build (LastRaceVehicles keeps its format for the classic flow). 0.13.0 QUICK RACE: loadout / code
+-- are the players' own builds; QUICK RACE forces copies at the launch (quick.forcePlan).
 function M.choicePlayers()
     local s = S()
     local out = {}
@@ -2324,6 +2569,8 @@ function M.choicePlayers()
                        loadout = Km.copy(pl.lo), code = Km.encode(pl.lo) }
         end
     end
+    -- 0.13.0 review: no QUICK forcing here (it stuck in the stored choice: a later CUSTOM "race again" raced the tier
+    -- kit); quick.forcePlan forces copies at the launch
     return out
 end
 
@@ -2344,6 +2591,15 @@ function M.persist(c)
         if cid and type(p.pilotId) == "string" and type(p.presetId) == "string" then
             local code = p.code
             if type(code) ~= "string" and type(p.loadout) == "table" then code = K().encode(p.loadout) end
+            -- 0.13.0: a player in the GALAXY RUN keeps the saved code of its own (non-run) build
+            local r = runM()
+            local okR, inR = pcall(function() return r and r.active() and r.state().players[cid] ~= nil end)
+            if okR and inR and entries[cid] and entries[cid].code then code = entries[cid].code end
+            -- 0.13.0 QUICK RACE: the tier kit is never saved: the card's own build, else the code on file
+            if p.quick then
+                local own = S().players[cid]
+                code = (own and type(own.lo) == "table") and K().encode(own.lo) or (entries[cid] and entries[cid].code)
+            end
             entries[cid] = { pilot = p.pilotId, preset = p.presetId, code = code }
             saved[#saved + 1] = tostring(cid)
         end
@@ -2390,7 +2646,9 @@ function M.restore(src)
             if type(p.presetId) == "string" and V.presetById(arch, p.presetId) then m.preset[arch] = p.presetId end
             local style = Pm.styleKey(m.pilot[arch] or p.pilotId, arch)
             local lo = nil
-            if type(p.loadout) == "table" then
+            if p.quick then
+                -- 0.13.0 QUICK RACE: a tier kit is not the player's build (memory keeps the own one)
+            elseif type(p.loadout) == "table" then
                 lo = Km.validate(p.loadout, arch, style)
             elseif type(p.code) == "string" and p.code ~= "" then
                 local why

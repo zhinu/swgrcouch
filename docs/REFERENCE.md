@@ -317,9 +317,49 @@ Still limited:
   focused; choose CANCEL. Only OPTIONS and RACE SETUP turn B into back. Their action bar still reads *(B) Exit
   Game*, and a mouse click on Exit Game there also goes back: return to the posters to quit the game.
 - A guest's A press that joins can also click the poster P1's focus is on: START ignores it (`CardGuestClickGuardMs`,
-  150 ms); RACE, ADD PLAYERS and OPTIONS do not yet.
+  150 ms); 0.13.0: RACE, ADD PLAYERS and OPTIONS too.
 - Not run live yet: a game start in the languages other than English, German and French (only switched in a running
   game, see above); a network race; a full podrace with loadouts.
+
+### 1.12 0.13.0-dev (2026-10-11/12, private): GALAXY RUN, easy builds, P1 wrecked first
+- **GALAXY RUN** (`run.lua`, OPTIONS > PLAYERS > *Galaxy run* = `RunLength`): a rogue-style career for 1–4 players.
+  The next race launched from FREE MODE starts the run (everyone on a starter build: the pilot's kit with its first 2
+  abilities, every level 0, no crash ability / parts / traits). `launch.start` -> `run.prelaunch` puts each player's
+  run build (owned perks only, levels capped) and the race's AI tier (TIER 1 -> 6 over the run, speeders) into the
+  launch plan. POSTRACE: every racer's place (`RacingGameState.Racers`, `RaceEventComponent.EventPosition` /
+  `EventFinishTime`); FRONTEND: points 25/18/15/12/10/8/6/4/2/1, the team target (top 5 in the first third, top 3,
+  1st in the final) or hull -1 (3 at the start; 0 = RUN LOST), level cap +1, a reward offer per player (ability or
+  crash ability, part, trait or +1 cap; the last human picks out of 4). Between races START / RACE open RACE SETUP on
+  the racer cards for the run's next race (`setup.openRun`, `setup.runCandidates`: no track twice, another planet
+  than the last race, a full grid for the final, one eliminator in the middle). On the cards: the reward picker
+  first, pickers list owned perks only (`perks.itemFilter`), L/R on perks and KIT locked, levels capped, SURPRISE /
+  COPY off. A race left before its end, or restarted, does not count. The run never replaces a player's own build
+  (session memory, `LastRaceRacers`). Files: `Mods/SWGRCouch/run.txt` (the run; `return nil` = none) and
+  `run-history.txt` (one line per finished run). Live: solo run (2 races), 2P run to RUN LOST, eliminator race.
+- **GALAXY RUN v2 (2026-10-12):** every event is a normal race scored by the mod per player (the game's own
+  TimeTrial / Takedowns / RamjetDistance / Precision rules track ONE player and have no AI grid): `race`,
+  `eliminator`, `final` (full grid, must-win: a miss costs hull and is raced again), `timetrial` (humans-only grid
+  via plan.grid "max" + maxRacers = humans; race time; everybody must finish), `hotlap` (BestLapTime; a human lap
+  in the field's top 3), `boost` (afterburner seconds = `VehicleState.AfterburnerEnergy` falling, ramjet
+  `IsRamjetting()` x2; team 45 s per player; `EBoostState` is only the selected boost), `takedown` (full grid;
+  uxsplit's per-player "Takedown" HUD message -> `St.emit("hudmsg")`; team 1 per player; solo: RaceEventVM).
+  Points 25/18/15/12 by rank among the humans; credits 300/220/160/120 (x1.5 risky route) + 100 for beating the
+  rival (the best AI of the last race, `bIsRival` / `RacingGameState.Rival`); 200 at the start. Route choice: two
+  next events (A race, B challenge), A on the RACE card switches. Cards: free reward, then the shop (perks, level
+  cap, repairs, reroll 50 +25, leave). A wreck breaks a random equipped part until repaired (120). Live HUD line
+  next to the timer (`hud.fastChallenge`, Font_Diegetic Bold: Font_Numbers has digits only). Test bots:
+  testcmd `bot <p|all> on|off`, `cfg.TestBots` (the Disconnect input override: the game's AI drives the human
+  cars). Live: 3-player bot runs WON x3 with race, takedown, hot lap, boost, time trial, eliminator and finals.
+- **Easy builds** (`CardEasyBuilds`): a guest's **Y** = SURPRISE ME (random free pilot, its vehicle, a random kit
+  of the KIT row, READY), **X** = COPY P1 (P1's loadout on the guest's pilot, READY). P1's pad only reaches the
+  cards through the 5-button sink, so these are the guests' shortcuts. Live.
+- **P1 wrecked first** (task #35): the guests' race timer (the game's RaceEventVM stops at P1's wreck and the HUD
+  rewrites its text every frame: `hud.fastTimer` puts a twin text in place of `Txt_Time`, `HudGuestTimer`); the
+  UI-over-vehicle input guard for every player still racing; P1's view put straight on the spectated car while the
+  game's crash camera holds it (`WreckSpectateReasserts`). Live. The full loss of control seen with real pads was not
+  reproduced with the test pads.
+- Split graphics **quality** = Lumen off + no virtual shadow maps at full resolution (measured: 112 -> 161 fps in a
+  2P race; the old quality preset gave no gain). The guest-press guard now covers RACE, ADD PLAYERS and OPTIONS.
 
 ## 2. Install (Lutris, Proton, Steam in the prefix)
 
@@ -462,6 +502,7 @@ or after 3 min.
 | photosensitivity warning | only when `HasExperiencedBootFlow()` is true: the widget's own CONTINUE (`ContinueToNextState(None)` or `ReturnToMainMenu()`) | `FastBootSkipPhotosensitivity`, `FastBootPhotoBlind` |
 | Epic login page in the browser, `SOCIAL OVERLAY UNAVAILABLE … EOS linking will be disabled` modal | the profile flag `bUseEosLinking` (in `GriffinSave.6.sav`) and its settings mirror `bEnableEOSAccountLinking` are set to false right before the title is left: the same end state as pressing ACCEPT on that modal, saved by the game on its next save. Fallback at the menu: `DisableEpicLinking()` + `RemoveMessage(EosRequirementsFail)` | `FastBootEpic`, `FastBootEosDialog` |
 | Epic link-account screen (if it shows) | its CANCEL: `ContinueToNextState(None)` | `FastBootEpic` |
+| `FastBootSignIn` | `"always"` | 0.13.0 the main menu's SIGN IN STATUS wait (`FrontEndGameMode.LoginTimeoutTime`, 10 s, waited out in full with Steam offline) is skipped at every front-end visit \| `"off"` | V-FB-SIGNIN |
 
 **Never skipped:** EULA, privacy policy (online/offline), save-version and save-corrupted screens, first-boot
 settings / brightness / gamma. A first boot (or a save problem) still shows them; the next boot is fast.
@@ -900,6 +941,12 @@ There are two files, and neither should be edited in `Scripts/config.lua` itself
 | `LastRaceVehicles` | empty | RACE SETUP picks: `1=PRE_Car_Orca@<build path>;2=PRE_Car_Mako@...` (classic columns; still written in the RACERS flow) |
 | `LastRaceRacers` | empty | 0.10.0 RACERS picks per pad: `<ControllerId>=<pilot>@<preset>@<loadout code>;...`, e.g. `0=DA_Racer_DarkEnigma@PRE_Car_Beluga_Protagonist@v1,k:pilot,...`; written on SAVE AND RETURN / START RACE (a pad not in that race keeps its entry), restored per pad for the race's class; a loadout code that does not decode gives the pilot's style kit (logged once) |
 | `OpponentTier` | `1` | 0.12.0 RACE SETUP > MODE **Opponents**: the speeder build tier a RACERS race launches on, i.e. the AI's strength: `1` = TIER 1 [0%] (the zero base, the weakest) .. `6` = TIER 6 [58%]; a value outside the game's list is clamped to it; pods ignore it |
+| `PlayMode` | `quick` | 0.13.0 FREE MODE **QUICK RACE** (`quick`: every player on the difficulty's tier kit = `OpponentTier`, no traits, no PERKS step; AI pods get the same build) or **CUSTOM RACE** (`custom`: per-kart builds). The posters set it |
+| `OpponentMatch` | `false` | 0.13.0 CUSTOM RACE > Opponents **MATCH THE PLAYERS** (after TIER 6): the AI get the players' average upgrade levels per slot, their most used abilities and crash ability (`perkapply.matchLoadout`) |
+| `RunPick` | `4` | 0.13.0 the GALAXY RUN poster's run length (4 / 6 / 9; Right on the poster) |
+| `RunLength` | `off` | 0.13.0 OPTIONS > *Galaxy run*: `off` \| `4` \| `6` \| `9`; with a number, the next FREE MODE race starts a GALAXY RUN of that many races (the run itself is in `run.txt`) |
+| `RunRepairChance` (config.lua) | `0.15` | GALAXY RUN: chance of a TEAM REPAIR reward while the hull is damaged |
+| `TestBots` (config.lua) | `false` | with `TestCommands`: the game's AI drives every local car from 2.5 s after RACING (unattended tests) |
 
 ### 7.2 `config.lua` keys
 The VERIFY column names the check (§9) whose failure the switch answers.
@@ -970,6 +1017,7 @@ older keys: `CardW`, `CardGap`, `CardH`, `CardRowW` (RACERS) and `SetupCMapVideo
 |---|---|---|---|
 | `UiStyle` | `"v2"` | `"v2"` \| `"classic"`: the 0.11.0 lobby rows, the setup's header / crumb / footer and the `cards.lua` cards (the player colours stay the planet tones). Read at page build: a change shows when the page is shown again | — |
 | `BackPromptAsBack` | `true` | P1's pad B on OPTIONS / RACE SETUP: before the first race it reaches only the game, which opens its QUIT GAME? prompt (ACCEPT focused); `true` = the mod answers that prompt No and the page steps back (`backprompt.lua`; its two hooks exist only while one of those pages shows) \| `false` = the prompt stays (0.11.0). The posters keep the game's Exit Game either way | V-BP-01 |
+| `BackPromptHide` | `true` | 0.13.0 that QUIT GAME? prompt is made invisible on its first frame and the page steps back at once (No is still clicked when the prompt is ready) \| `false` = visible until answered | V-BP-01 |
 | `InputModeDebounceMs` | `500` | P1's input type (pad \| mouse + keyboard; KeyboardIsP1 counts as mouse + keyboard) must be stable this long before the command row and P1's READY card switch (> 0) | V-FIN-11 |
 | `StatusPillMs` | `5000` | how long a status-pill message shows (> 0); the START gate, ALL READY and LAUNCHING stay until cleared | V-FIN-12 |
 | `StatusPillPlace` | `"screen"` | `"screen"` (the game's toast place: from the screen's left edge, at the bottom) \| `"page"` (inside the page, left of the command row) | V-FIN-12 |
@@ -1112,6 +1160,8 @@ the half of the player it is for.
 | Key | Default | Meaning | VERIFY |
 |---|---|---|---|
 | `PresentFromMain` | `true` | main.lua initialises and ticks `present.lua` (`false`: hud.lua drives it) | — |
+| `PresentPodiumDedupe` | `true` | 0.13.0 after a split race only one podium hologram shows (the game spawns one `BP_PodiumHolo_C` per local player at one spot) | V-PRE-POD |
+| `PresentOutroP1Hud` | `true` | 0.13.0 in the post-race full-screen view only P1's race HUD shows (the guests' HUDs stacked on top showed the last player's "You came Nth") | V-PRE-OUT |
 | `PresentViewMode` | `"auto"` | `"auto"`: one full-screen view for loading, intros, side bets, intermission, results; split from the pre-race checks / countdown \| `"split"`: split for the whole race (0.3) | V-PRE-01 |
 | `IgnitionMode` | `"auto"` | pre-race checks (`ignition.lua`, `ignpad.lua`): `"auto"` (0.5.1: own screen + own pad per player; a guest's presses call its own PC action event, no soft pointer) \| `"perplayer"` (alias) \| `"simple"` (`"auto"` + simple sequences for all) \| `"p1game_guestauto"` (game screen for P1; guests time out) \| `"complete"` (own screens, nobody assisted) \| `"off"` (game: P1 only) | V-PRE-02/03/06/08 |
 | `IgnitionSoftComplete` | `false` | `"p1game_guestauto"` / `"complete"` complete the checks through the soft-keyed map (crashed UE4SS in run F): explicit opt-in only | - |
@@ -1306,6 +1356,7 @@ offline race SWGRCouch launched (RACING only), confirmed by the game's RetryRace
 | `PauseRestartConfirm` | `"dialog"` | `"dialog"`: the game's Btn_RetryRace and its RetryRace dialog, ACCEPT seen by a native pre-hook on `ArcadeSubsystem:RequestRestartEvent` (registered while such a race is RACING) \| `"twice"`: an own row, confirmed by a second press within `PauseRestartConfirmMs` (no hook, no dialog) | V-RST-03/12 |
 | `PauseRestartConfirmMs` | `3000` | `"twice"`: the second press must come within this time | V-RST-12 |
 | `PauseRestartSequence` | `"direct"` | `"direct"`: `RequestResetRace` in the tick after the confirm, from the pause \| `"resume"`: RESUME first, the call `PauseRestartAfterResumeMs` after the pause ended | V-RST-06 |
+| `PauseRestartHow` | `"relaunch"` | 0.13.0 `"relaunch"`: RESTART RACE goes to the menu (`UIBlueprintFunctionLibrary.ReturnToMainMenu`) and launches the same race again from FREE MODE (the in-place reload never respawned the AI cars) \| `"reset"`: the in-place `RequestResetRace` | V-RST-13 |
 | `PauseRestartLabel` | `"game"` | `"game"`: MenuText `Pause_Button_Restart` ("Restart Race", localised) \| `"retry"`: the row's own "Retry" \| any other text: that text | V-RST-02 |
 | `PauseRestartPosition` | `"below_resume"` | `"below_resume"`: the rows under RESUME move down one (a row added again comes back with focus and interaction off: the mod switches the moved rows back on, copying RESUME) \| `"end"`: appended under ABANDON TOUR | V-RST-02 |
 | `PauseRestartRemote` | `false` | also offered while remote humans are connected or expected (untested: the restart travels every client) | V-RST-09 |

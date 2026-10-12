@@ -214,6 +214,22 @@ local function PA() return U.mod("perkapply") end           -- 0.10.0 cards flow
 -- A choice from the dev panel / settings.txt has no c.setup: setup.deriveSetup makes one (grid = class limit for
 -- GMV_Race, so the dev panel gets the full grid too; flow "cards" with the LastRaceRacers picks when the choice
 -- launches on a cards race's base build).
+-- 0.13.0: the AI's build the launch writes (perkapply.applyAI), nil = the launch base's. PlayMode "quick": pods get
+-- the difficulty's tier kit (speeders already launch on the tier build). The Galaxy run sets its own in run.prelaunch.
+-- PlayMode "custom" with Opponents = MATCH (settings OpponentMatch): every class, the players' average build
+-- (PA.matchLoadout).
+function M.aiLoadoutFor(arch, players)
+    local st = U.mod("settings")
+    local mode = st and st.get("PlayMode") or nil
+    if mode == "custom" and st.get("OpponentMatch") == true then return PA().matchLoadout(players, arch) end
+    if tonumber(arch) ~= 1 then return nil end
+    local q = U.mod("quick")
+    if not (q and q.forRace(arch)) then return nil end
+    local T = q.quickTier()
+    if T <= 1 then return nil end                          -- TIER 1 = level 0 everywhere: the zero base already is
+    return PA().tierLoadout(T, arch)
+end
+
 function M.plan(choice)
     local s = type(choice) == "table" and choice.setup or nil
     if type(s) ~= "table" then
@@ -224,7 +240,8 @@ function M.plan(choice)
     if arch == nil then pcall(function() arch = tonumber(choice.archetype.Archetype) end) end
     return { arch = arch, cls = V().classByArch(arch), single = s.single == true, grid = s.grid or "native",
              maxRacers = tonumber(s.maxRacers), flow = s.flow, players = s.players or {},
-             aiTierPath = type(s.aiTierPath) == "string" and s.aiTierPath or nil }   -- 0.12.0 RACE SETUP "Opponents"
+             aiTierPath = type(s.aiTierPath) == "string" and s.aiTierPath or nil,   -- 0.12.0 RACE SETUP "Opponents"
+             aiLoadout = M.aiLoadoutFor(arch, s.players) }
 end
 
 -- Full grid (user feedback item 9). Humans are inside NumEntrants (2026-10-07 race: GMV_Race "PlayerChoice x5" =
@@ -580,6 +597,8 @@ local function applyRecipe(choice, plan)
         -- every human's loadout into his own build entry, field by field, read back (VERIFY(V-RC-21)); no GuestPilots
         -- and no per-player tier build: the RACERS picks are complete
         U.try(TAG, function() PA().applyAll(racers, n, hc, plan) end)
+        -- 0.13.0: the AI's own build when the plan names one (QUICK RACE pods, Galaxy run pods, "match the players")
+        if plan.aiLoadout then U.try(TAG, function() PA().applyAI(racers, n, hc, plan) end) end
         return
     end
     U.try(TAG, assignGuestPilots, racers, n, humans)
@@ -859,6 +878,11 @@ function M.start(opts)
     -- 2. grid: the full grid of the class (race setup plan, user feedback item 9), else the old room check
     local slots, humans = M.gridInfo(choice)
     local plan = M.plan(choice)
+    -- 0.13.0 QUICK RACE: every player on the difficulty's tier kit (a choice saved in CUSTOM keeps its loadouts)
+    U.try(TAG, function() U.mod("quick").forcePlan(plan) end)
+    -- 0.13.0 GALAXY RUN: a run race launches the players' run builds and the race's AI tier (run.lua; a new run
+    -- starts here when OPTIONS > Galaxy run is set). Before the grid patch and the perk launch base use the plan.
+    U.try(TAG, function() U.mod("run").prelaunch(choice, plan) end)
     local patched = false
     U.try(TAG, function() patched = prepareGrid(choice, plan, humans) end)
     if patched then slots = math.max(plan.maxRacers or 0, humans) end

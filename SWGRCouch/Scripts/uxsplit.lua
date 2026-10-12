@@ -821,6 +821,10 @@ local function afterAdd(fr)
     S.n.posts = S.n.posts + 1
     if fr.pnum == -1 then S.n.nobody = S.n.nobody + 1 end
     local res, grp, full = routeAdd(fr)
+    -- 0.13.0 v2: per-player HUD message stream for the GALAXY RUN challenges (run.lua counts "Takedown")
+    if type(fr.pnum) == "number" and not tostring(fr.via):find("re-post", 1, true) then
+        pcall(St.emit, "hudmsg", fr.pnum, fr.id)
+    end
     local m = MSGTAB[fr.id]
     if m and m.repost and type(fr.pnum) == "number" and fr.pnum >= 1 then
         local a = active[fr.id]
@@ -1281,13 +1285,36 @@ end
 
 -- FadeDirection 1 / FadeProgress -1 (orange, no sweep) every second: a construct / destruct of a BotEngineInfo also
 -- writes FadeDirection from its own car's boost state.
+-- 0.13.0: the ramjet bar's fill only shows in the ramjet colour state (pinned orange, the split bar never filled: live
+-- 2026-10-12 19:0x). The MPC is ONE value for every HUD, so it goes to the ramjet state (FadeDirection 0 /
+-- FadeProgress -1, read live 20:00 while a car sat in ramjet mode) only while some local car is FIRING its ramjet
+-- (RamjetState 3-7: on, overheating, exploding); R3 alone (ramjet mode, charging) keeps every HUD orange.
+local function anyRamjetFiring()
+    for _, e in ipairs(U.localPlayers()) do
+        local ok, st = pcall(function()
+            local car = e.pc.Pawn
+            if not (U.ok(car) and U.isVehicle(car)) then return 0 end
+            return tonumber(car.VehicleState.RamjetState) or 0
+        end)
+        if ok and st and st >= 3 and st <= 7 then return true end
+    end
+    return false
+end
+
 local function pinRamjet(now, force)
-    if not force and now - RJ.lastPin < 1000 then return end
-    RJ.lastPin = now
+    local blue = cfg.UxSplitRamjetFiringBlue ~= false and anyRamjetFiring()
+    if not force and blue == RJ.blue and now - RJ.lastPin < 1000 then return end
+    if blue ~= RJ.blue then
+        U.log(TAG, "ramjet colour (every HUD): %s (V-UX-08)", blue and "ramjet state, a local car fires its ramjet"
+            or "orange")
+    end
+    RJ.lastPin, RJ.blue = now, blue
     local kml, mpc, w = COL.kml, COL.mpc, U.world()
     if not (U.ok(kml) and U.ok(mpc) and U.ok(w)) then return end
-    pcall(function() kml:SetScalarParameterValue(w, mpc, U.fname("FadeDirection"), 1.0) end)
-    pcall(function() kml:SetScalarParameterValue(w, mpc, U.fname("FadeProgress"), -1.0) end)
+    pcall(function() kml:SetScalarParameterValue(w, mpc, U.fname("FadeDirection"), blue and 0.0 or 1.0) end)
+    -- FadeProgress +1 (sweep done), NOT -1: at -1 the ramjet bar's two boxes render their fill nearly invisible
+    -- (matrix test 2026-10-12 21:5x, b2-a..e: fill faint at FP=-1, clear at FP=0..1 under FD=1 orange)
+    pcall(function() kml:SetScalarParameterValue(w, mpc, U.fname("FadeProgress"), 1.0) end)
 end
 
 ---------------------------------------------------------------------------------------------------- 3c. full-screen effects

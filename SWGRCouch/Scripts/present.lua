@@ -197,6 +197,78 @@ function M.clearIgnition()
     if ig then U.try(TAG, ig.clear) end
 end
 
+---------------------------------------------------------------------------------------------------- podium hologram
+-- 0.13.0 (Jules 2026-10-12: "in the hologram of the race finish screens, three characters get multiplied"): the race
+-- outro spawns one BP_PodiumHolo_C per local player, all at the same spot (live: 4 at one location in a 4-player race,
+-- plus the class template at the origin), so the podium figures overlap 4 times. POSTRACE: of the holograms at one
+-- location the first (by name) stays, the others are hidden (SetActorHiddenInGame). Find-only, throttled.
+local holoMs, holoWorld, holoHidden, holoKept = -1e12, nil, 0, {}
+local function podiumTick()
+    if cfg.PresentPodiumDedupe == false then return end
+    local now = St.nowMs()
+    if now - holoMs < 500 then return end
+    holoMs = now
+    if holoWorld ~= St.worldGen then holoWorld, holoHidden, holoKept = St.worldGen, 0, {} end
+    local all = FindAllOf("BP_PodiumHolo_C")
+    if not all then return end
+    local groups = {}
+    for _, a in ipairs(all) do
+        pcall(function()
+            if not U.ok(a) then return end
+            local l = a:K2_GetActorLocation()
+            if math.abs(l.X) + math.abs(l.Y) + math.abs(l.Z) < 1 then return end      -- the template at the origin
+            local k = string.format("%d:%d:%d", math.floor(l.X / 10), math.floor(l.Y / 10), math.floor(l.Z / 10))
+            groups[k] = groups[k] or {}
+            table.insert(groups[k], { a = a, name = a:GetFName():ToString() })
+        end)
+    end
+    for k, g in pairs(groups) do
+        if #g > 1 then
+            -- the first one seen at this spot stays (they spawn one by one: never hide the one already shown)
+            local kept = holoKept[k]
+            table.sort(g, function(x, y)
+                if x.name == kept then return true elseif y.name == kept then return false end
+                return x.name < y.name
+            end)
+            holoKept[k] = g[1].name
+            for i = 2, #g do
+                local hid = false
+                pcall(function() hid = g[i].a.bHidden == true end)
+                if not hid then
+                    pcall(function() g[i].a:SetActorHiddenInGame(true) end)
+                    holoHidden = holoHidden + 1
+                    U.log(TAG, "podium hologram %s hidden: %d at this spot, %s kept (V-PRE-POD)", g[i].name, #g, g[1].name)
+                end
+            end
+        end
+    end
+end
+
+-- 0.13.0 (Jules: "FINISHED · You came 4th" on the full-screen outro, P1 had won): in the one full-screen view of the
+-- post-race phase every player's WBP_Hud_Race_C is still in the viewport, stacked: the last one (P4's) covers P1's.
+-- POSTRACE + one view: the guests' race HUDs go transparent (render opacity 0; the race is over, nothing restores them).
+local hudWorld = nil
+local function guestHudTick()
+    if cfg.PresentOutroP1Hud == false or not M.isSingleView() then return end
+    local p1 = U.p1()
+    if not U.ok(p1) then return end
+    local n = 0
+    for _, w in ipairs(FindAllOf("WBP_Hud_Race_C") or {}) do
+        pcall(function()
+            if not (U.ok(w) and w:IsInViewport()) then return end
+            local own = w:GetOwningPlayer()
+            if U.ok(own) and U.key(own) ~= U.key(p1) and (tonumber(w:GetRenderOpacity()) or 1) > 0 then
+                w:SetRenderOpacity(0.0)
+                n = n + 1
+            end
+        end)
+    end
+    if n > 0 and hudWorld ~= St.worldGen then
+        hudWorld = St.worldGen
+        U.log(TAG, "outro: %d guest race HUD(s) hidden in the full-screen view: P1's place shows (V-PRE-OUT)", n)
+    end
+end
+
 ---------------------------------------------------------------------------------------------------- loop
 -- MAIN loop, race phases (main.lua calls present.tick() right before hud.tick(); cfg.PresentFromMain = true).
 function M.tick()
@@ -205,6 +277,7 @@ function M.tick()
     local lps = U.localPlayers()
     if #lps < 2 then return end
     U.try(TAG, viewTick)
+    if St.phase == "POSTRACE" then U.try(TAG, podiumTick); U.try(TAG, guestHudTick) end
     local ig = ignitionMod()
     if ig then U.try(TAG, ig.tick, lps) end
 end

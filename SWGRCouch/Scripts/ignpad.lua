@@ -655,6 +655,47 @@ function M.fastTick()
     end
 end
 
+-- 0.13.0 (live 2026-10-12 20:12, Jules: "critical malfunction, B to recover, I can never recover; on P2 it works"):
+-- in a split race P1's B reaches its PlayerInput (IsInputKeyDown true, raw pad B, checked 20:18) but P1's critical
+-- malfunction never clears, while the guests' does. B = IA_Veh_CriticalMalfunction -> the PC event ->
+-- PreFlightCheckComponent:TestPreflightCheckInput. P1 is now fed like a guest: a new B press while P1's car carries
+-- Vehicle.Condition.CriticalMalfunction calls P1's own PC event (the call ignpad makes for guests' checks).
+local RC = { prevB = {}, n = 0 }
+local CRIT_TAG = "Vehicle.Condition.CriticalMalfunction"
+function M.raceTick()
+    if St.phase ~= "RACING" or S().active or opt("RaceCritAssist", "p1") == "off" then return end
+    local lps = U.localPlayers()
+    if #lps < 2 then return end
+    local who = opt("RaceCritAssist", "p1")
+    local fn = EVENT_FN.IA_Veh_CriticalMalfunction
+    for i, e in ipairs(lps) do
+        if (who == "all" or i == 1) and U.ok(e.pc) then
+            local k = U.key(e.pc)
+            local down = false
+            pcall(function() down = e.pc:IsInputKeyDown({ KeyName = U.fname("Gamepad_FaceButton_Right") }) == true end)
+            local edge = down and not RC.prevB[k]
+            RC.prevB[k] = down
+            if edge then
+                local car = e.pc.Pawn
+                local crit = false
+                if U.ok(car) and U.isVehicle(car) then
+                    pcall(function()
+                        crit = car.VehicleState:IsConditionTagActive({ TagName = U.fname(CRIT_TAG) }) == true
+                    end)
+                end
+                if crit then
+                    local ia = iaObject(S(), "IA_Veh_CriticalMalfunction")
+                    local ok, err = false, "no IA object"
+                    if ia then ok, err = pcall(function() e.pc[fn](e.pc, {}, 0.0, 0.0, ia) end) end
+                    RC.n = RC.n + 1
+                    U.log(TAG, "P%d B during a critical malfunction -> its PC event %s (#%d%s) (V-PRE-CRIT)", i,
+                        ok and "called" or "FAILED", RC.n, ok and "" or (": " .. tostring(err)))
+                end
+            end
+        end
+    end
+end
+
 -- Why the mod's input for this player is broken (logged by ignition.lua; "auto" no longer auto-completes).
 function M.broken(pc)
     local e = S().players[U.key(pc)]

@@ -82,6 +82,11 @@ local function onPost(id)
     if not what then return end
     local before = {}
     for _, m in ipairs(visibleModals()) do before[U.key(m)] = true end
+    if Q.pending and Q.pending.hidden and Q.pending.prompt then       -- an older hidden prompt: shown again first
+        local old = Q.pending
+        old.hidden = false
+        pcall(function() old.prompt:SetRenderOpacity(1.0) end)
+    end
     Q.pending = { atMs = St.nowMs(), what = what, before = before, clicks = 0, lastClickMs = -1e12 }
 end
 
@@ -195,17 +200,41 @@ end
 -- stayed up with no focused button), so "ready" = one of its buttons holds focus (the game focuses ACCEPT when the
 -- prompt activates) or READY_MS on screen; then No, and No again every RETRY_MS (MAX_CLICKS) until it is gone.
 local READY_MS, RETRY_MS, MAX_CLICKS = 600, 400, 5
+-- 0.13.0 review: a hidden prompt is shown again whenever it is left (answered, given up, page / phase change): the
+-- game reuses the widget, and a prompt left invisible with ACCEPT focused would quit the game on the next A
+local function reveal(pd)
+    if pd and pd.hidden and pd.prompt then
+        pd.hidden = false
+        pcall(function() pd.prompt:SetRenderOpacity(1.0) end)
+    end
+end
+M._reveal = reveal
+
+local function drop(pd)
+    reveal(pd)
+    if Q.pending == pd then Q.pending = nil end
+end
+
 local function answer(pd, now)
     if not pd.prompt then
-        if now - (pd.scanMs or -1e12) >= SCAN_MS then
+        -- 0.13.0 (Jules: "pressing B goes to cancel game very quickly, bad UI"): every FAST tick while a post waits
+        -- (it lasts < WAIT_MS), so the prompt is caught on its first frame
+        if now - (pd.scanMs or -1e12) >= (opt("BackPromptHide", true) and 0 or SCAN_MS) then
             pd.scanMs = now
             for _, m in ipairs(visibleModals()) do
                 if not pd.before[U.key(m)] then pd.prompt, pd.seenMs = m, now end
             end
+            -- 0.13.0: the prompt is made invisible at once and the page steps back at once; No is still clicked
+            -- once the prompt is ready (below), out of sight
+            if pd.prompt and opt("BackPromptHide", true) then
+                pcall(function() pd.prompt:SetRenderOpacity(0.0) end)
+                pd.hidden = true
+                if not pd.did then pd.did = backStep(pd) end
+            end
         end
         if not pd.prompt then
             if now - pd.atMs > WAIT_MS then
-                Q.pending = nil
+                drop(pd)
                 U.warn(TAG, "QuitGame posted over %s but no new prompt showed within %d ms: left alone (V-BP-01)",
                     pd.what, WAIT_MS)
             end
@@ -216,7 +245,7 @@ local function answer(pd, now)
     local vis = false
     if U.ok(m) then pcall(function() vis = m:IsVisible() == true end) end
     if not vis then
-        Q.pending = nil
+        drop(pd)
         if pd.clicks > 0 then
             Q.answered = Q.answered + 1
             U.log(TAG, "QuitGame prompt over %s: answered No (%d click(s), %d ms after the post), %s (V-BP-01)",
@@ -228,10 +257,23 @@ local function answer(pd, now)
         return
     end
     local btns = buttonsOf(m)
-    if #btns < 2 then return end                   -- still being built: the next tick
+    if #btns < 2 then                              -- still being built: the next tick (shown again after WAIT_MS)
+        if now - (pd.seenMs or now) > WAIT_MS then
+            drop(pd)
+            U.warn(TAG, "QuitGame prompt over %s never got its buttons: shown, left to the player (V-BP-01)", pd.what)
+        end
+        return
+    end
+    -- 0.13.0 review: while hidden, No holds the focus (an A pressed meanwhile answers No, never the invisible ACCEPT)
+    if pd.hidden and not pd.noFocused then
+        local no = btns[#btns]
+        pcall(function() no:SetFocus() end)
+        pcall(function() no:SetUserFocus(U.p1()) end)
+        pd.noFocused = true
+    end
     if pd.clicks >= MAX_CLICKS then
         if now - pd.lastClickMs >= RETRY_MS then
-            Q.pending = nil
+            drop(pd)
             U.warn(TAG, "QuitGame prompt over %s still up after %d No clicks: left to the player (V-BP-01)", pd.what,
                 pd.clicks)
         end
@@ -252,8 +294,16 @@ end
 -- FAST loop (main.lua, every phase; cheap outside the front end)
 function M.fastTick()
     if opt("BackPromptAsBack", true) == false then disarm("off"); return end
-    if St.phase ~= "FRONTEND" then Q.pending = nil; disarm("phase " .. tostring(St.phase)); return end
-    if St.launch.pending == true then Q.pending = nil; disarm("launch pending"); return end
+    if St.phase ~= "FRONTEND" then
+        if Q.pending then drop(Q.pending) end
+        disarm("phase " .. tostring(St.phase))
+        return
+    end
+    if St.launch.pending == true then
+        if Q.pending then drop(Q.pending) end
+        disarm("launch pending")
+        return
+    end
     local now = St.nowMs()
     if St.menu.visible == "lobby" and context() then ensureHooks(now) else disarm("no sub-page") end
     local pd = Q.pending

@@ -1393,14 +1393,26 @@ local function guardStep(w, g, lrs, now)
                 local onSpec = U.same(vt, field(sc, "SpectatorCam")) or (curOk and U.same(vt, pawnOf(cur)))
                     or U.same(vt, g.applied)
                 local settled = (g.reassert and now - (g.cineEndedAt or now) >= 300) or age >= 4000
-                if not onSpec and U.ok(vt) and settled and (g.reasserts or 0) < 3
+                -- 0.13.0 (task #15, live 2026-10-11): the game's crash camera (BP_CrashCameraActor_C) took P1's view
+                -- back after every one of the 3 re-selects and P1 watched its own wreck for 40 s (until a pause).
+                -- While the view is a crash camera the budget is cfg.WreckSpectateReasserts (default 30, every 2 s)
+                -- and the view is also put straight on the spectated car.
+                local onCrashCam = U.ok(vt) and tostring(clsName(vt)):find("CrashCamera", 1, true) ~= nil
+                local budget = onCrashCam and numCfg(cfg.WreckSpectateReasserts, 30) or 3
+                if not onSpec and U.ok(vt) and settled and (g.reasserts or 0) < budget
                     and now - (g.reassertAt or -1e9) >= 2000 then
                     local tgt = curOk and cur or want
                     if tgt then
                         local ok = pcall(function() sc:SelectPlayerToSpectate_OnClient(tgt) end)
+                        local direct = ""
+                        if onCrashCam then
+                            local pw = pawnOf(tgt)
+                            if U.ok(pw) and setView(g.pc, pw, 0.0) then direct = ", view set on the car" end
+                        end
                         g.reasserts, g.reassertAt, g.reassert = (g.reasserts or 0) + 1, now, false
-                        U.log(TAG, "P%d spectate view restored (view was %s) -> %s (%s)", g.pnum, clsName(vt),
-                            nameOf(tgt), ok and "ok" or "call failed")
+                        U.logEvery("wreck.reassert" .. tostring(g.pnum), 6000, TAG,
+                            "P%d spectate view restored (view was %s) -> %s (%s%s; %d)", g.pnum, clsName(vt),
+                            nameOf(tgt), ok and "ok" or "call failed", direct, g.reasserts)
                     end
                 end
             end
@@ -1487,6 +1499,9 @@ local function pollRacers(w, lrs, now)
             local flow = field(e.pc, "PlayerCinematicFlowComponent")
             g.chain0 = U.ok(flow) and U.key(field(flow, "CurrentCinematicChain")) or 0
             probe(g, "wreck")
+            -- 0.13.0 v2: GALAXY RUN breaks a part of a wrecked player (live: bHasVehicleWrecked is clear again at the
+            -- race end, so the run is told at the wreck itself)
+            pcall(St.emit, "humanWrecked", e.pc)
             if other then
                 w.guard[e.key] = g
                 if e.pnum == 1 then w.p1Out = true end
@@ -1562,10 +1577,43 @@ function M.fastTick()
 end
 
 -- MAIN loop (main.lua, race phases): backup of the timeout guard (the 2 s window is 8 MAIN ticks), build re-check.
+-- 0.13.0: the race flow follows P1. When P1 is wrecked (or finishes) while guests race, CSM_RF_PostRacePhase /
+-- LocalResults run BP_Csm_Mix_PostEvent = FuseMixingControlSubsystem:SetActiveMix(CBM_PostEvent): the post-race mix
+-- ducked every race sound for the players still racing (live 19:40 / 20:01: "music and all the other sfx not present").
+-- While a human still races, CBM_PostEvent is replaced by the mix P1 raced with (CBM_Race). Pause / photo / other
+-- mixes are left alone.
+local MIX = { race = nil, world = -1, fixed = 0 }
+local MIX_RACE = "/Game/Griffin/Audio/Mixing/Control/CBM_Race.CBM_Race"
+local function mixTick()
+    if cfg.WreckKeepRaceMix == false then return end
+    if MIX.world ~= St.worldGen then MIX.race, MIX.world, MIX.fixed = nil, St.worldGen, 0 end
+    local rs = localRacers()
+    if #rs < 2 then return end
+    local sub = FindFirstOf("FuseMixingControlSubsystem")
+    if not U.ok(sub) then return end
+    local am = sub.ActiveMix
+    local amName = U.ok(am) and am:GetFName():ToString() or ""
+    local p1, guests = rs[1], false
+    for i = 2, #rs do if rs[i].racing then guests = true end end
+    if p1.racing then
+        if amName == "CBM_Race" then MIX.race = am end
+        return
+    end
+    if not guests or amName ~= "CBM_PostEvent" then return end
+    local race = MIX.race
+    if not U.ok(race) then local ok, o = pcall(StaticFindObject, MIX_RACE); race = ok and o or nil end
+    if not U.ok(race) then return end
+    sub:SetActiveMix(race)
+    MIX.fixed = MIX.fixed + 1
+    U.logEvery("wreck.mix", 5000, TAG, "P1 out, guests still racing: the post-race mix CBM_PostEvent replaced by %s "
+        .. "(%d time(s) this race) (V-WR-MIX)", race:GetFName():ToString(), MIX.fixed)
+end
+
 function M.tick()
     local w = W()
     if St.phase ~= "RACING" then return end
     U.tryEvery("wreck.guardTimeout", nil, TAG, M.guardTimeout)
+    U.tryEvery("wreck.mixTick", nil, TAG, mixTick)
     if mode() == "noWreck" and opt(cfg.NoWreckMethod, { "build", "cvar", "topup" }, "build") == "build" then
         U.tryEvery("wreck.noWreckRecheck", nil, TAG, noWreckRecheck, w, localRacers())
     end

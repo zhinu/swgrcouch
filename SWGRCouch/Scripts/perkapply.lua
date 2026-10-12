@@ -825,6 +825,125 @@ function M.applyAll(racers, n, humans, plan)
     return report
 end
 
+-- 0.13.0 (QUICK RACE / Galaxy run / "match the players"): the AI's build written like a human's. Speeder AI take their
+-- strength from the launch base (an opponents' tier), but pods always launch on the zero base: every AI pod raced at
+-- PowerLevel 0 against any player build. M.tierLoadout(T) is the tier kit T (1..6) as a loadout (levels, abilities,
+-- crash; no parts, no traits: what the speeder tier builds give their AI); applyAI writes plan.aiLoadout into every
+-- AI racer's entry of the class, after applyAll (same recipe, same field-by-field writes, read back for the log).
+function M.tierLoadout(T, arch)
+    T = math.max(1, math.min(6, math.floor(tonumber(T) or 1)))
+    local kit = D.KITS["tier" .. T]
+    if type(kit) ~= "table" then return nil end
+    local lo = { v = 1, kit = "tier" .. T, tune = {}, ab = {}, crash = (type(kit.crash) == "string") and kit.crash or false,
+                 parts = {}, traits = {}, label = kit.label }
+    for sl = 0, 5 do lo.tune[sl] = tonumber(kit.tune[sl]) or 0 end
+    for i = 1, 4 do lo.ab[i] = (type(kit.ab[i]) == "string") and kit.ab[i] or false end
+    -- the abilities the class has no system for are dropped, as perks.fromKit drops them from the players' tier kit
+    -- (pods: no ramjet, so no VENT): players and AI keep the same kit
+    if arch ~= nil then
+        local okS, sys = pcall(M.systems, arch)
+        if okS and type(sys) == "table" then
+            local function dead(id)
+                local a = id and D.ABILITIES[id] or nil
+                return a ~= nil and a.needs ~= nil and sys[a.needs] == false
+            end
+            for i = 1, 4 do if dead(lo.ab[i]) then lo.ab[i] = false end end
+            if dead(lo.crash) then lo.crash = false end
+        end
+    end
+    return lo
+end
+
+-- Opponents MATCH (custom): the AI get the players' average level per upgrade slot (rounded) and the abilities / crash
+-- of the tier kit nearest that average level (tier T has level T-1 everywhere). players = plan.players ({[pnum] =
+-- {loadout | code, pilotId}}). -> loadout | nil (no readable player build: the launch base's AI)
+function M.matchLoadout(players, arch)
+    local sum, n = { [0] = 0, 0, 0, 0, 0, 0 }, 0
+    local abCount, abUse, crashUse, abSlots = 0, {}, {}, 0
+    for _, pick in pairs(type(players) == "table" and players or {}) do
+        local lo = nil
+        pcall(function()
+            if type(pick.loadout) == "table" then lo = pick.loadout
+            elseif type(pick.code) == "string" and pick.code ~= "" then lo = K().decode(pick.code, arch) end
+        end)
+        if type(lo) == "table" and type(lo.tune) == "table" then
+            for sl = 0, 5 do sum[sl] = sum[sl] + math.max(0, tonumber(lo.tune[sl]) or 0) end
+            for i = 1, 4 do
+                local id = type(lo.ab) == "table" and lo.ab[i] or nil
+                if type(id) == "string" and D.ABILITIES[id] then
+                    abCount, abUse[id] = abCount + 1, (abUse[id] or 0) + 1
+                end
+            end
+            if type(lo.crash) == "string" and D.ABILITIES[lo.crash] then crashUse[lo.crash] = (crashUse[lo.crash] or 0) + 1 end
+            n = n + 1
+        end
+    end
+    if n == 0 then return nil end
+    local avg, all = {}, 0
+    for sl = 0, 5 do
+        avg[sl] = math.min(D.LEVEL_MAX, math.floor(sum[sl] / n + 0.5))
+        all = all + sum[sl] / n
+    end
+    local T = math.max(1, math.min(6, math.floor(all / 6 + 0.5) + 1))
+    local lo = M.tierLoadout(T, arch)
+    lo.tune, lo.kit = avg, "match"
+    -- abilities: the players' most used ones, as many as they carry on average (none: the tier kit's); crash: theirs
+    local want = math.floor(abCount / n + 0.5)
+    if want > 0 then
+        local ids = {}
+        for id in pairs(abUse) do ids[#ids + 1] = id end
+        table.sort(ids, function(x, y) if abUse[x] ~= abUse[y] then return abUse[x] > abUse[y] end return x < y end)
+        local fams = {}
+        for i = 1, 4 do lo.ab[i] = false end
+        local k = 0
+        for _, id in ipairs(ids) do
+            local fam = D.ABILITIES[id].fam or id
+            if k < math.min(4, want) and not fams[fam] then k, fams[fam] = k + 1, true; lo.ab[k] = id end
+        end
+    end
+    local bestCrash, bestN = nil, 0
+    for id, c in pairs(crashUse) do if c > bestN or (c == bestN and id < (bestCrash or id)) then bestCrash, bestN = id, c end end
+    if bestCrash then lo.crash = bestCrash end
+    local pl = 0
+    for sl = 0, 5 do pl = pl + avg[sl] end
+    lo.label = string.format("MATCH (levels %d-%d-%d-%d-%d-%d, kit of TIER %d)", avg[0], avg[1], avg[2], avg[3], avg[4],
+        avg[5], T)
+    return lo
+end
+
+-- -> "8 AI at TIER 3 · HUSKY (PowerLevel 12)" | nil when nothing was written
+function M.applyAI(racers, n, humans, plan)
+    local lo = type(plan) == "table" and plan.aiLoadout or nil
+    local arch = type(plan) == "table" and tonumber(plan.arch) or nil
+    if type(lo) ~= "table" or arch == nil then return nil end
+    local isHuman = {}
+    for k in pairs(humans or {}) do isHuman[k] = true end
+    local done, failed, pl = 0, 0, nil
+    for i = 1, n do
+        local okR, err = pcall(function()
+            local ps = racers[i].Player
+            if not U.ok(ps) or isHuman[U.key(ps)] or ps.bIsABot ~= true then return end
+            local rbs = ps.RacerBuildState
+            local vbs = rbs.VehicleBuilds
+            for _, idx in ipairs(entryIndexes(rbs, arch, vbs:GetArrayNum())) do
+                local e = vbs[idx + 1]
+                local errs = writeEntry(e, lo, arch, "levels", S().baseZero == false)
+                if #errs > 0 then error(table.concat(errs, "; ")) end
+                pl = pl or tonumber(e.PowerLevel)
+            end
+            done = done + 1
+        end)
+        if not okR then
+            failed = failed + 1
+            U.logOnce("perkapply.ai?" .. tostring(err), TAG, "AI build write failed: %s", tostring(err))
+        end
+    end
+    local text = string.format("%d AI at %s (PowerLevel %s)%s", done, tostring(lo.label or lo.kit or "?"),
+        tostring(pl or "?"), failed > 0 and string.format(", %d failed", failed) or "")
+    U.log(TAG, "AI builds written: %s (V-AI-01)", text)
+    return text
+end
+
 ---------------------------------------------------------------------------------------------------- race world (§6 step 8)
 -- Config names of the live passives of a PlayerState ({[name] = count}), nil when unreadable.
 local function liveConfigs(ps)

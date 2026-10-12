@@ -275,6 +275,7 @@ end
 
 local function ui() return U.mod("ui") end
 local function racers() return U.mod("racers") end         -- 0.10.0 RACERS step (lazy: G3 like this file)
+local function quickM() return U.mod("quick") end           -- 0.13.0 QUICK RACE (PlayMode, the difficulty names)
 
 local function trackKey(track)
     local ok, n = pcall(function() return track:GetFName():ToString() end)
@@ -1695,7 +1696,30 @@ end
 -- strength, as the 0.9 classic VEHICLES build column set it (0.10's cards flow always launched on TIER 1, the zero
 -- base). Persisted in settings OpponentTier (1 = TIER 1 [0%] .. 6 = TIER 6 [58%]); pods have no tier (the zero base).
 -- M.aiTierIndex() -> index, list (nil, {} for pods); M.aiTierPath() -> the tier build's path, nil for TIER 1 / pods.
+-- 0.13.0 QUICK RACE (quick.lua): the same setting is the friends' difficulty, ROOKIE .. LEGEND; pods step it too (a
+-- list of 6 tiers without a build: the players' tier kits, the AI pods keep the zero base).
+local POD_TIERS = {}
+for i = 1, 6 do POD_TIERS[i] = { label = "TIER " .. i } end
+
+local function quickOn()
+    local ok, q = pcall(function() return quickM().isQuick() end)
+    return ok and q == true
+end
+
+function M.isQuick() return quickOn() end
+
+-- 0.13.0 CUSTOM: Opponents "MATCH THE PLAYERS" (settings OpponentMatch): the AI get the players' average build
+-- (launch.aiLoadoutFor -> perkapply.matchLoadout), every class; the last value of the row, after TIER 6 (pods: after
+-- Standard).
+local function matchOn() return not quickOn() and settings.get("OpponentMatch") == true end
+function M.isMatch() return matchOn() end
+function M.quickTier()
+    local ok, t = pcall(function() return quickM().quickTier() end)
+    return (ok and tonumber(t)) or 1
+end
+
 local function tierIndexFor(arch)
+    if arch ~= nil and tonumber(arch) == 1 and quickOn() then return M.quickTier(), POD_TIERS end
     if arch == nil or tonumber(arch) == 1 then return nil, {} end
     local ok, list = pcall(V.builds, arch)
     if not ok or type(list) ~= "table" or #list == 0 then return nil, {} end
@@ -1715,19 +1739,39 @@ end
 
 function M.aiTierPath() return M.aiTierPathFor(S.cls and S.cls.arch) end
 
--- "TIER 3 · HUSKY (23%)" from the game's "03 - Husky [23%]"; pods: "Standard"
+-- "TIER 3 · HUSKY (23%)" from the game's "03 - Husky [23%]"; pods: "Standard". QUICK RACE: the difficulty first,
+-- "PRO · TIER 3 · HUSKY (23%)" (pods "PRO · TIER 3")
 function M.aiTierText()
+    if matchOn() then return "MATCH THE PLAYERS" end
     local i, list = M.aiTierIndex()
     if not i then return "Standard" end
     local b = list[i] or {}
     local n, name, pct = tostring(b.raw or ""):match("^%s*0?(%d+)%s*%-%s*(%a+)%s*%[([^%]]*)%]")
-    if n then return string.format("TIER %s · %s (%s)", n, string.upper(name), pct) end
-    return tostring(b.label or "TIER 1")
+    local text = n and string.format("TIER %s · %s (%s)", n, string.upper(name), pct) or tostring(b.label or "TIER 1")
+    if quickOn() then
+        local okN, word = pcall(function() return quickM().name(i) end)
+        if okN and word then text = word .. " · " .. text end
+    end
+    return text
 end
 
 function M.stepAiTier(dir)
     if S.step ~= "mode" then return end
     local i, list = M.aiTierIndex()
+    if not quickOn() then
+        -- CUSTOM: 1..#tiers (pods: Standard only) then MATCH
+        local top = math.max(1, #list) + 1
+        local cur = matchOn() and top or (i or 1)
+        local j = math.max(1, math.min(top, cur + dir))
+        if j ~= cur then
+            settings.set("OpponentMatch", j == top)
+            -- pods have no tier list (#list 0): "Standard" must not reset QUICK RACE's difficulty (review 2026-10-12)
+            if j < top and #list > 0 then settings.set("OpponentTier", j) end
+            U.log(TAG, "opponents: %s (V-RC-27)", M.aiTierText())
+        end
+        if W.v2 then v2.renderGrid(S.focusMode or S.mode) end
+        return
+    end
     if not i then return end
     local j = math.max(1, math.min(#list, i + dir))
     if j ~= i then
@@ -2727,12 +2771,13 @@ function v2.renderGrid(m)
             th.set(cy.l, { rect = localRect({ right - 27 - 18 - vw - 18 - 27 - 18, r[2], 64, r[4] }) })
         end
     end
-    -- 0.12.0 (task #31): the Opponents row (speeders: the tier list; pods: "Standard", not focusable)
+    -- 0.12.0 (task #31): the Opponents row (speeders: the tier list; pods: "Standard", not focusable; 0.13.0 QUICK
+    -- RACE: pods step the 6 difficulties too)
     local tierI, tiers = M.aiTierIndex()
-    local speeder = tierI ~= nil and #tiers > 1
+    local speeder = (tierI ~= nil and #tiers > 1) or not quickOn()   -- CUSTOM: every class can step to MATCH
     local tierText = M.aiTierText()
     if V2.row2 then
-        V2.row2.set({ label = "Opponents", value = tierText, kind = speeder and "cycle" or "value", enabled = speeder,
+        V2.row2.set({ label = quickOn() and "Difficulty" or "Opponents", value = tierText, kind = speeder and "cycle" or "value", enabled = speeder,
                       arrows = "always" })
     end
     local on2 = speeder and S.step == "mode" and S.view == "posters"
@@ -3360,6 +3405,7 @@ local function racersFromSettings(s, c, cls)
             players[e.pnum] = { ctrlId = e.ctrlId, pilotId = pilot, presetId = preset, buildPath = base, code = r.code }
         end
     end
+    -- 0.13.0 QUICK RACE: the saved codes are the players' own builds; the launch forces copies (quick.forcePlan)
     s.flow, s.players = "cards", players
     s.aiTierPath = M.aiTierPathFor(cls.arch)               -- 0.12.0: the Opponents setting (nil = TIER 1 / pods)
 end
@@ -3936,8 +3982,44 @@ end
 -- first track for the class), mode = MODES key ("race" default, "fullgrid", "mixed", "eliminator"), step = the step
 -- to show ("vehicles" default)}. The track's default condition and the class's full grid are taken. -> summary text.
 -- Example: lua return require("setup").debugJump{class = "Car", planet = "Mastiff", step = "vehicles"}
+-- 0.13.0 GALAXY RUN (run.lua): every valid race of a class for the run's picks: {planet = key, track = key, path,
+-- conds, modes = {mode keys}} (the same pools / exclusions as the PLANET and TRACK steps).
+function M.runCandidates(classKey)
+    local cls = V.classByKey(classKey or "Car")
+    if not cls then return {} end
+    local out = {}
+    for _, pe in ipairs(planetsFor(cls)) do
+        local p = pe.planet
+        for _, e in ipairs(pe.tracks or {}) do
+            local modes = {}
+            for _, m in ipairs(modesFor(cls, e)) do modes[#modes + 1] = m.key end
+            local path = nil
+            pcall(function() path = e.obj:GetFullName() end)
+            out[#out + 1] = { planet = p.key, track = e.key, path = path or e.key, conds = e.conds or {}, modes = modes,
+                              name = e.name, planetName = p.name }
+        end
+    end
+    return out
+end
+
+-- The body of debugJump (also run.lua's next race): opens the setup on {class, planet, track, mode, cond} at step.
+local jumpTo
+
 function M.debugJump(spec)
     if cfg.TestCommands ~= true then return "debugJump: needs cfg.TestCommands = true" end
+    return jumpTo(spec)
+end
+
+-- 0.13.0: the GALAXY RUN's next race on the racer cards (FREE MODE START between run races). true when open there.
+function M.openRun(spec)
+    if type(spec) ~= "table" then return false end
+    local r = jumpTo({ class = spec.class, planet = spec.planet, track = spec.track, mode = spec.mode or "race",
+                       cond = spec.cond, step = "vehicles" })
+    U.log(TAG, "GALAXY RUN next race: %s", tostring(r))
+    return S.active == true and S.step == "vehicles"
+end
+
+jumpTo = function(spec)
     spec = type(spec) == "table" and spec or {}
     local cls = V.classByKey(spec.class or "Car")
     if not cls then return "debugJump: unknown class " .. tostring(spec.class) end
@@ -3978,6 +4060,7 @@ function M.debugJump(spec)
     end
     S.cls, S.planet, S.tracks, S.track, S.mode = cls, planet, tracks, track, mode
     S.cond = track.conds[1] or ""
+    for _, cnd in ipairs(track.conds or {}) do if spec.cond and cnd == spec.cond then S.cond = cnd end end
     S.gridTouched = false
     S.grid = math.max(humansCount(), V.maxRacers(cls))
     M.showStep(step)

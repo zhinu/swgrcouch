@@ -210,7 +210,7 @@ local function lobbyFocusTarget(p1)
             if ok and has == true then return w end
         end
     end
-    local race = St.ui.rows and St.ui.rows.race
+    local race = St.ui.rows and (St.ui.rows.race or St.ui.rows.quick)   -- 0.13.0 v2: QUICK RACE (no RACE poster)
     if U.ok(race) then return race end
     return nil                                          -- null widget: Slate focus is left unchanged
 end
@@ -731,7 +731,7 @@ function M.open()
         U.try(TAG, function()
             -- VERIFY(V-JOIN-03): focuses every Slate user on the viewport; P1 is refocused on the race row.
             U.WBL():SetFocusToGameViewport()
-            U.mod("ui").focus(St.ui.rows.race)
+            U.mod("ui").focus(St.ui.rows.race or St.ui.rows.quick)
         end)
     elseif cfg.JoinFocusTrick == "gameandui" then
         -- VERIFY(V-JOIN-03): fallback for a viewport that ignores input in the UI-only front end (see applyGameAndUI)

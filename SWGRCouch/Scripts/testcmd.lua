@@ -123,6 +123,30 @@ end
 
 function CMD.wreck(a) return CMD.health({ "health", a[2], "-10" }) end
 
+-- 0.13.0 test bots: "bot <p|all> on|off" hands a local human's car to the game's own AI (the Disconnect input-source
+-- override, the path join.lua uses for a lost pad) or gives it back. The car keeps its human PlayerState, so places,
+-- finishes, wrecks and the mod's run scoring are real. cfg.TestBots = true does "bot all on" at every race start
+-- (unattended test races: no pad, no focus needed for the driving).
+local function botSet(p, on)
+    local r = P(p); if not r or not r.car then return "P" .. tostring(p) .. " no car" end
+    local ok, err = pcall(function()
+        if on then r.car:StartInputSourceOverride_OnServer(C.E.Override.Disconnect)
+        else r.car:StopInputSourceOverride_OnServer(C.E.Override.Disconnect) end
+    end)
+    return "P" .. tostring(p) .. (ok and (on and " bot on" or " bot off") or (" error " .. tostring(err)))
+end
+M.botSet = botSet
+
+function CMD.bot(a)
+    local on = (a[3] or "on") ~= "off"
+    if a[2] == "all" then
+        local out = {}
+        for i = 1, #U.localPlayers() do out[#out + 1] = botSet(i, on) end
+        return table.concat(out, ", ")
+    end
+    return botSet(tonumber(a[2]) or 1, on)
+end
+
 function CMD.critical(a)
     local r = P(a[2]); if not r or not r.rec then return "no race component" end
     local ok, err = pcall(function() r.rec:DEBUG_SetToCriticalHealth() end)
@@ -211,6 +235,14 @@ function M.init()
         if f then lastSeq = tonumber((f:read("a") or ""):match("^%s*seq=(%d+)")) or -1; f:close() end
     end
     handle = sched.every(TAG, cfg.TestCommandPollMs or 300, tick)
+    -- cfg.TestBots: every local car to the AI once the race runs (2.5 s after RACING: the cars exist and are bound)
+    St.on("phase", TAG .. ".bots", function(new)
+        if new ~= "RACING" or cfg.TestBots ~= true or cfg.TestCommands ~= true then return end
+        sched.after("testcmd.bots", 2500, function()
+            if St.phase ~= "RACING" then return end
+            U.log(TAG, "TestBots: %s", CMD.bot({ "bot", "all", "on" }))
+        end)
+    end)
     if cfg.TestCommands then U.log(TAG, "test commands on: %s (last seq %d)", tostring(cmdPath), lastSeq) end
 end
 

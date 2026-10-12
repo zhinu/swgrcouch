@@ -9,7 +9,7 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION = "0.12.0"
+C.VERSION = "0.13.0"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
 C.TAB_LABEL = "FREE MODE"     -- 0.11.0: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 
@@ -262,6 +262,7 @@ C.KEY = {
     A     = "Gamepad_FaceButton_Bottom",
     B     = "Gamepad_FaceButton_Right",
     Y     = "Gamepad_FaceButton_Top",
+    X     = "Gamepad_FaceButton_Left",   -- 0.13.0: guests' COPY P1 on the racer cards
     Start = "Gamepad_Special_Right",
     Escape = "Escape",              -- EKeys::Escape (keyboard pause key of P1; pause.lua P1 poll, V-PAU-03)
 }

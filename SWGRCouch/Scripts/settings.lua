@@ -16,12 +16,14 @@ local DEFAULTS = cfg.Defaults
 local ORDER = { "Layout2P", "SplitGraphics", "TakedownCams", "NameTags", "KeyboardIsP1", "NetMode",
                 "JoinAddress", "Port", "LastRaceArchetype", "LastRaceGameMode", "LastRacePlanet", "LastRaceTrack",
                 "LastRaceBuild", "LastRaceDebugBuild", "LastRaceCondition", "LastRaceMaxRacers", "LastRaceVehicles",
-                "LastRaceRacers", "OpponentTier" }
+                "LastRaceRacers", "OpponentTier", "PlayMode", "OpponentMatch", "RunPick" }
 -- Enumerated string keys: allowed values (a value outside the list is refused / replaced by the default)
 settings.ALLOWED = {
     Layout2P      = { "top-bottom", "side-by-side" },
     SplitGraphics = { "auto", "performance", "quality", "off" },
     NetMode       = { "offline", "host", "join" },
+    PlayMode      = { "quick", "custom" },
+    RunPick       = { "4", "6", "9" },
 }
 -- A config_user.lua `Defaults` override has the right type but may be outside ALLOWED (`NetMode = "Host"`): it would
 -- become a default that coerce() falls back to and every save writes back. Replaced by the built-in default here.
@@ -49,6 +51,9 @@ local COMMENTS = {
     LastRaceVehicles  = "RACE SETUP picks per player: <pnum>=<PRE_* preset>@<build path>;...",
     LastRaceRacers    = "RACERS step per pad: <ControllerId>=<pilot>@<preset>@<loadout>;...",
     OpponentTier      = "RACE SETUP opponents (speeders): 1 = TIER 1 [0%] (weakest) .. 6 = TIER 6 [58%]",
+    OpponentMatch     = "CUSTOM opponents: true = the AI get the players' average build (MATCH THE PLAYERS)",
+    PlayMode          = "quick (QUICK RACE: everybody on the Opponents tier, no perks) | custom (perks per kart)",
+    RunPick           = "FREE MODE GALAXY RUN length: 4 | 6 | 9 races (RunLength off/4/6/9 arms the next launch)",
 }
 
 local values = {}        -- key -> typed value (only keys of DEFAULTS)

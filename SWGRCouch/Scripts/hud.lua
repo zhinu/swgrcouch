@@ -1392,6 +1392,49 @@ local function ownedByPC(obj, pc)
     return ok and r == true
 end
 
+-- 0.13.0 (Jules, live 2026-10-12: "the ramjet not working is gamebreaking": P2's ramjet bar never filled, overheat
+-- not shown). WBP_HUD_RamjetBar / WBP_Hud_RamjetOverheatWarning / WBP_Hud_RamjetMessage bind their OWN player's car at
+-- Construct (GetOwningPlayerPawn -> cast VehiclePawn -> VehicleDelegates += ..., the bar's InitState(VehicleState);
+-- work/ramjet/*.disasm.txt). A guest HUD is created before the guest's car exists, so the cast fails and they stay
+-- unbound for the whole race (the bar's Tick reads a null "Vehicle State": always empty). Once the guest drives a car:
+-- if its bar's "Vehicle State" is not that car's, Construct is run again on the three widgets (they bind the car the
+-- game's way). Once per car per HUD (a re-run on a bound widget would double its bindings).
+local RAMJET_WIDGETS = { "WBP_HUD_RamjetBar_C", "WBP_Hud_RamjetOverheatWarning_C", "WBP_Hud_RamjetMessage_C" }
+local function rebindRamjet(e)
+    if cfg.HudGuestRamjetFix == false then return end
+    local pawn = e.pc.Pawn
+    if not (U.ok(pawn) and U.isVehicle(pawn)) then return end
+    local ck = U.key(pawn)
+    if e.ramjetCar == ck then return end
+    local vs = pawn.VehicleState
+    if not U.ok(vs) then return end
+    local bars, others = {}, {}
+    for i, cn in ipairs(RAMJET_WIDGETS) do
+        for _, w in ipairs(FindAllOf(cn) or {}) do
+            pcall(function()
+                if U.ok(w) and U.key(w:GetOwningPlayer()) == U.key(e.pc) then
+                    if i == 1 then bars[#bars + 1] = w else others[#others + 1] = w end
+                end
+            end)
+        end
+    end
+    if #bars == 0 then return end                       -- the HUD's parts are not built yet: the next tick
+    e.ramjetCar = ck
+    local bound = false
+    pcall(function() local cur = bars[1]["Vehicle State"]; bound = U.ok(cur) and U.key(cur) == U.key(vs) end)
+    if bound then
+        U.log(TAG, "P%s ramjet bar already bound to its car (V-HUD-RJ)", tostring(e.pnum))
+        return
+    end
+    local n = 0
+    for _, w in ipairs(bars) do if pcall(function() w:Construct() end) then n = n + 1 end end
+    for _, w in ipairs(others) do if pcall(function() w:Construct() end) then n = n + 1 end end
+    local okB = false
+    pcall(function() local cur = bars[1]["Vehicle State"]; okB = U.ok(cur) and U.key(cur) == U.key(vs) end)
+    U.log(TAG, "P%s ramjet bar / overheat widgets bound to P%s's car: Construct re-run on %d widget(s), bar %s (V-HUD-RJ)",
+        tostring(e.pnum), tostring(e.pnum), n, okB and "ok" or "STILL UNBOUND")
+end
+
 local function rebindToGuestCar(e)
     if e.pnum == 1 or e.rebindFailed then return end
     local gcar = e.pc.Pawn
@@ -1568,6 +1611,7 @@ function M.patchGuest(e)
     -- (rebindToGuestCar), plus the polled push below (only on a value change, so no animation restarts every poll)
     if e.pnum ~= 1 and e.bot and U.ok(e.bot) then U.try(TAG, checkVehicleState, e) end
     if e.pnum ~= 1 then U.try(TAG, rebindToGuestCar, e) end
+    if e.pnum ~= 1 then U.try(TAG, rebindRamjet, e) end
     if cfg.GuestBotEngineFix and e.pnum ~= 1 and e.bot and U.ok(e.bot) and not e.botFixFailed then
         local pawn = e.pc.Pawn
         if U.isVehicle(pawn) then
@@ -2065,6 +2109,358 @@ function M.layoutStatus()
     end
     if h.gameLayout then out[#out + 1] = { who = "game", key = h.gameLayout.key, failKey = h.gameLayout.failKey } end
     return out
+end
+
+-- 0.13.0 (task #35, live 2026-10-11): once P1 is out of the race (wrecked or finished first) the game's global
+-- RaceEventVM stops the event timer (CurrentEventTime is put back to -1 every frame), so every guest HUD still racing
+-- reads "--:--.--" while P1's hidden copy freezes at P1's time. The HUD rewrites Txt_Time every frame (live 23:45: a
+-- SetText from the FAST loop lost every frame), so a twin FuseTextBlock is added next to it in HB_TimerContent (same
+-- font, colour, shadow and slot) and Txt_Time is collapsed; the twin shows the race clock
+-- (RacingGameState:GetServerWorldTimeSeconds() - RaceStartTime, matches the game's timer). Proven live 2026-10-11
+-- (P2's HUD showed 00:52.79 in the timer's place). A guest that finished or wrecked keeps its last value. FAST loop,
+-- every 50 ms; nothing is touched while P1 still races (a new race builds new HUDs, so the twin goes with them).
+local function fmtRaceTime(t)
+    if t < 0 then t = 0 end
+    local m = math.floor(t / 60)
+    return string.format("%02d:%05.2f", m, t - m * 60)
+end
+
+local function guestTimerText(e)
+    if U.ok(e.timerTxt) then return e.timerTxt end
+    if (e.timerMiss or 0) >= 3 then return nil end
+    local tx
+    pcall(function()
+        -- live 2026-10-11: WBP_Hud_EventTotalTime is not a property of WBP_HUD_RaceInfo (the tree walk descends into
+        -- RaceInfo, DESCEND); WBP_Hud_EventTime_Item is a property of WBP_Hud_EventTotalTime_C (bpprops)
+        local tl = collect(e.widget, { ["wbp_hud_eventtotaltime"] = true })["wbp_hud_eventtotaltime"]
+        local tt = tl and tl[1]
+        if not U.ok(tt) then return end
+        local it = tt.WBP_Hud_EventTime_Item
+        if not U.ok(it) then return end
+        local l = collect(it, { ["txt_time"] = true })["txt_time"]
+        tx = l and l[1]
+    end)
+    if U.ok(tx) then
+        local tw
+        local okT, err = pcall(function()
+            tw = StaticConstructObject(tx:GetClass(), tx:GetOuter())
+            tx:GetParent():AddChildToHorizontalBox(tw)
+        end)
+        if okT and U.ok(tw) then
+            pcall(function() tw:SetFont(tx.Font) end)
+            pcall(function() tw:SetColorAndOpacity(tx.ColorAndOpacity) end)
+            pcall(function() tw:SetShadowOffset(tx.ShadowOffset) end)
+            pcall(function() tw:SetShadowColorAndOpacity(tx.ShadowColorAndOpacity) end)
+            pcall(function() tw.Slot:SetVerticalAlignment(tx.Slot.VerticalAlignment) end)
+            pcall(function() tw.Slot:SetPadding(tx.Slot.Padding) end)
+            e.timerTxt, e.timerOrig = tw, tx
+            U.log(TAG, "P%s race timer: twin text in place of the game's (written while P1 is out of the race)",
+                tostring(e.pnum))
+            return tw
+        end
+        U.logOnce("hud.timertwin" .. tostring(e.pnum), TAG, "P%s race timer twin not made (%s)", tostring(e.pnum),
+            tostring(err))
+    end
+    e.timerMiss = (e.timerMiss or 0) + 1
+    if e.timerMiss >= 3 then
+        U.logOnce("hud.timermiss" .. tostring(e.pnum), TAG, "P%s race timer text not found: its timer stays the game's",
+            tostring(e.pnum))
+    end
+    return nil
+end
+
+local function stillRacingPC(pc)
+    local ps = racerPS(pc)
+    local comp = U.ok(ps) and ps.RaceEventComponent or nil
+    if not (comp and U.ok(comp)) then return nil end
+    local ok, r = pcall(function() return comp:IsStillRacing() end)
+    if not ok or type(r) ~= "boolean" then return nil end
+    return r
+end
+
+-- 0.13.0 v2 GALAXY RUN: a live challenge line in each player's HUD, a second FuseTextBlock after the timer in
+-- HB_TimerContent (same font / colour), written every 250 ms from run.liveText ("BOOST 23 S", "TAKEDOWNS 2", "BEST LAP
+-- 34.21", "RIVAL <NAME>"). Only while a run race is in flight; split races (the guest / clone HUDs).
+local function timerBox(e)
+    if U.ok(e.timerOrigTx) then return e.timerOrigTx end
+    local tx
+    pcall(function()
+        local tl = collect(e.widget, { ["wbp_hud_eventtotaltime"] = true })["wbp_hud_eventtotaltime"]
+        local tt = tl and tl[1]
+        local it = U.ok(tt) and tt.WBP_Hud_EventTime_Item or nil
+        if not U.ok(it) then return end
+        local l = collect(it, { ["txt_time"] = true })["txt_time"]
+        tx = l and l[1]
+    end)
+    if U.ok(tx) then e.timerOrigTx = tx end
+    return e.timerOrigTx
+end
+
+function M.fastChallenge()
+    local h = H()
+    if St.phase ~= "RACING" then return end
+    local now = St.nowMs()
+    if now < (h.chalNextMs or 0) then return end
+    h.chalNextMs = now + 250
+    local run = lazy("run")
+    if not (run and run.inFlight and run.inFlight()) then return end
+    local ctrlOf = {}
+    local lps = U.localPlayers()
+    for _, lp in ipairs(lps) do if U.ok(lp.pc) then ctrlOf[U.key(lp.pc)] = lp.ctrlId end end
+    local entries = h.guests
+    if next(h.guests) == nil and #lps == 1 then
+        -- solo: no per-player HUD copies; the game's own race HUD carries the line (found once per race)
+        -- the game's race HUD hud.lua tracks (h.p1hud), else the first one found; one line per HUD widget (kept
+        -- while the same widget lives, so a phase flicker never adds a second line)
+        -- 0.13.0 live (Jules, solo hot lap: "didn't read best lap"): h.p1hud is not always the race HUD and the first
+        -- WBP_Hud_Race_C found can be a hidden one: the race HUD that is in the viewport, kept while it stays there
+        local function onScreen(x)
+            local ok, v = pcall(function() return x:IsInViewport() == true end)
+            return ok and v
+        end
+        local w = h.soloChal and U.ok(h.soloChal.widget) and onScreen(h.soloChal.widget) and h.soloChal.widget or nil
+        if not w then
+            for _, x in ipairs(FindAllOf("WBP_Hud_Race_C") or {}) do
+                if U.ok(x) and onScreen(x) then w = x; break end
+            end
+        end
+        -- one entry per HUD widget (review 2026-10-12): a HUD briefly off screen that comes back keeps its own line
+        -- instead of getting a second one
+        if h.soloWorld ~= St.worldGen then h.soloWorld, h.soloByKey, h.soloChal = St.worldGen, {}, nil end
+        if U.ok(w) then
+            local k = U.key(w)
+            local e = h.soloByKey[k]
+            if not (e and U.ok(e.widget)) then
+                e = { widget = w, pc = lps[1].pc, pnum = 1 }
+                h.soloByKey[k] = e
+            end
+            h.soloChal = e
+        end
+        entries = (U.ok(w) and h.soloChal) and { solo = h.soloChal } or {}
+    end
+    for _, e in pairs(entries) do
+        if U.ok(e.widget) and U.ok(e.pc) then
+            local c = ctrlOf[U.key(e.pc)]
+            local lap = -1
+            pcall(function() lap = racerPS(e.pc).RaceEventComponent.BestLapTime end)
+            local okT, text = pcall(run.liveText, c, lap)
+            text = okT and text or nil
+            -- a failed try (HUD not built yet) is retried every 2 s
+            if text and not U.ok(e.chalTx) and St.nowMs() >= (e.chalRetryMs or 0) then
+                local tx = timerBox(e)
+                local okC = pcall(function()
+                    local tw = StaticConstructObject(tx:GetClass(), tx:GetOuter())
+                    tx:GetParent():AddChildToHorizontalBox(tw)
+                    -- the timer's Font_Numbers has digits only (live: "BOOST 38 S" showed "38"): the HUD labels'
+                    -- Font_Diegetic Bold (the POS label's face), colour and shadow from the timer
+                    pcall(function()
+                        local f = tx.Font
+                        local fo = StaticFindObject("/Game/Griffin/UI/Library/Fonts/Font_Diegetic.Font_Diegetic")
+                        if U.ok(fo) then f.FontObject = fo; f.TypefaceFontName = FName("Bold"); f.Size = 36 end
+                        tw:SetFont(f)
+                    end)
+                    pcall(function() tw:SetColorAndOpacity(tx.ColorAndOpacity) end)
+                    pcall(function() tw:SetShadowOffset(tx.ShadowOffset) end)
+                    pcall(function() tw:SetShadowColorAndOpacity(tx.ShadowColorAndOpacity) end)
+                    pcall(function() tw.Slot:SetVerticalAlignment(tx.Slot.VerticalAlignment) end)
+                    e.chalTx = tw
+                end)
+                if not okC or not U.ok(e.chalTx) then
+                    e.chalRetryMs = St.nowMs() + 2000
+                    U.logOnce("hud.chal" .. tostring(e.pnum), TAG, "P%s challenge line not made", tostring(e.pnum))
+                else
+                    U.log(TAG, "P%s challenge line in its HUD (GALAXY RUN)", tostring(e.pnum))
+                end
+            end
+            if U.ok(e.chalTx) and e.chalShown ~= text then
+                e.chalShown = text
+                pcall(function() e.chalTx:SetText(FText(text and ("   " .. text) or "")) end)
+            end
+        end
+    end
+end
+
+-- 0.13.0: WBP_HUD_Afterburner caches its bar's MID in the variable M_AfterburnerBar (= the MID drawn on screen,
+-- checked live 19:50) and every Tick writes "Slider" = UIBlueprintFunctionLibrary.GetAfterBurnerGuagePercentage(self)
+-- through it: PLAYER 0's AfterburnerEnergy on every guest bar. The fix points M_AfterburnerBar at a throwaway MID (the
+-- Tick writes P1's value there) and drives the drawn MID from the bar owner's car. Re-pointed whenever the widget
+-- re-caches it (a Construct after a pause). P1's bar stays the game's. Tried and rejected: a post-hook on the getter
+-- (a BP call to a static native passes no readable WorldContextObject; reading it is a crash risk) and swapping
+-- Img_AfterburnerBar (the Tick never reads it, it uses the cached MID).
+local AB = { e = {}, findMs = -1e12, world = -1, lastN = -1 }
+local KMLIB = "/Script/Engine.Default__KismetMaterialLibrary"
+
+function M.fastAfterburner()
+    if St.phase ~= "RACING" or cfg.HudAfterburnerDrive == false then return end
+    local lps = U.localPlayers(); if #lps < 2 then return end
+    local now = St.nowMs()
+    if AB.world ~= St.worldGen then AB.e = {}; AB.world = St.worldGen; AB.findMs = -1e12 end
+    if now - AB.findMs > 2000 then
+        AB.findMs = now
+        local p1 = U.key(lps[1].pc)
+        local lib = StaticFindObject(KMLIB)
+        for _, w in ipairs(FindAllOf("WBP_HUD_Afterburner_C") or {}) do pcall(function()
+            local wk = U.key(w)
+            if AB.e[wk] or not (U.ok(w) and w:IsVisible()) then return end
+            local pc = w:GetOwningPlayer()
+            if not U.ok(pc) or U.key(pc) == p1 then return end
+            local mid = w.M_AfterburnerBar
+            if not (U.ok(mid) and U.ok(lib)) then return end
+            local dummy = lib:CreateDynamicMaterialInstance(w, mid.Parent, FName("None"), 0)
+            if not U.ok(dummy) then return end
+            w.M_AfterburnerBar = dummy
+            AB.e[wk] = { w = w, pc = pc, mid = mid, dummy = dummy }
+        end) end
+        local n = 0; for _ in pairs(AB.e) do n = n + 1 end
+        if n ~= AB.lastN then AB.lastN = n
+            U.log(TAG, "afterburner bar per player: %d guest bar(s) driven from their own car (V-HUD-AB1)", n) end
+    end
+    -- every object re-checked every frame: pcall does not catch a call on a freed UObject (19:32 crash)
+    local slider = FName("Slider")
+    for wk, x in pairs(AB.e) do
+        if not (U.ok(x.w) and U.ok(x.pc) and U.ok(x.mid) and U.ok(x.dummy)) then AB.e[wk] = nil
+        else pcall(function()
+            if U.key(x.w.M_AfterburnerBar) ~= U.key(x.dummy) then        -- re-cached by a Construct
+                local m = x.w.M_AfterburnerBar
+                if U.ok(m) then x.mid = m end
+                x.w.M_AfterburnerBar = x.dummy
+            end
+            local car = x.pc.Pawn
+            if not (U.ok(car) and U.isVehicle(car)) then return end
+            local v = math.max(0, math.min(1, tonumber(car.VehicleState.AfterburnerEnergy) or 0))
+            x.mid:SetScalarParameterValue(slider, v)
+        end) end
+    end
+end
+
+-- 0.13.0 (Jules, live 2026-10-12, URGENT: "the bar fills in solo, it's only broken in split"): WBP_HUD_RamjetBar's
+-- Tick fills its material from UIBlueprintFunctionLibrary.GetEngineOverheatingPercentage(self) /
+-- GetRamJetReadyGaugePercentage(self), which read PLAYER 0's car: in a split race every bar showed P1's ramjet (live:
+-- P2's bars carried P1's values). P1's bar is right; a guest's bar image gets a material instance of its own (the BP
+-- keeps writing its own one, no longer drawn) driven here from the player's own car (P1 too: one verified path), with the game's mapping recorded live
+-- in solo (2026-10-12 18:47): RamjetPercentage = RamjetHeat x EngineHeatWeight while the ramjet runs (RamjetState 3 /
+-- 6), else 0; ChargingPercentage = 1 from Ready (state >= 1), else ~1 - heat / 0.47 while it recharges; [B]IsReady? =
+-- 1 from Ready; [B]Overheated = clamp(remap(fill, 0.8 w, 1.1 w)). Every FAST tick while racing, bars re-found every 2 s.
+local KML = "/Script/Engine.Default__KismetMaterialLibrary"
+function M.fastRamjet()
+    if St.phase ~= "RACING" or cfg.HudRamjetDrive == false then return end
+    local h = H()
+    local lps = U.localPlayers()
+    if #lps < 2 then return end                          -- solo: the game's own HUD is right
+    local now = St.nowMs()
+    if now - (h.rjFindMs or -1e12) > 2000 or h.rjWorld ~= St.worldGen then
+        if h.rjWorld ~= St.worldGen then h.rjMid = {} end
+        h.rjFindMs, h.rjWorld, h.rjBars = now, St.worldGen, {}
+        for _, w in ipairs(FindAllOf("WBP_HUD_RamjetBar_C") or {}) do
+            pcall(function()
+                if U.ok(w) and w:IsVisible() then
+                    local k = U.key(w:GetOwningPlayer())
+                    h.rjBars[k] = h.rjBars[k] or {}
+                    table.insert(h.rjBars[k], w)
+                end
+            end)
+        end
+    end
+    h.rjMid = h.rjMid or {}
+    for _, e in ipairs(lps) do
+        local pk = U.key(e.pc)
+        local bars = h.rjBars[pk]                          -- every player in a split race, P1 too (same mapping)
+        if bars then
+            pcall(function()
+                local car = e.pc.Pawn
+                if not (U.ok(car) and U.isVehicle(car)) then return end
+                local vs = car.VehicleState
+                local heat = math.max(0, tonumber(vs.RamjetHeat) or 0)
+                local st = tonumber(vs.RamjetState) or 0
+                for _, w in ipairs(bars) do
+                    if U.ok(w) then
+                        local wk = U.key(w)
+                        local mid = h.rjMid[wk]
+                        if not U.ok(mid) then
+                            local lib, parent = StaticFindObject(KML), nil
+                            -- "afterburner" style: the ramjet material only SHOWS its fill while the global MPC is in
+                            -- the ramjet colour state (one value for every HUD: blue on all, Jules 21:0x). The
+                            -- afterburner bar shader ignores the MPC: a plain per-player fill under any colours.
+                            if cfg.HudRamjetBarStyle == "afterburner" then
+                                pcall(function() parent = StaticFindObject(
+                                    "/Game/Griffin/UI/Library/Materials/HUD/M_UI_HUD_AfterburnerBar.M_UI_HUD_AfterburnerBar") end)
+                            end
+                            if not U.ok(parent) then pcall(function() parent = w.Material.Parent end) end
+                            if U.ok(lib) and U.ok(parent) then
+                                mid = lib:CreateDynamicMaterialInstance(w, parent, FName("None"), 0)
+                                if U.ok(mid) then
+                                    w.IMG_Ramjet:SetBrushFromMaterial(mid)
+                                    h.rjMid[wk] = mid
+                                    U.log(TAG, "P%s ramjet bar: own material, driven from P%s's car (V-HUD-RJ2)",
+                                        tostring(e.index), tostring(e.index))
+                                end
+                            end
+                        end
+                        if U.ok(mid) then
+                            local wt = tonumber(w.EngineHeatWeight) or 0.74
+                            -- live 18:55 (explosion recorded): 3 on, 4 overheating (heat 1.0), 7 exploded; the fill must
+                            -- stay through 4-7 (it dropped to 0 at the critical moment)
+                            -- box 1 = heat x w while on (3); box 2 = the overheat (4-6): w + BypassOverheatingPercentage
+                            -- x (1 - w) (live 19:06: 0.23 -> 0.83 -> 1.0 at the explosion, state 7 = full)
+                            local fill = 0
+                            if st == 3 then
+                                fill = math.min(1, heat) * wt
+                            elseif st >= 4 and st <= 6 then
+                                local by = math.max(0, math.min(1, tonumber(vs.BypassOverheatingPercentage) or 0))
+                                fill = wt + by * (1 - wt)
+                            elseif st == 7 then
+                                fill = 1
+                            end
+                            local charge = (st >= 1) and 1 or math.max(0, math.min(1, 1 - heat / 0.47))
+                            mid:SetScalarParameterValue(FName("EngineHeatWeight"), wt)
+                            mid:SetScalarParameterValue(FName("RamjetPercentage"), fill)
+                            mid:SetScalarParameterValue(FName("ChargingPercentage"), charge)
+                            mid:SetScalarParameterValue(FName("[B]IsReady?"), (st >= 1) and 1 or 0)
+                            mid:SetScalarParameterValue(FName("[B]Overheated"),
+                                math.max(0, math.min(1, (fill - 0.8 * wt) / (0.3 * wt))))
+                            mid:SetScalarParameterValue(FName("Slider"), fill)   -- afterburner-style parent
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end
+
+function M.fastTimer()
+    if St.phase ~= "RACING" or cfg.HudGuestTimer == false then return end
+    local h = H()
+    if next(h.guests) == nil then return end
+    local now = St.nowMs()
+    if now < (h.timerNextMs or 0) then return end
+    h.timerNextMs = now + 50
+    local p1 = U.p1()
+    if not U.ok(p1) or stillRacingPC(p1) ~= false then
+        h.timerP1Out = nil
+        return
+    end
+    local gs = U.gs()
+    if not U.ok(gs) then return end
+    local okT, el = pcall(function() return gs:GetServerWorldTimeSeconds() - gs.RaceStartTime end)
+    if not okT or type(el) ~= "number" then return end
+    if not h.timerP1Out then
+        h.timerP1Out = true
+        U.log(TAG, "P1 is out of the race at %s: the guests' race timers are written by the mod (task #35)",
+            fmtRaceTime(el))
+    end
+    local text = fmtRaceTime(el)
+    for _, e in pairs(h.guests) do
+        if e.pnum ~= 1 and U.ok(e.widget) and U.ok(e.pc) and stillRacingPC(e.pc) == true then
+            local tx = guestTimerText(e)
+            if tx and U.ok(e.timerOrig) and e.timerOrig:GetVisibility() ~= 1 then
+                pcall(function() e.timerOrig:SetVisibility(1) end)          -- Collapsed: the twin takes its place
+            end
+            if tx and e.timerShown ~= text then
+                e.timerShown = text
+                pcall(function() tx:SetText(FText(text)) end)
+            end
+        end
+    end
 end
 
 function M.tick()

@@ -22,7 +22,10 @@ local lastFixMs = {}    -- pc key -> ms
 local lastWhat = {}     -- pc key -> "P<n> <class> <ok|err>" of the last fix (diag)
 local photoLogged = false
 
-local FAILED_CAMS = { "PlayerFailedCam", "FailedCam" }
+-- 0.13.0 (Jules, live: P2 finished first and P1, still racing, watched the podium cinematic): the finish / podium
+-- cinematic cameras too (LevelSequence cine cameras, podium cams). The mod's own crash / wreck rigs are plain
+-- CameraActors and never match.
+local FAILED_CAMS = { "PlayerFailedCam", "FailedCam", "CineCamera", "Podium", "PostRaceCam", "ResultsCam" }
 
 local function enabled() return cfg.ViewGuard ~= false end
 
@@ -63,10 +66,41 @@ local function stillRacing(pc, car)
     return not (fin or wr or el)
 end
 
+-- 0.13.0 (Jules 2026-10-12: "P1 has a mechanical camera before crashing for the first time"): in a split race P1's
+-- chase camera stayed in its rest pose (live 20:41, 3 bots: P1 d=469 / FOV 85 at every speed, guests 360-707 /
+-- 108-120). The game hands P1's view from the intro camera to the car without re-arming the camera modes; a crash
+-- (crash camera, then back) re-arms it, and so does a REAL view-target change (setting the same car again is a no-op).
+-- Once per race, ~1 s after the start, P1's view goes to its own controller and, the next frame, back to its car
+-- (never to another human's car: two camera managers on one car froze that player's camera, live 20:43).
+local RA = { world = -1, step = 0, at = 0 }
+local function rearmP1(lps, now)
+    if cfg.ViewRearmP1 == false or St.phase ~= "RACING" then return end
+    if RA.world ~= St.worldGen then RA.world, RA.step, RA.at = St.worldGen, 0, now end
+    if RA.step >= 2 then return end
+    local e = lps[1]
+    if not U.ok(e.pc) then return end
+    local car
+    pcall(function() local p = e.pc.Pawn; if U.ok(p) and U.isVehicle(p) then car = p end end)
+    if not car then return end
+    if RA.step == 0 then
+        if now - RA.at < 1000 then return end
+        local vt
+        pcall(function() vt = e.pc:GetViewTarget() end)
+        if not (U.ok(vt) and U.key(vt) == U.key(car)) then return end    -- intro / crash camera: wait
+        pcall(function() e.pc:SetViewTargetWithBlend(e.pc, 0.0, 0, 0.0, false) end)
+        RA.step, RA.at = 1, now
+    elseif now - RA.at >= 30 then
+        local ok = pcall(function() e.pc:SetViewTargetWithBlend(car, 0.0, 0, 0.0, false) end)
+        RA.step = 2
+        U.log(TAG, "P1 chase camera re-armed (view -> its controller -> its car): %s (V-VG-REARM)", ok and "ok" or "failed")
+    end
+end
+
 function M.fastTick()
     if not enabled() then return end
     local lps = U.localPlayers()
     if #lps < 2 then return end
+    pcall(rearmP1, lps, St.nowMs())
     if photoOpen() then
         if not photoLogged then photoLogged = true; U.log(TAG, "photo mode open: view guard paused") end
         return

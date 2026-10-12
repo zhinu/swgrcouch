@@ -716,28 +716,87 @@ local function imcUi()
     return (ok and U.ok(o)) and o or nil
 end
 
--- Back to the priorities P1's vehicle IMCs had before we raised them.
+-- 0.13.0 (task #35, P1 wrecked first): the guard covers EVERY local player still racing, not only P1. Once P1 is out,
+-- the race CSM runs CSM_RF_LocalResults / Spectating, whose interactive results panel belongs to the UIManager owner
+-- (the LAST local PC: P2 in 2P), so the guest that still races can get the same IMC_UI-over-vehicle takeover P1 had.
+-- A wrecked/finished player (IsStillRacing false) is left alone: its pad drives the spectate/results UI.
+-- Back to the priorities the vehicle IMCs had before we raised them (every player).
+local function racerComp(pc)
+    local comp
+    pcall(function()
+        local ps = pc.PlayerState
+        local tko = U.mod("takeover")            -- the racing PlayerState after a takeover (as hud.lua / run.lua)
+        if tko and type(tko.racerPSFor) == "function" then
+            local okP, rps = pcall(tko.racerPSFor, pc)
+            if okP and U.ok(rps) then ps = rps end
+        end
+        comp = ps.RaceEventComponent
+    end)
+    return U.ok(comp) and comp or nil
+end
+
+local function stillRacing(pc)
+    local comp = racerComp(pc)
+    if not comp then return true end          -- unknown: guard it (a guard on a non-racer only costs priority)
+    local ok, r = pcall(function() return comp:IsStillRacing() end)
+    return not ok or r ~= false
+end
+
 function M.p1UiRelease(why)
     if next(P1G.raised) == nil then return end
-    local p1 = U.p1()
-    local sub = U.ok(p1) and eiSub(p1) or nil
+    local subs = {}
+    for _, e in ipairs(U.localPlayers()) do
+        if U.ok(e.pc) then subs[e.index] = eiSub(e.pc) end
+    end
     local parts = {}
-    for name, r in pairs(P1G.raised) do
+    for key, r in pairs(P1G.raised) do
+        local sub = subs[r.pnum]
         local ok = sub and U.ok(r.imc) and pcall(function() sub:AddMappingContext(r.imc, r.orig, {}) end)
-        parts[#parts + 1] = string.format("%s %d -> %d%s", name, r.prio, r.orig, ok and "" or " (failed)")
+        parts[#parts + 1] = string.format("P%d %s %d -> %d%s", r.pnum, r.name, r.prio, r.orig, ok and "" or " (failed)")
     end
     P1G.raised = {}
-    U.log(TAG, "P1 vehicle input back to its own priority (%s): %s (V-INP-09)", tostring(why), table.concat(parts, ", "))
+    U.log(TAG, "vehicle input back to its own priority (%s): %s (V-INP-09)", tostring(why), table.concat(parts, ", "))
+end
+
+-- One player: vehicle IMCs just above its IMC_UI. Returns the "IMC ..." summary for the first-check log.
+local function guardOne(pnum, pc)
+    local sub = eiSub(pc)
+    local ui = imcUi()
+    if not (sub and ui) then return nil end
+    local hasUi, uiPrio = eiHas(sub, ui)
+    if hasUi == nil then return nil end
+    uiPrio = hasUi and (uiPrio or 0) or nil
+    local seen = {}
+    for _, name in ipairs(P1_VEH_IMCS) do
+        local imc = imcByName(name)
+        local has, prio = nil, nil
+        if imc then has, prio = eiHas(sub, imc) end
+        if has then
+            prio = prio or 0
+            seen[#seen + 1] = string.format("%s %d", name, prio)
+            if uiPrio and prio <= uiPrio then
+                local key = pnum .. ":" .. name
+                local r = P1G.raised[key]
+                local want = uiPrio + 1
+                local ok = pcall(function() sub:AddMappingContext(imc, want, {}) end)
+                P1G.raised[key] = { imc = imc, orig = r and r.orig or prio, prio = want, pnum = pnum, name = name }
+                U.log(TAG, "P%d vehicle input over the UI context: %s %d -> %d (IMC_UI at %d)%s (V-INP-09)", pnum, name,
+                    prio, want, uiPrio, ok and "" or " - AddMappingContext FAILED")
+            end
+        end
+    end
+    return string.format("IMC_UI %s, vehicle %s", uiPrio and tostring(uiPrio) or "absent",
+        #seen > 0 and table.concat(seen, ", ") or "none")
 end
 
 -- FAST loop (main.lua), every phase: acts in RACING split races only, releases everywhere else.
 function M.p1UiGuard()
     if opt("InputFixP1VehicleOverUi", true) == false then return end
     local racing = St.phase == "RACING"
+    local lps = {}
     if racing then
-        local n = 0
-        pcall(function() n = #U.localPlayers() end)
-        racing = n >= 2
+        pcall(function() lps = U.localPlayers() end)
+        racing = #lps >= 2
     end
     local paused = false
     if racing then
@@ -749,42 +808,32 @@ function M.p1UiGuard()
         if next(P1G.raised) ~= nil then
             M.p1UiRelease(paused and "pause" or (photo and "photo mode" or ("phase " .. tostring(St.phase))))
         end
-        if not racing then P1G.checked = false end
+        if not racing then P1G.checked, P1G.checkedP = false, {} end
         return
     end
     local now = St.nowMs()
     if now < P1G.nextMs then return end
     P1G.nextMs = now + 250
-    local p1 = U.p1()
-    if not U.ok(p1) then return end
-    local sub = eiSub(p1)
-    local ui = imcUi()
-    if not (sub and ui) then return end
-    local hasUi, uiPrio = eiHas(sub, ui)
-    if hasUi == nil then return end
-    uiPrio = hasUi and (uiPrio or 0) or nil
-    local seen = {}
-    for _, name in ipairs(P1_VEH_IMCS) do
-        local imc = imcByName(name)
-        local has, prio = nil, nil
-        if imc then has, prio = eiHas(sub, imc) end
-        if has then
-            prio = prio or 0
-            seen[#seen + 1] = string.format("%s %d", name, prio)
-            if uiPrio and prio <= uiPrio then
-                local r = P1G.raised[name]
-                local want = uiPrio + 1
-                local ok = pcall(function() sub:AddMappingContext(imc, want, {}) end)
-                P1G.raised[name] = { imc = imc, orig = r and r.orig or prio, prio = want }
-                U.log(TAG, "P1 vehicle input over the UI context: %s %d -> %d (IMC_UI at %d)%s (V-INP-09)", name, prio,
-                    want, uiPrio, ok and "" or " - AddMappingContext FAILED")
+    P1G.checkedP = P1G.checkedP or {}
+    for _, e in ipairs(lps) do
+        local pnum = e.index
+        if U.ok(e.pc) and stillRacing(e.pc) then
+            local okG, summary = pcall(guardOne, pnum, e.pc)
+            if okG and summary and not P1G.checkedP[pnum] then
+                P1G.checkedP[pnum] = true
+                U.log(TAG, "P%d racing: %s (V-INP-09)", pnum, summary)
+            end
+        else
+            -- out of the race: give back what we raised for this player (its pad now drives spectate / results UI)
+            for key, r in pairs(P1G.raised) do
+                if r.pnum == pnum then
+                    local sub = U.ok(e.pc) and eiSub(e.pc) or nil
+                    if sub and U.ok(r.imc) then pcall(function() sub:AddMappingContext(r.imc, r.orig, {}) end) end
+                    P1G.raised[key] = nil
+                    U.log(TAG, "P%d out of the race: %s back to %d (V-INP-09)", pnum, r.name, r.orig)
+                end
             end
         end
-    end
-    if not P1G.checked then
-        P1G.checked = true
-        U.log(TAG, "P1 racing: IMC_UI %s, vehicle %s (V-INP-09)", uiPrio and tostring(uiPrio) or "absent",
-            #seen > 0 and table.concat(seen, ", ") or "none")
     end
 end
 
@@ -936,8 +985,32 @@ function M.guestVehicleInput(pc)
     return nil
 end
 
+--- 0.13.0: a wrecked player gets the game's IMC_Spectator (spectate controls); the player controllers survive the
+--- seamless travel, so it stayed on in every later race (live 19:49 / 19:53: P1 started a race with IMC_Spectator x2,
+--- P2 / P4 x1): the right stick no longer turned the camera. Removed for every local player at the front end.
+function M.dropSpectator(why)
+    local imcs = {}
+    for _, o in ipairs(FindAllOf("InputMappingContext") or {}) do
+        pcall(function() if U.ok(o) and o:GetFName():ToString() == "IMC_Spectator" then imcs[#imcs + 1] = o end end)
+    end
+    if #imcs == 0 then return 0 end
+    local n = 0
+    for _, e in ipairs(U.localPlayers()) do
+        local sub = U.ok(e.pc) and eiSub(e.pc) or nil
+        if sub then
+            for _, imc in ipairs(imcs) do
+                for _ = 1, 2 do pcall(function() sub:RemoveMappingContext(imc, {}) end) end
+            end
+            n = n + 1
+        end
+    end
+    U.log(TAG, "IMC_Spectator removed for %d local player(s) (%s): a wreck's spectate controls never reach the next race (V-INP-12)", n, why or "?")
+    return n
+end
+
 --- FRONTEND (game thread): remove the vehicle IMC this module added to guests (their menus never see IA_Veh_*).
 function M.eiRestore()
+    if opt("InputFixDropSpectator", true) ~= false then U.try(TAG, function() M.dropSpectator("front end") end) end
     if opt("InputFixGuestEnhancedRemove", true) == false then S.ei = {}; return end
     local live = {}
     for _, e in ipairs(U.localPlayers()) do

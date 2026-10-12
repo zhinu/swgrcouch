@@ -647,7 +647,65 @@ end
 -- RequestResetRace on the authority game mode, then phase.markLeaving("restart") in the same tick (net.serverTravelNow's
 -- order: ServerTravel only arms the travel, so every "leaving" listener still sees the PCs and PlayerStates; it also
 -- replaces the late "poll" leaving of the live test), then the watchdog.
+-- 0.13.0 cfg.PauseRestartHow "relaunch" (default): RequestResetRace reloads the map but no AI car ever spawns again
+-- (live 2026-10-12, speeders and pods: the AI PlayerStates come back without a pawn, "POS 1/4" with 4 humans of 12).
+-- So the restart goes to the main menu (the pause's own EXIT path: UIBlueprintFunctionLibrary.ReturnToMainMenu) and
+-- launches the same race again from the FREE MODE page ("tab" true): a fresh recipe, AI included, every launch step
+-- (QUICK RACE builds, Galaxy run: the unsettled race is the same race again). "reset": the in-place reload.
+local UILIB = "/Script/Griffin.Default__UIBlueprintFunctionLibrary"
+local RELAUNCH_WINDOW_MS = 120000
+
+local function sendRelaunch(st, q, now, since)
+    local lib = StaticFindObject(UILIB)
+    if not U.ok(lib) then
+        U.warn(TAG, "restart: %s not found: request dropped (V-RST-13)", UILIB)
+        st.req = nil
+        return
+    end
+    st.relaunch = { atMs = St.nowMs(), by = q.by }
+    local okR, err = pcall(function() lib:ReturnToMainMenu(U.p1()) end)
+    if not okR then
+        st.relaunch = nil
+        U.err(TAG, "restart: ReturnToMainMenu failed: %s (V-RST-13)", tostring(err))
+        st.req = nil
+        return
+    end
+    st.restarts = (st.restarts or 0) + 1
+    q.step, q.sentMs, q.sentGen = "sent", now, St.worldGen
+    U.log(TAG, "restart #%d: back to the menu %s, the same race is launched again from FREE MODE (requested by %s) "
+        .. "(V-RST-13)", st.restarts, since, tostring(q.by))
+    U.try(TAG, function() U.mod("phase").markLeaving("restart") end)
+end
+
+-- FREE MODE page shown again after a relaunch restart: START the same race (launch.start, never the Galaxy run's
+-- "next race" cards: the unsettled run race is the same race again).
+local function relaunchOnTab()
+    local st = R()
+    local rr = st.relaunch
+    if not rr then return end
+    st.relaunch = nil
+    -- review 2026-10-12: the FREE MODE page must come back within 15 s of the menu (else the player moved on: a
+    -- later tab visit never starts the old race)
+    if St.nowMs() - (rr.atMs or 0) > RELAUNCH_WINDOW_MS
+        or (rr.feMs and St.nowMs() - rr.feMs > opt("PauseRestartRelaunchWindowMs", 15000)) then
+        U.warn(TAG, "restart: the FREE MODE page came back too late: no relaunch (V-RST-13)")
+        return
+    end
+    sched.after(TAG, opt("PauseRestartRelaunchMs", 1200), function()
+        if St.phase ~= "FRONTEND" or St.menu.visible ~= "lobby" then return end
+        -- review 2026-10-12: only on our tab, with RACE SETUP closed (the player may have moved on in 1.2 s)
+        local okT, ours = pcall(function() return U.mod("menu_tab").isOurTabActive() end)
+        if okT and ours == false then return end
+        local okS, act = pcall(function() return U.mod("setup").isActive() end)
+        if okS and act == true then return end
+        local ok = false
+        U.try(TAG, function() ok = U.mod("launch").start({ acceptDormant = true }) == true end)
+        U.log(TAG, "restart: same race launched again from FREE MODE: %s (V-RST-13)", ok and "ok" or "refused (see status)")
+    end)
+end
+
 local function send(st, q, now, since)
+    if opt("PauseRestartHow", "relaunch") == "relaunch" then return sendRelaunch(st, q, now, since) end
     local gm = U.gm()
     if not (U.ok(gm) and U.isA(gm, "RacingGameMode")) then
         U.warn(TAG, "restart: no RacingGameMode any more: request dropped (V-RST-06)")
@@ -819,6 +877,9 @@ function M.init()
             st.req = nil
         end
     end)
+    St.on("tab", TAG, function(on)
+        if on then U.try(TAG, relaunchOnTab) end
+    end)
     St.on("phase", TAG, function(new)
         local st = R()
         if new ~= "RACING" then
@@ -827,7 +888,9 @@ function M.init()
         end
         if new == "LOADING" or new == "PRERACE" then
             st.req, st.elig = nil, nil                              -- the restarted race (or any new one) starts clean
+            st.relaunch = nil
         elseif new == "FRONTEND" then
+            if st.relaunch and not st.relaunch.feMs then st.relaunch.feMs = St.nowMs() end
             U.try(TAG, arcadeRestore, "front end")
             st.req, st.elig, st.verdictGen, st.verdict = nil, nil, nil, nil
         end
