@@ -442,7 +442,7 @@ local function loadNative(players)
     if ok and r1 then
         S.native.loaded = true
         local st = readNativeStatus()
-        -- 0.10.0: the DLL knows game builds CL381121 and CL382493 (hotfix) and reports the one it matched  V-INP-10
+        -- 0.10.0: the DLL knows game builds CL381121, CL382493 and CL382801 (hotfixes) and reports the one it matched  V-INP-10
         U.log(TAG, "native filter loaded: installed=%s reason=%s build=%s", tostring(st.installed), tostring(st.reason),
             tostring(st.build))
         if st.installed ~= "1" then

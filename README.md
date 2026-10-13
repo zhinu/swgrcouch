@@ -5,7 +5,7 @@ race **any track on any planet, in any vehicle class (podracers included), in an
 AI grid. Play **alone or with up to 4 local players** on one screen. Every player picks their own **pilot, vehicle and
 complete loadout**: abilities, parts, upgrade levels, racer style and traits, all unlocked.
 
-> **Version 0.13.1.** Captured live on the current Steam build (CL 382493) with UE4SS Galactic Racer Edition, in a
+> **Version 0.13.2.** Runs on the current Steam builds CL 382493 and CL 382801 (the 2026-10-12 hotfix); captured live with UE4SS Galactic Racer Edition, in a
 > 1280x720 test window; account names are blurred. The game itself is not included: you need a legitimately bought
 > copy (Steam). This project is not affiliated with Lucasfilm, Disney or the game's developers. It contains no game
 > code and no game files: its pages are drawn with the art and fonts of your installed game, and the perk menus use
@@ -31,6 +31,15 @@ complete loadout**: abilities, parts, upgrade levels, racer style and traits, al
 
 ---
 
+
+## 0.13.2: works with the 2026-10-12 game hotfix
+
+The game's 2026-10-12 update (Steam build 25880680, CL 382801) moved the exe around and the mod stopped loading
+entirely - UE4SS failed with "Tried to call 'FMemory::Realloc' before the FMalloc instance was found" and the
+game launched as plain vanilla. 0.13.2 fixes that: the UE4SS signatures now locate the engine's allocator by
+deriving it from the instruction stream instead of a fixed address, so a uniform code shift no longer breaks them,
+and the input filter learned the new build (it reports `build=382801`). If you updated the game and the FREE MODE
+tab vanished, this release brings it back. Older builds CL 382493 and CL 381121 still work.
 
 ## 0.13.1: the stutter is gone - split screen is super fluid now
 
@@ -367,7 +376,7 @@ TIER 4 race gave them power level 18 and 2 abilities each (TIER 2: power level 6
 loadouts were in place in every race.
 
 ## Requirements
-- **STAR WARS Galactic Racer** on Steam, build CL 382493 (the October 2026 hotfix): 0.12.0 was tested on this build.
+- **STAR WARS Galactic Racer** on Steam, build CL 382801 (the 2026-10-12 hotfix) or CL 382493: both are supported.
   The native input filter also knows the launch build CL 381121, but 0.12.0 was not run on it.
 - **UE4SS Galactic Racer Edition** (open beta, 2026-10-08), in the with-UE4SS zip. UE4SS 3.0.1-1160 (the 0.9.0 and
   0.9.1 zips) does not boot on the current game.
@@ -412,9 +421,9 @@ that the installed UE4SS is 3.0.1-1160, install from the with-UE4SS zip.
 set there also replaces the new layout's own value.
 
 ### Check it works
-Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 0.12.0 loading` and `modules=46/46`, and the
+Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 0.13.2 loading` and `modules=48/48`, and the
 main menu has a **FREE MODE** tab with four posters. In a race with two pads, the log shows
-`native filter loaded: installed=1 reason=ok build=382493`.
+`native filter loaded: installed=1 reason=ok build=382801` (the number is your game build).
 
 ## Uninstall
 - **Linux / Steam Deck:** remove `WINEDLLOVERRIDES="dwmapi=n,b"` from the launch options: UE4SS and the mod no longer
@@ -444,7 +453,7 @@ main menu has a **FREE MODE** tab with four posters. In a race with two pads, th
    results, any player's A continues.
 
 ## Test it (and report)
-1. Boot: `SWGRCouch 0.12.0 loading` and `modules=46/46`; the FREE MODE tab shows four posters.
+1. Boot: `SWGRCouch 0.13.2 loading` and `modules=48/48`; the FREE MODE tab shows four posters.
 2. OPTIONS: change each row, then press B (or Backspace): you are back on the posters, with no QUIT GAME? prompt left
    on screen.
 3. A solo race of each class; then 2-4 players. In RACE SETUP, B steps back one step. Try MODE > Opponents on TIER 1
@@ -536,7 +545,7 @@ can verify). To play split screen, pick one:
    system LLVM (`clang`, `lld-link`, `llvm-dlltool`); no Windows SDK is needed; or
 3. **Use the with-UE4SS zip**, which ships the DLL in place.
 
-The log line `native filter loaded: installed=1 reason=ok build=382493` (first split race) confirms it is active.
+The log line `native filter loaded: installed=1 reason=ok build=382801` (the number is your game build; first split race) confirms it is active.
 
 ## Credits and licences
 - SWGRCouch: MIT (see `LICENSE`).

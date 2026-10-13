@@ -106,6 +106,13 @@ static const Build BUILDS[] = {
     { 382493, 0x14991a9c0ULL, 0x149913950ULL, 0x48, 0x14300bd0aULL,
       { 0x1470f1180ULL, 0x1470f12aeULL, 0x140d04678ULL, 0x1470f131eULL, 0x1470f138eULL },
       0x14ac5e920ULL, 0x14ac5e934ULL, 0x14ac5e9c8ULL },
+    /* 2026-10-12 hotfix (Steam build 25880680, "Auto-382801"): data block +0x1000 (GUObjectArray
+     * 0x14ac5f910 by the fixed GMalloc-era signatures), proc vtable +0x70, code moved non-uniformly;
+     * derived statically from the exe (work/perf/vtable-derive.py: GetDebugName string ref -> proc
+     * vtable slots; ctor fingerprint -> subsys vtable) and cross-checked on CL382493 first. */
+    { 382801, 0x14991aa30ULL, 0x1499139c0ULL, 0x48, 0x14300c26aULL,
+      { 0x1470f134aULL, 0x1470f1478ULL, 0x140d04678ULL, 0x1470f14e8ULL, 0x1470f1558ULL },
+      0x14ac5f920ULL, 0x14ac5f934ULL, 0x14ac5f9c8ULL },
 };
 #define NBUILD ((int)(sizeof BUILDS / sizeof BUILDS[0]))
 static const Build *g_b;        /* the build install() identified (GetDebugName slot); 0 = unknown */
