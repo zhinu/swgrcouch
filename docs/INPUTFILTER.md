@@ -9,8 +9,8 @@ player 1's car. The installer prints a warning when the DLL is missing.
 
 **To play split screen, do ONE of these:**
 
-1. **Download it** - grab `swgr_inputfilter-<version>.zip` from the same release page and put
-   `swgr_inputfilter.dll` into the game's `ue4ss/Mods/SWGRCouch/native/` folder (next to `inputfilter/`).
+1. **Download it** - download `swgr_inputfilter.dll` (a bare file) from the same release page and put it
+   into the game's `ue4ss/Mods/SWGRCouch/native/` folder (next to `inputfilter/`).
    If you have not installed the mod yet: drop it into this zip's `SWGRCouch/native/` first and `install.sh`
    copies it for you.
 2. **Compile it yourself** - `SWGRCouch/native/inputfilter/build.sh` rebuilds the DLL from `inputfilter.c`

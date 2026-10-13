@@ -382,7 +382,7 @@ Download the latest release from the **Releases** page:
 - `SWGRCouch-0.13.1.zip`: mod only - no UE4SS, and **without the compiled input-filter DLL** (some sites and
   scanners dislike zips with a DLL inside; see [The input filter DLL](#the-input-filter-dll) - solo play works
   as is, split screen needs the DLL);
-- `swgr_inputfilter-0.13.1.zip`: just the compiled `swgr_inputfilter.dll`, to complete the mod-only zip.
+- `swgr_inputfilter.dll`: the compiled input-filter DLL as a bare file, to complete the mod-only zip.
 
 ### Linux / Steam Deck (Steam + Proton)
 ```sh
@@ -530,7 +530,7 @@ virus scanners flag any zip with an unsigned DLL inside (a handful of heuristic 
 positive: the DLL rebuilds **byte-identical** from the C source in this repo with `lld-link /timestamp`, which anyone
 can verify). To play split screen, pick one:
 
-1. **Download it**: grab `swgr_inputfilter-<version>.zip` from the release and put `swgr_inputfilter.dll` into
+1. **Download it**: download `swgr_inputfilter.dll` (a bare file) from the release and put it into
    `ue4ss/Mods/SWGRCouch/native/` (next to `inputfilter/`); or
 2. **Compile it yourself**: `SWGRCouch/native/inputfilter/build.sh` rebuilds the DLL from `inputfilter.c` with the
    system LLVM (`clang`, `lld-link`, `llvm-dlltool`); no Windows SDK is needed; or

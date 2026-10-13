@@ -146,7 +146,7 @@ install_mod() {
     fi
   else
     echo "WARN: $NSRC missing: split-screen input isolation is OFF (solo play is fine)." >&2
-    echo "      Download swgr_inputfilter-<version>.zip from the release and put the DLL in SWGRCouch/native/," >&2
+    echo "      Download swgr_inputfilter.dll from the release and put it in SWGRCouch/native/," >&2
     echo "      or build it with SWGRCouch/native/inputfilter/build.sh, then re-run install.sh." >&2
   fi
 
