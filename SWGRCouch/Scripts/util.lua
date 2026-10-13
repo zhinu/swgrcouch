@@ -285,6 +285,39 @@ local function findObject(path)
     return nil
 end
 
+-- StaticFindObject costs ~2.5 ms in this build EVEN WHEN THE OBJECT EXISTS (live-measured 2026-10-13; UE4SS
+-- with the custom AOBs on this UE5.7 exe). One raw find inside a FAST/MAIN poll is a dropped frame, and the
+-- CSM polls alone did 4+ of them per 33 ms (the 0.13 split-race stutter). Per-tick callers go through this
+-- cache: a hit is re-validated with U.ok; a miss is retried after missTtl ms (default FIND_MISS_MS), or at
+-- once when the world or the phase changed (map loads and phase flips are what make missing objects appear).
+local findCache, findMissAt = {}, {}
+local findMissWorld, findMissPhase = nil, nil
+local FIND_MISS_MS = 10000
+local function findObjectCached(path, missTtl)
+    local o = findCache[path]
+    if o ~= nil and U.ok(o) then return o end
+    findCache[path] = nil
+    if findMissWorld ~= St.worldGen or findMissPhase ~= St.phase then
+        findMissWorld, findMissPhase, findMissAt = St.worldGen, St.phase, {}
+    end
+    local at = findMissAt[path]
+    if at and St.nowMs() - at < (missTtl or FIND_MISS_MS) then return nil end
+    o = findObject(path)
+    if o then
+        findCache[path] = o; findMissAt[path] = nil
+    else
+        findMissAt[path] = St.nowMs()
+    end
+    return o
+end
+
+--- Cached find-only lookup (never LoadAsset) for per-tick polls; nil while the object is not in memory.
+--- missTtl (ms, default 10000) = how long a miss is trusted before the next real StaticFindObject.
+function U.findLoaded(path, missTtl)
+    if type(path) ~= "string" or path == "" then return nil end
+    return findObjectCached(path, missTtl)
+end
+
 --- LoadAsset(assetPath) on the game thread, at most once per LOAD_RETRY_MS per path. 3 returns [API§10].
 local function tryLoad(assetPath)
     if not inGameThread() then return false end
@@ -610,7 +643,8 @@ function U.csmActive(assetKey, findOnly)
     local path = C.ASSET[assetKey] or assetKey
     local asset
     if findOnly then
-        local o = (type(path) == "string" and path ~= "") and findObject(path) or nil
+        -- cached: the FAST/MAIN polls land here several times per tick (see findObjectCached)
+        local o = (type(path) == "string" and path ~= "") and findObjectCached(path) or nil
         asset = o or CreateInvalidObject()
     else
         asset = U.obj(path)
@@ -634,7 +668,7 @@ end
 function U.csmLoaded(assetKey)
     local path = C.ASSET[assetKey] or assetKey
     if type(path) ~= "string" or path == "" then return false end
-    return findObject(path) ~= nil
+    return findObjectCached(path) ~= nil
 end
 
 --- Find-only poll: U.csmActive(key, true), with "false because the asset is not in memory" mapped to nil (unknown).
@@ -780,7 +814,9 @@ end
 local function registerNow(path)
     if St.hooks[path] then return true end
     if hookFailed[path] then return false end
-    if not findObject(path) then return false end          -- not loaded yet: stays pending
+    -- cached with a short miss TTL: pending race-UI classes re-checked raw every SLOW tick were the
+    -- once-per-second menu hitch; 2.5 s still arms a freshly loaded class fast enough for the pause bridge
+    if not findObjectCached(path, 2500) then return false end   -- not loaded yet: stays pending
     local ok, preId, postId
     if isNativePath(path) then
         ok, preId, postId = pcall(RegisterHook, path,

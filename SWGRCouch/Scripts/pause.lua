@@ -184,9 +184,9 @@ end
 
 local function loaded(path)
     if type(path) ~= "string" or path == "" then return nil end
-    local ok, c = pcall(StaticFindObject, path)
-    if ok and U.ok(c) then return c end
-    return nil
+    -- cached (raw StaticFindObject is ~2.5 ms in this build, 2026-10-13); pause states load when a pause
+    -- begins, so a 1 s miss TTL keeps the open-menu path fresh without per-tick raw finds
+    return U.findLoaded(path, 1000)
 end
 
 local function pnumDesc(pc)

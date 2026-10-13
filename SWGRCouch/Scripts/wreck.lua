@@ -1586,11 +1586,16 @@ local MIX = { race = nil, world = -1, fixed = 0 }
 local MIX_RACE = "/Game/Griffin/Audio/Mixing/Control/CBM_Race.CBM_Race"
 local function mixTick()
     if cfg.WreckKeepRaceMix == false then return end
-    if MIX.world ~= St.worldGen then MIX.race, MIX.world, MIX.fixed = nil, St.worldGen, 0 end
+    if MIX.world ~= St.worldGen then MIX.race, MIX.world, MIX.fixed, MIX.sub = nil, St.worldGen, 0, nil end
     local rs = localRacers()
     if #rs < 2 then return end
-    local sub = FindFirstOf("FuseMixingControlSubsystem")
-    if not U.ok(sub) then return end
+    -- cached per world: FindFirstOf is a full object scan (ms-scale in this build, 2026-10-13 perf hunt)
+    local sub = MIX.sub
+    if sub == nil or not U.ok(sub) then
+        sub = FindFirstOf("FuseMixingControlSubsystem")
+        if not U.ok(sub) then return end
+        MIX.sub = sub
+    end
     local am = sub.ActiveMix
     local amName = U.ok(am) and am:GetFName():ToString() or ""
     local p1, guests = rs[1], false

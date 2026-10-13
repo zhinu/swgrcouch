@@ -145,7 +145,9 @@ install_mod() {
       echo "SWGRCouch: native/swgr_inputfilter.dll -> $DST/native"
     fi
   else
-    echo "WARN: $NSRC missing (build it with SWGRCouch/native/inputfilter/build.sh); input isolation uses kbsplit" >&2
+    echo "WARN: $NSRC missing: split-screen input isolation is OFF (solo play is fine)." >&2
+    echo "      Download swgr_inputfilter-<version>.zip from the release and put the DLL in SWGRCouch/native/," >&2
+    echo "      or build it with SWGRCouch/native/inputfilter/build.sh, then re-run install.sh." >&2
   fi
 
   # 2b. Custom AOB signatures for this build (mod/ue4ss_signatures, first live run 2026-10-06). A different existing

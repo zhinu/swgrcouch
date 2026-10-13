@@ -25,7 +25,13 @@ local photoLogged = false
 -- 0.13.0 (Jules, live: P2 finished first and P1, still racing, watched the podium cinematic): the finish / podium
 -- cinematic cameras too (LevelSequence cine cameras, podium cams). The mod's own crash / wreck rigs are plain
 -- CameraActors and never match.
-local FAILED_CAMS = { "PlayerFailedCam", "FailedCam", "CineCamera", "Podium", "PostRaceCam", "ResultsCam" }
+-- 2026-10-13 (Jules: the race-start flythrough "reloads every second", "models appear twice"): the INTRO is a
+-- CineCameraActor too, and the generic 0.13 names yanked the view back to the car twice per second through the
+-- whole flythrough. The podium / finish cine cams this guard is for can only be seen AFTER the views have split
+-- once (the intro runs on ONE view and splits at the ignition sequence, present.lua): the generic names arm only
+-- from that first split on; the original wreck cams stay guarded always.
+local STRICT_CAMS = { "PlayerFailedCam", "FailedCam" }
+local LATE_CAMS   = { "CineCamera", "Podium", "PostRaceCam", "ResultsCam" }
 
 local function enabled() return cfg.ViewGuard ~= false end
 
@@ -34,9 +40,25 @@ local function className(o)
     return ok and s or ""
 end
 
+local SPLIT = { world = -1, seen = false }
+local function splitSeenNow()
+    if SPLIT.world ~= St.worldGen then SPLIT.world, SPLIT.seen = St.worldGen, false end
+    if not SPLIT.seen then
+        local ok, pr = pcall(require, "present")
+        if ok and type(pr) == "table" and type(pr.isSingleView) == "function" then
+            local ok2, single = pcall(pr.isSingleView)
+            if ok2 and single == false then SPLIT.seen = true end
+        end
+    end
+    return SPLIT.seen
+end
+
 local function isFailedCam(vt)
     local n = className(vt)
-    for _, k in ipairs(FAILED_CAMS) do if n:find(k, 1, true) then return true end end
+    for _, k in ipairs(STRICT_CAMS) do if n:find(k, 1, true) then return true end end
+    if splitSeenNow() then
+        for _, k in ipairs(LATE_CAMS) do if n:find(k, 1, true) then return true end end
+    end
     return false
 end
 

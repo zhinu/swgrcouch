@@ -198,11 +198,11 @@ end
 -- A Blueprint class only if it is ALREADY in memory (StaticFindObject, never LoadAsset): a HUD class that is not
 -- loaded cannot have a live instance, and U.class would synchronously load the whole HUD dependency tree
 -- mid-race from the MAIN poll.
-local function loadedClass(path)
+local function loadedClass(path, missTtl)
     if type(path) ~= "string" then return nil end
-    local ok, c = pcall(StaticFindObject, path)
-    if ok and U.ok(c) then return c end
-    return nil
+    -- U.findLoaded: cached (raw StaticFindObject is ~2.5 ms in this build, 2026-10-13); missTtl for classes
+    -- that appear mid-race (spectate, post-race) so their polls still see them within a second
+    return U.findLoaded(path, missTtl)
 end
 
 -- Breadth-first walk of a user widget's tree. Collects every widget whose (lower-case) name is wanted, as
@@ -1782,7 +1782,7 @@ end
 
 local function findLocalResults(h)
     if U.ok(h.results) then return h.results end
-    local cls = loadedClass(C.BP.PostRaceInfo)        -- loaded once the CSM shows it; never LoadAsset here
+    local cls = loadedClass(C.BP.PostRaceInfo, 1000)  -- loads at race end; 1 s miss TTL keeps the fallback fresh
     if not cls then return nil end
     local mgr = U.giSubsystem("UIManager")
     if U.ok(mgr) then
@@ -1909,7 +1909,7 @@ end
 -- VERIFY(V-WD-11): P1 wrecked, P2 racing: P2's view stays clear; the log line "spectate panel shown while guests race".
 local function findSpectateWidget(h)
     if U.ok(h.spectate) then return h.spectate end
-    local cls = loadedClass(C.BP.PvpSpectate)          -- loaded once the CSM shows it; never LoadAsset here
+    local cls = loadedClass(C.BP.PvpSpectate, 1000)    -- loads on the first wreck; 1 s miss TTL for the spectate poll
     if not cls then return nil end
     local mgr = U.giSubsystem("UIManager")
     if U.ok(mgr) then

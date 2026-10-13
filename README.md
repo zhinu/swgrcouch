@@ -32,6 +32,15 @@ complete loadout**: abilities, parts, upgrade levels, racer style and traits, al
 ---
 
 
+## 0.13.1: the stutter is gone - split screen is super fluid now
+
+0.13.0 could stutter badly with 2-4 players, whatever the graphics settings, and the race-start flythrough kept
+"reloading". Both are fixed in 0.13.1. The mod's per-frame polls went through an object lookup that costs ~2.5 ms
+per call in this game - almost half the game thread went to it; every poll now runs from a cache. Measured on the
+same machine, same race, same settings: **2 players 41 → 59 fps, 4 players 54 fps, not one frame over 100 ms** -
+it feels like the vanilla game again. The intro camera guard that snapped the view back to the car once a second
+through the whole flythrough now stays out of the intro entirely.
+
 ## 0.13.0: play modes, and the split-screen HUD is finally per player
 
 **New (in short):** the FREE MODE page now has three ways to play - **QUICK RACE** (everyone and the AI on the same
@@ -218,7 +227,7 @@ row is part of the new MODE step only: with the classic pages, races use the `Op
 
 ---
 
-## What's new in 0.13.0-dev (private, not released)
+## What's new in 0.13.0
 
 - **New FREE MODE page: three ways to play, one poster each.** The tab now shows **QUICK RACE**, **CUSTOM RACE** and
   **GALAXY RUN** on top, **ADD PLAYERS** and **OPTIONS** below, and a **START card** that says what the pad's
@@ -368,8 +377,12 @@ loadouts were in place in every race.
 ## Install
 
 Download the latest release from the **Releases** page:
-- `SWGRCouch-0.12.0-with-UE4SS.zip`: mod + UE4SS Galactic Racer Edition (open beta, 2026-10-08) (easiest);
-- `SWGRCouch-0.12.0.zip`: mod only, if you already have that UE4SS build.
+- `SWGRCouch-0.13.1-with-UE4SS.zip`: mod + input filter + UE4SS Galactic Racer Edition (open beta, 2026-10-08)
+  (easiest, everything included);
+- `SWGRCouch-0.13.1.zip`: mod only - no UE4SS, and **without the compiled input-filter DLL** (some sites and
+  scanners dislike zips with a DLL inside; see [The input filter DLL](#the-input-filter-dll) - solo play works
+  as is, split screen needs the DLL);
+- `swgr_inputfilter-0.13.1.zip`: just the compiled `swgr_inputfilter.dll`, to complete the mod-only zip.
 
 ### Linux / Steam Deck (Steam + Proton)
 ```sh
@@ -507,9 +520,23 @@ A layout key you set here (`CardW`, `CardH`, `SetupCMapVideoW`...) applies to bo
 
 Details in [docs/REFERENCE.md](docs/REFERENCE.md).
 
-## Build the native filter (optional)
-`SWGRCouch/native/inputfilter/build.sh` rebuilds `swgr_inputfilter.dll` from `inputfilter.c` with the system LLVM
-(`clang`, `lld-link`, `llvm-dlltool`); no Windows SDK is needed.
+## The input filter DLL
+`swgr_inputfilter.dll` (a small native library, ~30 KB, [source included](SWGRCouch/native/inputfilter/)) is what
+gives each player's car its own pad in split screen. Without it the mod still loads and **solo play works**, but in
+a split race every pad steers player 1's car.
+
+The mod-only zip (`SWGRCouch-<version>.zip`) ships **without the compiled DLL**, because some download sites and
+virus scanners flag any zip with an unsigned DLL inside (a handful of heuristic engines flag this one too - a false
+positive: the DLL rebuilds **byte-identical** from the C source in this repo with `lld-link /timestamp`, which anyone
+can verify). To play split screen, pick one:
+
+1. **Download it**: grab `swgr_inputfilter-<version>.zip` from the release and put `swgr_inputfilter.dll` into
+   `ue4ss/Mods/SWGRCouch/native/` (next to `inputfilter/`); or
+2. **Compile it yourself**: `SWGRCouch/native/inputfilter/build.sh` rebuilds the DLL from `inputfilter.c` with the
+   system LLVM (`clang`, `lld-link`, `llvm-dlltool`); no Windows SDK is needed; or
+3. **Use the with-UE4SS zip**, which ships the DLL in place.
+
+The log line `native filter loaded: installed=1 reason=ok build=382493` (first split race) confirms it is active.
 
 ## Credits and licences
 - SWGRCouch: MIT (see `LICENSE`).
