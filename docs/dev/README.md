@@ -19,7 +19,8 @@ components (§3), the page layouts (§4-§9), the config keys (§12.3) and the l
 cites it as `notes/design/ui-v2/ui-redesign-final.md` with its § numbers; where the spec and the code differ, the code
 wins, and ARCHITECTURE.md Revision 0.12.0 records the result. Its mockups are not published either (they are drawn
 with decoded game art and fonts). The other `notes/...` research files and `state/runs/...` run folders that
-ARCHITECTURE.md and the code cite also stay with the project notes.
+ARCHITECTURE.md and the code cite also stay with the project notes, as do the 1.0 couch-campaign test notes
+(the couch-gauntlet test tool, the guest-garage live checks) and the release checklists.
 
 `tools/gen-perkdata.py` regenerates `Scripts/perkdata.lua`. It needs the decoded game data (not included: it is
 extracted from the game's own files); see the header of the script. `tools/package.sh VERSION` builds the release zips

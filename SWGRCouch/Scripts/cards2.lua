@@ -2570,6 +2570,9 @@ local BUILD, RENDER, buildPicker = (function()
         B.focus = newPill(card, cv, 3)                        -- the cursor pill (KIT, upgrade rows, STYLE, picker rows)
         B.kit = { pill = newPill(card, cv, 3), label = newText(card, cv, RL.value, 5, { label = "kit label" }),
                   al = newImage(card, cv, 5), ar = newImage(card, cv, 5, { flip = true }) }
+        -- 0.14 GALAXY RUN: the vendor / reward caption band over the poster art (run shop and run reward pickers)
+        B.vend = { band = newImage(card, cv, 1), title = newText(card, cv, RL.name, 2, { label = "vendor title" }),
+                   quote = newText(card, cv, RL.value, 2, { wrap = 530, label = "vendor quote" }) }
         B.totP = newText(card, cv, RL.value, 5, { label = "power total" })
         B.totE = newText(card, cv, RL.rank, 5, { label = "energy total" })
         B.subs = { ab = newSub(card, cv, 4), parts = newSub(card, cv, 4), power = newSub(card, cv, 4),
@@ -3004,6 +3007,16 @@ local BUILD, RENDER, buildPicker = (function()
         return focus, G.y + 96 + cap * G.pitch
     end
 
+    local VENDOR_ART = "/Game/Griffin/World/FrontEnd/SplashScreen_Textures/T_Griffin_SideCharactersOnly_HibiDarius"
+        .. ".T_Griffin_SideCharactersOnly_HibiDarius"
+    local VENDOR_LINES = {
+        "\"CREDITS FIRST. QUESTIONS NEVER.\"",
+        "\"FELL OFF A TRANSPORT. PERFECTLY LEGAL. MOSTLY.\"",
+        "\"NO REFUNDS. NO TOUCHING THE MERCHANDISE.\"",
+        "\"THAT ONE? A STEAL. FOR ME.\"",
+        "\"RESTOCK? PARTS DON'T GROW ON BANTHAS.\"",
+    }
+
     local function renderPerks(card, B, vm, cls)
         local g = PRK[cls]
         local p = vm.perks or {}
@@ -3011,8 +3024,33 @@ local BUILD, RENDER, buildPicker = (function()
         local cur = p.cursor
         local picking = type(p.picker) == "table" and B.pick ~= nil
         local ar = ART[cls].perks
-        posterArt(B.art, ar, posterOf(card, vm), cls, "perks", hue)
+        local pkind = picking and p.picker.kind or nil
+        if pkind == "shop" then
+            -- Hibi, the game's own junk dealer, sells the run's stock (Jules: "a Watto selling stuff")
+            posterArt(B.art, ar, { tile = VENDOR_ART }, cls, "perks", hue)
+        else
+            posterArt(B.art, ar, posterOf(card, vm), cls, "perks", hue)
+        end
         hueRule(B.rule, ar, cls == "W", hue)
+        if pkind == "shop" or pkind == "reward" then
+            local bandH = 190
+            local bx, by, bw = ar[1], ar[2] + ar[4] - bandH, ar[3]
+            rect(B.vend.band, bx, by, bw, bandH); img(B.vend.band, TX.solid)
+            tint(B.vend.band, { R = 0.006, G = 0.020, B = 0.027, A = 1 })
+            local title, quote
+            if pkind == "shop" then
+                title = "HIBI'S JUNK SHOP"
+                local n = #VENDOR_LINES
+                quote = VENDOR_LINES[((tonumber(p.picker.cursor) or 1) % n) + 1]
+            else
+                title = "CHOOSE AN UPGRADE"
+                quote = "ONE PICK PER RACE. SKIP IT FOR CREDITS."
+            end
+            tput(B.vend.title, bx + 28, by + 44, title, 26, COL.GOLD, "lm", bw - 56)
+            tput(B.vend.quote, bx + 28, by + 84, quote, 21, COL.CREAM, "lt", bw - 56, 3)
+        else
+            vis(B.vend.band, false); vis(B.vend.title, false); vis(B.vend.quote, false)
+        end
         local focus = nil
         -- KIT row (A on it = READY; L / R = another kit: arrows inside the focused pill)
         local kr = g.kit
@@ -3498,7 +3536,7 @@ function M.layout(n)
             end
             local left = (i > 1) and gap or 0
             if bc.gap ~= left
-                and pcall(function() X.slots[i]:SetPadding({ Left = left, Top = 0, Right = 0, Bottom = 0 }) end) then
+                and U.ok(X.slots[i]) and pcall(function() X.slots[i]:SetPadding({ Left = left, Top = 0, Right = 0, Bottom = 0 }) end) then
                 bc.gap = left
             end
         end

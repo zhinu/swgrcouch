@@ -61,6 +61,7 @@ menu_tab.hookSilent = false
 -- readable), seenActive = an activated state was observed on this instance, offAtMs = when it went inactive}.
 local act = {key = 0, active = nil, seenActive = false, offAtMs = 0}
 local hookFiredTabs = false      -- a CustomEvent / RegisterTabs hook call was ever seen (diagnostics)
+local lock                       -- #21 sub-page lock state (defined with menu_tab.subPageTick below)
 
 -- Should the MAIN loop run pollTab? Always: the poll is the required path (BP hooks do not fire in this build).
 -- cfg.TabDetectMode "poll" additionally makes the CustomEvent hook a no-op; "hook" / "both" keep it as an extra
@@ -129,7 +130,14 @@ function menu_tab.init()
       -- Also guests kept for a rematch whose return chain is still pending (St.join.active false until the lobby
       -- reopens): dropMenu below cancels that chain without its give-up close. closeStrayGuests skips a pending
       -- launch and a frozen (client) set, and does nothing without guests.
-      if new == "OTHER" and FRONT_PHASES[old] then closeStrayGuests("phase OTHER entered from the menu") end
+      if new == "OTHER" and FRONT_PHASES[old] then
+        local okC, couch = pcall(function() return U.mod("couch").active() end)
+        if okC and couch == true then
+          U.log(TAG, "phase OTHER (campaign paddock) entered with joined guests: COUCH CAMPAIGN, guests kept")
+        else
+          closeStrayGuests("phase OTHER entered from the menu")
+        end
+      end
       -- LEAVING / OTHER can be marked late, by phase.tick on its first look at the NEW world (no leaving hook fired):
       -- the RegisterTabs post-hook may already have installed that world's menu and consumed St.ui.returnToTab for
       -- its return chain. A menu of the current world is alive (no address reuse possible): keep it. In a real race
@@ -207,7 +215,7 @@ end
 isStaleMenu = isStale
 
 local function worldKeyOf(menu)
-  local ok, w = pcall(function() return menu:GetWorld() end)
+  local ok, w = pcall(U.callMethod, menu, "GetWorld")
   if ok and U.ok(w) then return U.key(w) end
   return 0
 end
@@ -242,6 +250,10 @@ function menu_tab.dropMenu(why)
   tabOpen = false
   cancelReturn()
   polled.key, polled.id = 0, nil
+  if lock and lock.on then         -- #21: the dead menu's tab list is never called again
+    lock.on, lock.tl, lock.disabled, lock.page = false, nil, {}, nil
+    lock.bar.orig, lock.bar.list = {}, {}
+  end
   St.resetMenu()                   -- keeps St.ui.returnToTab
   U.mod("ui").forgetAll()          -- buttons, labels, rows, texts, shown, enabled
   if had then U.dbg(TAG, "menu bookkeeping dropped (%s)", tostring(why)) end
@@ -303,6 +315,33 @@ local function gameTabsRegistered(menu)
   return U.ok(tl) and tl:GetTabCount() >= 4
 end
 
+local function inViewport(w)
+  local ok, v = pcall(U.callMethod, w, "IsInViewport")
+  return ok and v == true
+end
+
+-- Another WBP_FE_MainMenu_C instance in the viewport (tabs registered) while the installed one is not. The scan runs
+-- at most once a second, only while the installed menu is out of the viewport (Settings, inspect screens, a swap).
+local lastReplScanMs = -1e12
+local function shownReplacement(menu)
+  if inViewport(menu) then return nil end
+  local okP, pend = pcall(function() return U.mod("feowner").pending() end)
+  if okP and pend then return nil end                -- feowner's pre-created screen is not acquired yet
+  local cand = St.menu.pendingNew
+  if U.ok(cand) and not isStale(cand) and U.key(cand) ~= U.key(menu) and inViewport(cand) and gameTabsRegistered(cand) then
+    return cand
+  end
+  local now = St.nowMs()
+  if now - lastReplScanMs < 1000 then return nil end
+  lastReplScanMs = now
+  local okF, list = pcall(FindAllOf, "WBP_FE_MainMenu_C")
+  if not okF or type(list) ~= "table" then return nil end
+  for _, m in ipairs(list) do
+    if U.ok(m) and U.key(m) ~= U.key(menu) and not isStale(m) and inViewport(m) and gameTabsRegistered(m) then return m end
+  end
+  return nil
+end
+
 -- SLOW loop, front end only. Covers hot reload, a missed NotifyOnNewObject/RegisterTabs hook, a new menu instance
 -- after a race, and a tab label overwritten by a tab-list rebuild.
 function menu_tab.ensure()
@@ -320,6 +359,18 @@ function menu_tab.ensure()
     end
   end
   local menu = St.menu.widget
+  -- 0.13.3: the installed menu can stay alive OUT of the viewport while another instance shows (feowner's P1 menu
+  -- after an ARCADE / SCENARIOS inspect screen's Back, live 2026-10-15): our tab was missing there and the Multiplayer
+  -- tab visible again (its rebuild then gave the main menu to the guest: both pads dead). Install on the shown one.
+  if not isStale(menu) then
+    local repl = shownReplacement(menu)
+    if repl then
+      U.log(TAG, "ensure: the installed main menu left the viewport and %s shows: installing on it (V-TAB-12)",
+        tostring(U.key(repl)))
+      menu_tab.install(repl)
+      return
+    end
+  end
   if not isStale(menu) and St.menu.tabAdded then
     local btn = ourTabButton(menu)
     if btn then
@@ -547,6 +598,13 @@ end
 
 -- Leave path: deactivate our pages and close the join session. restoreIdx = game pane to put back (nil = the game
 -- already chose its pane).
+-- couch-fix61 (AUTO-150b, live round 6 08:42:55, shots 104300-r6-24 / 104310-r6-25): RB from FREE MODE wrapping to
+-- CAMPAIGN left the FREE MODE page drawn under the CAMPAIGN tab for 10+ s (LB / RB away and back repainted it). FREE MODE
+-- never changes the front-end CSM, which was still in CAMPAIGN's state (FREE MODE had been entered from CAMPAIGN by LB):
+-- the game's ChangeStateTo(Recommended) had no pane to switch, and our deactivated page kept the screen. Now a left page
+-- is also COLLAPSED (hidePages; showPage gives its visibility back), and for LEAVE_CHECK_MS after a leave for a game tab
+-- each MAIN tab poll checks the switcher: our page still its active widget -> the game tab's pane index put back.
+local LEAVE_CHECK_MS = 3000
 local function leaveOurTab(menu, id, restoreIdx)
   menu_tab.hidePages()
   tabOpen = false
@@ -576,6 +634,8 @@ local function leaveOurTab(menu, id, restoreIdx)
   end
   St.menu.coveredPane = nil
   St.menu.prevTabId = id
+  -- couch-fix61 (AUTO-150b): watched for a few MAIN polls (menu_tab.leaveTick)
+  if C.GAME_TABS[id] ~= nil then St.menu.leaveCheck = {id = id, untilMs = St.nowMs() + LEAVE_CHECK_MS, fixed = 0} end
 end
 
 -- Entry point of every detector (pollTab, the optional CustomEvent hook, selectOurTab, the return chain).
@@ -702,6 +762,13 @@ function menu_tab.showPage(which)
       end
     end)
   end
+  -- AUTO-150b: the visibility hidePages collapsed comes back
+  local pv = St.menu.pageVis and St.menu.pageVis[which]
+  if pv ~= nil then
+    St.menu.pageVis[which] = nil
+    U.try(TAG, function() w:SetVisibility(pv) end)
+  end
+  St.menu.leaveCheck = nil
   sw:SetActiveWidget(w)               -- SetActiveWidget(Object Widget)
   w:ActivateWidget()                  -- builder: BP_OnActivated runs Init* + ClearChoices [MT§5]
   local other = pageOf(which == "lobby" and "builder" or "lobby")
@@ -733,6 +800,15 @@ function menu_tab.hidePages()
     if U.ok(w) then
       U.try(TAG, function()
         if w:IsActivated() then w:DeactivateWidget() end
+      end)
+      -- AUTO-150b: a left page never draws (the switcher may keep it as its active widget)
+      U.try(TAG, function()
+        St.menu.pageVis = St.menu.pageVis or {}
+        local v = w:GetVisibility()
+        if v ~= C.E.Vis.Collapsed then
+          St.menu.pageVis[which] = v
+          w:SetVisibility(C.E.Vis.Collapsed)
+        end
       end)
     end
   end
@@ -813,7 +889,7 @@ local function onReactivated(menu, offForMs)
 end
 
 local function pollActivation(menu, now)
-  local ok, a = pcall(function() return menu:IsActivated() end)   -- UCommonActivatableWidget::IsActivated() -> Bool
+  local ok, a = pcall(U.callMethod, menu, "IsActivated")   -- UCommonActivatableWidget::IsActivated() -> Bool
   if not ok or type(a) ~= "boolean" then return false end
   if act.key ~= St.menu.key then act.key, act.active, act.seenActive, act.offAtMs = St.menu.key, nil, false, 0 end
   local prev = act.active
@@ -848,12 +924,14 @@ function menu_tab.pollTab()
     local b = U.mod("builder")
     if type(b.poll) == "function" then b.poll() end
   end)
+  U.try(TAG, menu_tab.subPageTick)        -- #21: also lifts the sub-page lock when the lobby page is not polled
   local menu = St.menu.widget
   if isStale(menu) or not St.menu.tabAdded then return end
   local tl = menu.WBP_Tab_List
   if not U.ok(tl) then return end
   local id = U.str(tl:GetActiveTab())       -- GetActiveTab() -> Name
   local now = St.nowMs()
+  U.try(TAG, menu_tab.leaveTick, menu, now)
   if polled.key ~= St.menu.key then          -- first poll on this menu: baseline only
     polled.key, polled.id = St.menu.key, id
     pollActivation(menu, now)
@@ -867,7 +945,7 @@ function menu_tab.pollTab()
     -- click is seen as the button being selected again
     local btn = ourTabButton(menu)
     local okS, sel = false, false
-    if btn then okS, sel = pcall(function() return btn:GetSelected() end) end   -- GetSelected() -> Bool
+    if btn then okS, sel = pcall(U.callMethod, btn, "GetSelected") end   -- GetSelected() -> Bool
     if okS and sel == true then
       U.log(TAG, "tab poll: our tab selected again after the Campaign-pane sync")
       menu_tab.onTabSelected(menu, id)
@@ -902,15 +980,253 @@ function menu_tab.pollTab()
     U.log(TAG, "tab poll: %s selected while the return to our tab is pending: treated as the game's sync", id)
     return
   end
+  if lock.on and C.GAME_TABS[id] ~= nil then
+    -- #21: a game tab got selected through the lock (a binding the router kept, a mouse click on the hidden strip)
+    lock.leaks = lock.leaks + 1
+    U.warn(TAG, "tab poll: %s selected while the sub-page %s held the lock (#21)", id, tostring(lock.page))
+  end
   -- VERIFY(V-TAB-10): the normal path in this build (BP hooks do not fire): one line per tab click.
   U.log(TAG, "tab poll: active tab is now %s", id)
   menu_tab.onTabSelected(menu, id)
+end
+
+-- AUTO-150b: after a leave for a game tab, our page must not stay the switcher's pane (see LEAVE_CHECK_MS)
+function menu_tab.leaveTick(menu, now)
+  local lc = St.menu.leaveCheck
+  if not lc then return end
+  if St.menu.visible ~= nil or now > lc.untilMs or not U.ok(menu) then St.menu.leaveCheck = nil; return end
+  local sw = menu.WS_ScreenContent
+  if not U.ok(sw) or ourPageIsActive(menu) ~= true then return end
+  local idx = C.GAME_TABS[lc.id]
+  if idx == nil or lc.fixed >= 3 then return end
+  lc.fixed = lc.fixed + 1
+  sw:SetActiveWidgetIndex(idx)            -- SetActiveWidgetIndex(Int Index)
+  U.log(TAG, "left for %s but the FREE MODE page was still the menu's pane: game pane %d put back (AUTO-150b)",
+    tostring(lc.id), idx)
 end
 
 -- The main menu is covered by another screen (Settings, the dev screen, a modal that deactivates it), as last read
 -- by pollTab's activation poll (MAIN). lobby's input checks read IsActivated themselves (FAST) and use this too.
 function menu_tab.isCovered()
   return act.key == St.menu.key and act.key ~= 0 and act.active == false and act.seenActive == true
+end
+
+-------------------------------------------------------------------------------------------------- sub-page lock (#21)
+-- Live playtest 2026-10-17 #21: inside a FREE MODE sub-page (QUICK / CUSTOM RACE = RACE SETUP, GALACTIC GRAND PRIX,
+-- the GALAXY RUN / COUCH CAMPAIGN pages, OPTIONS) P1's LB / RB still switched the main-menu tabs (CAMPAIGN / SCENARIOS /
+-- ARCADE: the page was left mid-setup, the join session closed and reopened on every bumper press) and the footer said
+-- "(B) Exit Game" although B goes back there (backprompt.lua). The game's own inner screens (an Arcade event, a
+-- campaign preset) are separate screens over the main menu: no tab strip at all, B = back. A sub-page does the same:
+--   * the tab strip (WBP_Tab_List, CommonTabListWidgetBase) stops listening for its Next / Previous tab actions
+--     (SetListeningForInput(false): LB / RB are CommonUI action bindings of the tab list itself, WBP_Tab_List.uasset;
+--     the main menu binds no bumper of its own, mm-disasm) and is HIDDEN (Hidden keeps the layout: nothing moves);
+--     the game tabs are also disabled (SetTabEnabled false: HandleNext/PreviousTabInputAction skips disabled tabs), so
+--     a binding the router kept still finds no tab to go to;
+--   * the action bar's "Exit Game" entry (the main menu's IA_UI_CloseGame binding, WBP_Input_Dark_Btn_C
+--     Text_ActionName) reads "Back" while the sub-page shows;
+--   * everything is restored the moment the sub-page closes (back on the posters), the tab is left, the menu changes
+--     or the front end goes. Re-asserted every LOCK_RECHECK_MS while it holds (a menu re-activation can re-register).
+-- Driven from lobby.pollNav (FAST, so the lock lands within one FAST tick of the sub-page's open) and pollTab (MAIN: the
+-- unlock when the lobby page is gone). cfg.SubPageLock = false: the 0.16 behaviour (LB / RB switch tabs everywhere).
+local LOCK_RECHECK_MS = 500
+local BAR_CHECK_MS, BAR_SCAN_MS = 250, 3000
+local BAR_EARLY_MS, BAR_EARLY_RETRY_MS = 6000, 400
+lock = {on = false, key = 0, page = nil, tl = nil, vis = nil, disabled = {}, atMs = 0, checkMs = 0, leaks = 0,
+              bar = {list = {}, orig = {}, scanMs = -1e12, checkMs = -1e12, scans = 0, relabels = 0}}
+
+-- The FREE MODE sub-page open on our lobby page right now ("setup" | "gppage" | "runpage" | "couchpage" | "options"),
+-- nil on the posters / another tab. Pure reads of the page modules.
+function menu_tab.subPage()
+  if St.menu.visible ~= "lobby" then return nil end
+  local function on(mod, fn)
+    local ok, v = pcall(function() local m = U.mod(mod); return m and type(m[fn]) == "function" and m[fn]() end)
+    return ok and v == true
+  end
+  if on("gppage", "active") then return "gppage" end
+  if on("setup", "isActive") then return "setup" end
+  if on("runpage", "active") then return "runpage" end
+  if on("couchpage", "active") then return "couchpage" end
+  if on("lobby", "optionsOpen") then return "options" end
+  return nil
+end
+
+-- pure: the action bar label with "Exit Game" replaced by back (keeps an engine "[Pn] " player tag); nil = not it
+function menu_tab.backLabel(s, back)
+  if type(s) ~= "string" then return nil end
+  local tag, rest = s:match("^(%[P%d%]%s*)(.-)$")
+  if not tag then tag, rest = "", s end
+  if string.lower(rest) ~= "exit game" then return nil end
+  return tag .. (back or "Back")
+end
+
+local function barLabel(b)
+  local t = nil
+  pcall(function() t = b.Text_ActionName end)
+  if not U.ok(t) then return nil, nil end
+  local cur = nil
+  pcall(function() cur = U.str(t:GetText()) end)
+  return t, cur
+end
+
+-- relabel "Exit Game" -> "Back" (lock on) or put the remembered texts back (off). The bar's entries are found once
+-- (one FindAllOf, kept across sub-pages) and again at most every BAR_SCAN_MS while no cached entry carries the label
+-- (the bar rebuilds its entries when the bindings change); the texts are re-checked every BAR_CHECK_MS on the cached
+-- list only.
+local function barTick(now, force)
+  local B = lock.bar
+  local back = tostring(cfg.SubPageBackLabel or "Back")
+  if not lock.on then
+    -- only an entry still showing our label goes back (a pooled entry the bar reused for another action is left alone)
+    for b, txt in pairs(B.orig) do
+      if U.alive(b) then
+        local t, cur = barLabel(b)
+        if t and cur == menu_tab.backLabel(txt, back) then pcall(function() t:SetText(U.ftext(txt)) end) end
+      end
+    end
+    B.orig = {}                                      -- the entry list is kept: the next sub-page needs no scan
+    return
+  end
+  if not force and now - B.checkMs < BAR_CHECK_MS then return end
+  B.checkMs = now
+  local alive = false
+  for _, b in ipairs(B.list) do
+    if U.alive(b) then
+      local t, cur = barLabel(b)
+      local nl = menu_tab.backLabel(cur, back)
+      if t and nl then
+        if pcall(function() t:SetText(U.ftext(nl)) end) then
+          B.orig[b] = cur
+          B.relabels = B.relabels + 1
+          alive = true
+        end
+      elseif t and B.orig[b] ~= nil and cur == menu_tab.backLabel(B.orig[b], back) then
+        alive = true                                 -- still our entry, still relabelled
+      end
+    end
+  end
+  if alive or (not force and now - B.scanMs < BAR_SCAN_MS) then return end
+  B.scanMs, B.scans = now, B.scans + 1
+  local list = {}
+  pcall(function()
+    for _, b in ipairs(FindAllOf("WBP_Input_Dark_Btn_C") or {}) do
+      if U.ok(b) then list[#list + 1] = b end
+    end
+  end)
+  B.list = list
+  local found = 0
+  for _, b in ipairs(list) do
+    local t, cur = barLabel(b)
+    local nl = menu_tab.backLabel(cur, back)
+    if t and nl and pcall(function() t:SetText(U.ftext(nl)) end) then
+      B.orig[b] = cur
+      B.relabels, found = B.relabels + 1, found + 1
+      U.dbg(TAG, "action bar: '%s' reads '%s' on the sub-page", tostring(cur), nl)
+    end
+  end
+  -- no "Exit Game" entry on screen (another footer, a mouse-only bar): the next object scan waits 10 s, not 3 (#23).
+  -- couch-fix59 (AUTO-145d, live 20:14:30: the GP standings on a fresh front end after a race said "B Exit Game"): the
+  -- lock can land before the front end's action bar exists; for BAR_EARLY_MS after the lock the scan retries every
+  -- BAR_EARLY_RETRY_MS, the 10 s back-off only after that
+  if found == 0 then
+    if now - (lock.atMs or -1e12) < BAR_EARLY_MS then B.scanMs = now - BAR_SCAN_MS + BAR_EARLY_RETRY_MS
+    else B.scanMs = now + 7000 end
+  end
+end
+
+local function applyLock(tl)
+  pcall(function() tl:SetListeningForInput(false) end)          -- UCommonTabListWidgetBase (Bool bShouldListen)
+  local okV, v = pcall(function() return tl:GetVisibility() end)
+  if okV and v ~= C.E.Vis.Hidden then
+    pcall(function() tl:SetVisibility(C.E.Vis.Hidden) end)
+  end
+end
+
+local function lockOn(menu, page, now)
+  local tl = menu.WBP_Tab_List
+  if not U.ok(tl) then return end
+  lock.on, lock.key, lock.page, lock.tl, lock.atMs, lock.checkMs = true, St.menu.key, page, tl, now, now
+  lock.disabled = {}
+  local okV, v = pcall(function() return tl:GetVisibility() end)
+  lock.vis = (okV and type(v) == "number" and v ~= C.E.Vis.Hidden) and v or C.E.Vis.SelfHitTestInvisible
+  for id in pairs(C.GAME_TABS) do
+    -- every game tab is recorded (also one already disabled: a lock of a previous Lua state, hot reload); lockOff never
+    -- re-enables the Multiplayer tab while feowner hides it
+    if pcall(function() tl:SetTabEnabled(U.fname(id), false) end) then lock.disabled[#lock.disabled + 1] = id end
+  end
+  applyLock(tl)
+  barTick(now, true)
+  U.log(TAG, "sub-page %s: main-menu tabs locked (LB / RB inert, strip hidden, %d game tab(s) disabled, B = Back) (#21)",
+    tostring(page), #lock.disabled)
+end
+
+local function lockOff(why)
+  if not lock.on then return end
+  local tl = lock.tl
+  lock.on = false
+  -- the same menu instance only (a dead menu's tab list is never called)
+  if lock.key == St.menu.key and U.ok(tl) and not isStale(St.menu.widget) then
+    pcall(function() tl:SetListeningForInput(true) end)
+    pcall(function() tl:SetVisibility(lock.vis or C.E.Vis.SelfHitTestInvisible) end)
+    local guests = #U.localPlayers() >= 2
+    for _, id in ipairs(lock.disabled) do
+      -- feowner keeps the Multiplayer tab disabled while guests exist: never re-enabled behind its back
+      if not (id == "MainMenu_Multiplayer" and guests) then
+        pcall(function() tl:SetTabEnabled(U.fname(id), true) end)
+      end
+    end
+    barTick(St.nowMs(), true)
+  else
+    lock.bar.orig, lock.bar.list = {}, {}
+  end
+  lock.disabled, lock.tl = {}, nil
+  U.log(TAG, "sub-page %s left (%s): main-menu tabs unlocked", tostring(lock.page), tostring(why))
+  lock.page = nil
+end
+
+-- A lock left by a previous Lua state (hot reload while a sub-page showed): this state's lock is off, so lockOff would
+-- never restore the strip. Once per menu instance, while nothing is locked, the tab list is put back to normal.
+local function heal(menu)
+  if lock.healedKey == St.menu.key then return end
+  lock.healedKey = St.menu.key
+  local tl = menu.WBP_Tab_List
+  if not U.ok(tl) then return end
+  local okV, v = pcall(function() return tl:GetVisibility() end)
+  if not (okV and v == C.E.Vis.Hidden) then return end    -- never locked: nothing to undo
+  pcall(function() tl:SetListeningForInput(true) end)
+  pcall(function() tl:SetVisibility(C.E.Vis.SelfHitTestInvisible) end)
+  local guests = #U.localPlayers() >= 2
+  for id in pairs(C.GAME_TABS) do
+    if not (id == "MainMenu_Multiplayer" and guests) then pcall(function() tl:SetTabEnabled(U.fname(id), true) end) end
+  end
+  U.log(TAG, "tab strip found hidden with no sub-page lock (a previous Lua state's): restored (#21)")
+end
+
+-- FAST (lobby.pollNav) and MAIN (pollTab). Cheap: five pure page reads, one UFunction every LOCK_RECHECK_MS while on.
+function menu_tab.subPageTick()
+  if cfg.SubPageLock == false then lockOff("SubPageLock off"); return end
+  local menu = St.menu.widget
+  if St.phase ~= "FRONTEND" or St.launch.pending or isStale(menu) or not tabOpen then lockOff("front end / tab"); return end
+  if not lock.on then heal(menu) end
+  local page = menu_tab.subPage()
+  if lock.on and lock.key ~= St.menu.key then lockOff("menu replaced") end
+  local now = St.nowMs()
+  if not page then lockOff("back on the posters"); return end
+  if not lock.on then lockOn(menu, page, now); return end
+  if page ~= lock.page then
+    U.dbg(TAG, "sub-page %s -> %s (lock kept)", tostring(lock.page), page)
+    lock.page = page
+  end
+  if now - lock.checkMs >= LOCK_RECHECK_MS then
+    lock.checkMs = now
+    if U.ok(lock.tl) then applyLock(lock.tl) end
+  end
+  barTick(now, false)
+end
+
+function menu_tab.locked() return lock.on == true end
+function menu_tab.lockStatus()
+  return string.format("lock %s (%s), disabled %d, bar scans %d, relabels %d, leaks %d", lock.on and "on" or "off",
+    tostring(lock.page), #lock.disabled, lock.bar.scans, lock.bar.relabels, lock.leaks)
 end
 
 function menu_tab.menu()

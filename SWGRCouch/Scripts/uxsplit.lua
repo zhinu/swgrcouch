@@ -20,8 +20,13 @@
 --       the post-hook diffs them (dispatch is synchronous when a container has room, run H) and collapses the copies in
 --       the other players' HUDs, re-asserted from the FAST tick while the copy sits in its panel.
 --    c) A container that got no copy (full) gets a pending entry: a copy that appears there later (after a removal, on a
---       timer) is matched by its text on removals and FAST ticks. A copy of the same id already on screen is shared with
---       the second poster meanwhile (dedup or queue: for the same id both read the same).
+--       timer) is matched by its text on removals and FAST ticks. #94 (decoded 2026-10-18, notes in test_uxsplit_msgs):
+--       each container has its OWN queue (Row.Priority, then oldest; a full one BUMPS a strictly lower shown message
+--       back into its queue), the game never de-duplicates (no sharing of a copy already on screen any more), and a
+--       container RE-USES its pooled message widgets at the same address: the PlayAnimationForward / PlayAnimation
+--       post-hook (the last call of the message BP's Initialise) marks such a widget, collapses it and routes it as a
+--       new copy, in the order the game showed them. A copy no waiting post claims is shown nowhere when its text is
+--       a per-player row's (never another player's), else global.
 --    d) RemoveMessage(id) / FlushMessageContainer remove EVERY player's copy: the players that still hold a plain message
 --       (C.MSG[id].repost: WrongWay, OutOfBounds, Vulnerable, the crash-feed explosions) get it re-posted at once
 --       (cfg.UxSplitRepost). Parameterised rows are never re-posted (their FText parameters cannot be rebuilt safely).
@@ -90,7 +95,8 @@ local VIS_COLLAPSED = C.E.Vis.Collapsed
 local VIS_SHOW = C.E.Vis.SelfHitTestInvisible
 local FX = C.UX or {}
 local MSGTAB = C.MSG or {}
-local PENDING_MS = 30000         -- a copy waiting in a full container is forgotten after this
+local PENDING_MS = 120000        -- a copy waiting in a full container is forgotten after this (#94: a native queue entry
+                                 --   never expires; a 0 s row - Vulnerable, WrongWay - holds its slot until removed)
 local CRASH_GRACE_MS = 2000      -- no camera-fade write this long after a tumble (the game's own reset fade)
 local CREATING_MAX_MS = 3000     -- a "HUD being created" slot older than this is ignored
 
@@ -110,7 +116,7 @@ St.uxsplit = S
 
 -- Family flags, read first by every callback. own = UxSplitDanger "own" (per-player tints and fades).
 local A = { on = false, msg = false, route = false, remap = false, colours = false, ramjet = false, fsfx = false,
-            fsfxOverride = false, own = false }
+            fsfxOverride = false, own = false, msgInit = false }
 do
     -- a previous load of this file in the same Lua state: its callbacks see their flags go off at once
     local old = _G.SWGRCouch_uxsplit_flags
@@ -287,7 +293,8 @@ local function rootOf(o)
         if e then return e, k end
         if E.foreign[k] then return "foreign", k end
         if slot and slot.rootKey == k then return slot, k end
-        local ok, nx = pcall(function() return x:GetOuter() end)
+        local ok, nx = false, nil
+        if U.ok(x) then ok, nx = pcall(U.callMethod, x, "GetOuter") end   -- null GetOuter = native AV
         if not ok or nx == nil then return nil end
         x = nx
     end
@@ -298,17 +305,22 @@ end
 -- "fbDisruptor" / "fb" (ability feedback actors), "widget", "other". Review 0.7.0: emptied by clearRace (every arm /
 -- disarm): the race's Blueprint classes unload with the map and another class can land at a cached address.
 local REMAP_CLASSES = { WBP_HUD_BotEngineInfo_C = true, WBP_HUD_BotEngineInfo_Memory_C = true }
+-- #94: the race message widgets whose Initialise ends with PlayAnimationForward(Anim_TextReveal) / PlayAnimation(Anim_In)
+-- (decoded); the timeout messages (global rows) are subclasses and stay out
+local MSG_CLASSES = { WBP_Hud_GameFeed_Message_C = true, WBP_Hud_Message_C = true }
 local KIND = {}
 local function kindOf(o)
-    local okC, cls = pcall(function() return o:GetClass() end)
+    if not U.ok(o) then return "other", "?" end   -- U.ok FIRST: GetClass on a null wrapper is a native AV (UE4SS.dll+0x2ace67 null+0x10) that pcall cannot catch
+    local okC, cls = pcall(U.callMethod, o, "GetClass")
     if not okC then return "other", "?" end
     local ck = U.key(cls)
     local k = KIND[ck]
     if k then return k[1], k[2] end
     local name = "?"
-    pcall(function() name = cls:GetFName():ToString() end)
+    if U.ok(cls) then pcall(function() name = cls:GetFName():ToString() end) end
     local kind = "other"
-    if REMAP_CLASSES[name] then kind = "remap"
+    if MSG_CLASSES[name] then kind = "msg"
+    elseif REMAP_CLASSES[name] then kind = "remap"
     elseif name == "BP_VehicleUIComponent_C" or U.isA(o, "/Script/Griffin.VehicleUIComponent") then kind = "vuic"
     elseif name == "BP_AbilityFeedback_Disruptor_C" then kind = "fbDisruptor"
     elseif U.isA(o, "/Script/Griffin.AbilityFeedback") then kind = "fb"
@@ -324,7 +336,7 @@ local function pnumOfPc(pc)
     if k == 0 then return -1, "no controller" end
     local e = E.byPc[k]
     if e then return e.pnum, nil end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.key(lp.pc) == k then return -1, fmt("local player %d without a HUD", lp.index) end
     end
     return -1, "not a local player (AI)"
@@ -423,6 +435,9 @@ local hidden = {}                     -- copy address -> {w, panelKey, orig, mod
 local seen = {}                       -- container key -> {copy address -> text} after the last diff of that container
 local pending = {}                    -- container key -> FIFO of {id, grp, at}: a post that found that container full
 local active = {}                     -- id -> {[pnum] = {h, v, at}}: plain re-postable messages a player still holds
+local reinit = {}                     -- #94: message widget address -> {w, at, frame, old}: Initialise just ran on it
+local pre = {}                        -- #94: address -> {w, orig, mode}: collapsed at its Initialise, until routed
+local reinitSeq = 0
 local unknownLogged = {}
 
 local function msgCont(id)
@@ -440,10 +455,10 @@ end
 local function childrenOf(panel)
     local out = {}
     if not U.ok(panel) then return out end                   -- review 0.7.0: a panel of a HUD that went away
-    local okN, n = pcall(function() return panel:GetChildrenCount() end)
+    local okN, n = pcall(U.callMethod, panel, "GetChildrenCount")
     if not okN or type(n) ~= "number" then return out end
     for i = 0, floor(n) - 1 do
-        local okC, w = pcall(function() return panel:GetChildAt(i) end)
+        local okC, w = pcall(U.callMethod, panel, "GetChildAt", i)
         if okC and U.ok(w) then out[#out + 1] = w end
     end
     return out
@@ -451,7 +466,7 @@ end
 
 local function inPanel(w, panelKey)
     if panelKey == nil or panelKey == 0 then return false end
-    local ok, par = pcall(function() return w:GetParent() end)
+    local ok, par = pcall(U.callMethod, w, "GetParent")
     return ok and U.key(par) == panelKey
 end
 
@@ -510,11 +525,11 @@ local function hideCopy(k, t)
     local mode = (cfg.UxSplitMsgHide == "opacity") and "opacity" or "collapse"
     local orig
     if mode == "collapse" then
-        local ok, v = pcall(function() return w:GetVisibility() end)
+        local ok, v = pcall(U.callMethod, w, "GetVisibility")
         orig = ok and v or nil
         pcall(function() w:SetVisibility(VIS_COLLAPSED) end)
     else
-        local ok, v = pcall(function() return w:GetRenderOpacity() end)
+        local ok, v = pcall(U.callMethod, w, "GetRenderOpacity")
         orig = ok and v or 1.0
         pcall(function() w:SetRenderOpacity(0.0) end)
     end
@@ -563,6 +578,11 @@ end
 
 local function tagCopy(w, k, text, e, c, grp, res)
     if tags[k] then dropTag(k) end
+    local pr = pre[k]
+    if pr then                                   -- #94: collapsed at its Initialise; applyTag below decides (same call)
+        pre[k] = nil
+        if U.ok(pr.w) then pcall(function() pr.w:SetVisibility(pr.orig) end) end
+    end
     tags[k] = { grp = grp, w = w, c = c, pnum = e.pnum, text = text, at = St.nowMs() }
     S.n.copies = S.n.copies + 1
     local shown = applyTag(k)
@@ -614,24 +634,40 @@ onEntriesChanged = function()
 end
 
 ---------------------------------------------------------------------------------------------------- messages: waiting copies
-local function pushPending(c, grp)
+local function prioOf(id)
+    local m = MSGTAB[id]
+    return (m and tonumber(m.prio)) or 0
+end
+
+-- at: the post's own time (a bumped copy goes back with it: older than every later post of its priority)
+local function pushPending(c, grp, at)
     local q = pending[c.key]
     if not q then q = {}; pending[c.key] = q end
-    q[#q + 1] = { id = grp.id, grp = grp, at = St.nowMs() }
+    q[#q + 1] = { id = grp.id, grp = grp, at = at or St.nowMs(), prio = prioOf(grp.id) }
     S.n.queued = S.n.queued + 1
 end
 
--- The oldest waiting post of that container whose body fits the text (else the oldest one without a known body, but
--- review 0.7.0: only for a text no other row's body fits, so a PerfectLanding or countdown copy never goes to a
--- "{Status}" post).
+-- #94 (decoded, queue processor 0x143066206): a container shows its queued messages by Row.Priority, then the oldest.
+local function goesFirst(a, b)
+    if a.prio ~= b.prio then return a.prio > b.prio end
+    return a.at < b.at
+end
+
+-- The waiting post of that container the game shows next whose body fits the text (else the next one without a
+-- known body, but review 0.7.0: only for a text no other row's body fits, so a PerfectLanding or countdown copy never
+-- goes to a "{Status}" post).
 local function pickPending(q, text)
     if not q then return nil end
-    local fallback
+    local best, fallback
     for i, p in ipairs(q) do
         local m = textMatches(p.id, text)
-        if m == true then return table.remove(q, i) end
-        if m == nil and fallback == nil then fallback = i end
+        if m == true then
+            if best == nil or goesFirst(p, q[best]) then best = i end
+        elseif m == nil and (fallback == nil or goesFirst(p, q[fallback])) then
+            fallback = i
+        end
     end
+    if best then return table.remove(q, best) end
     if fallback and otherRowFor(text, q[fallback].id) == nil then return table.remove(q, fallback) end
     return nil
 end
@@ -660,10 +696,88 @@ end
 -- Only a waiting post whose row body fits the text (a widget re-used in place, or re-initialised by the container).
 local function pickPendingStrict(q, text)
     if not q then return nil end
+    local best
     for i, p in ipairs(q) do
-        if textMatches(p.id, text) == true then return table.remove(q, i) end
+        if textMatches(p.id, text) == true and (best == nil or goesFirst(p, q[best])) then best = i end
     end
+    if best then return table.remove(q, best) end
     return nil
+end
+
+-- #94: a copy no waiting post claims. A text that fits a per-player row (a copy of a post we lost track of: never
+-- another player's on this half) is shown nowhere; any other text (the native race-ending countdown) stays global.
+local function orphanGroup(t)
+    local id = otherRowFor(t, nil)
+    local m = id and MSGTAB[id]
+    if m and not m.global then
+        local g = newGroup(id, -1, "unclaimed copy of a per-player row")
+        g.orphan = true
+        return g, id
+    end
+    return newGroup("?", nil, "unattributed"), nil
+end
+
+-- #94 (decoded 2026-10-18: a container re-uses its POOLED message widgets at the same address; Initialise sets the
+-- text, then plays Anim_TextReveal / Anim_In, then the widget is re-added to NotificationSubPanel): every widget whose
+-- Initialise ran outside one of our AddMessage calls (an expiry or a removal refilled its container) is routed here
+-- as a NEW copy of the container it sits in now: the next post the game shows there (priority, then oldest). Until
+-- then it stays collapsed (msgInitInner), so another player's message never shows for a frame. A widget that turns
+-- up in none of our containers within 1 s gets its look back.
+local function routeReinit(why)
+    if next(reinit) == nil then return end
+    local now = St.nowMs()
+    -- in the order the game showed them (identical texts: the order is the only identity left)
+    local order = {}
+    for k, r in pairs(reinit) do if r.frame == nil then order[#order + 1] = k end end
+    table.sort(order, function(a, b) return reinit[a].seq < reinit[b].seq end)
+    for _, k in ipairs(order) do
+        local r = reinit[k]
+        do
+            local w = r.w
+            if not U.ok(w) then
+                reinit[k], pre[k] = nil, nil
+            else
+                local hitE, hitC
+                for _, e in ipairs(E.list) do
+                    for _, c in ipairs(e.conts or {}) do
+                        if hitC == nil and HUDCONT[c.lname] and inPanel(w, c.panelKey) then hitE, hitC = e, c end
+                    end
+                end
+                if hitC then
+                    reinit[k] = nil
+                    local c, e = hitC, hitE
+                    local t = msgText(w)
+                    local p = (not isGlobalText(t)) and pickPending(pending[c.key], t) or nil
+                    local grp, oid
+                    if p then
+                        grp = p.grp
+                        S.n.promoted = S.n.promoted + 1
+                    else
+                        grp, oid = orphanGroup(t)
+                        if oid then S.n.orphans = (S.n.orphans or 0) + 1 else S.n.unknown = S.n.unknown + 1 end
+                    end
+                    tagCopy(w, k, t, e, c, grp, nil)
+                    if p then
+                        U.logEvery("ux.promo." .. p.id, 2000, TAG, "msg %s (%s) shown after it waited (%s, widget re-used): %s "
+                            .. "in P%s's %s (V-UX-03)", p.id, pdesc(firstPlayer(p.grp)), why, hidden[k] and "hidden" or "shown",
+                            tostring(e.pnum), tostring(c.name))
+                    else
+                        U.logEvery("ux.orphan." .. tostring(oid), 5000, TAG, "a %s copy in P%s's %s that no waiting post "
+                            .. "claims ('%s', %s): %s (#94)", tostring(oid or "?"), tostring(e.pnum), tostring(c.name), t,
+                            why, oid and "shown nowhere (never another player's)" or "global, kept in every HUD")
+                    end
+                    if seen[c.key] == nil then seen[c.key] = kidsOf(c) end
+                    seen[c.key][k] = t
+                    if pending[c.key] ~= nil and #pending[c.key] == 0 then pending[c.key] = nil end
+                elseif now - r.at > 1000 then
+                    reinit[k] = nil
+                    local pr = pre[k]
+                    pre[k] = nil
+                    if pr and U.ok(pr.w) then pcall(function() pr.w:SetVisibility(pr.orig) end) end
+                end
+            end
+        end
+    end
 end
 
 -- Diffs containers against `seen`. A new child is a copy that waited (matched to a pending post of THAT container) or
@@ -674,6 +788,7 @@ end
 -- VERIFY(V-UX-06): the race-ending countdown (native post, no hook call) is found here and kept in every HUD.
 local function scan(why, onlyPending)
     expirePending(St.nowMs())
+    routeReinit(why)
     for _, e in ipairs(E.list) do
         for _, c in ipairs(e.conts or {}) do
             if HUDCONT[c.lname] and (not onlyPending or pending[c.key] ~= nil) then
@@ -683,7 +798,7 @@ local function scan(why, onlyPending)
                     local k = U.key(w)
                     local t = msgText(w)
                     cur[k] = t
-                    if was[k] ~= t then
+                    if was[k] ~= t and reinit[k] == nil then
                         local old = tags[k]
                         local p
                         -- review 0.7.0: a copy reading like a global row (the race-ending countdown, which rewrites its
@@ -704,10 +819,11 @@ local function scan(why, onlyPending)
                         elseif old and old.grp.global then
                             old.text = t                     -- a global copy, still global
                         else
-                            tagCopy(w, k, t, e, c, newGroup("?", nil, "unattributed"), nil)
-                            S.n.unknown = S.n.unknown + 1
+                            local og, oid = orphanGroup(t)
+                            tagCopy(w, k, t, e, c, og, nil)
+                            if oid then S.n.orphans = (S.n.orphans or 0) + 1 else S.n.unknown = S.n.unknown + 1 end
                             local cls = "?"
-                            pcall(function() cls = w:GetClass():GetFName():ToString() end)
+                            if U.ok(w) then pcall(function() cls = w:GetClass():GetFName():ToString() end) end
                             local key = cls .. "|" .. c.lname
                             if not unknownLogged[key] then
                                 unknownLogged[key] = true
@@ -755,13 +871,13 @@ local function maintainHidden(now)
                 dropTag(k)
             else
                 if h.mode == "collapse" then
-                    local okV, v = pcall(function() return w:GetVisibility() end)
+                    local okV, v = pcall(U.callMethod, w, "GetVisibility")
                     if okV and v ~= VIS_COLLAPSED then
                         pcall(function() w:SetVisibility(VIS_COLLAPSED) end)
                         S.n.reasserts = S.n.reasserts + 1
                     end
                 else
-                    local okO, o = pcall(function() return w:GetRenderOpacity() end)
+                    local okO, o = pcall(U.callMethod, w, "GetRenderOpacity")
                     if okO and type(o) == "number" and o > 0.01 then
                         pcall(function() w:SetRenderOpacity(0.0) end)
                         S.n.reasserts = S.n.reasserts + 1
@@ -793,7 +909,20 @@ local function routeAdd(fr)
             local k = U.key(w)
             local t = msgText(w)
             cur[k] = t
-            if before[k] == nil then
+            local r = reinit[k]
+            local fresh = r ~= nil and r.frame == fr                  -- #94: Initialise ran on it inside this post
+            if fresh then
+                reinit[k] = nil
+                -- a pooled widget re-used at once: its previous message sat in this container right before the post =
+                -- BUMPED by a higher priority (decoded: back into THIS container's queue, removed, the new one shown)
+                local o = r.old
+                if before[k] ~= nil and o and o.grp and not o.grp.global and not o.grp.orphan and o.c
+                    and o.c.key == c.key then
+                    pushPending(c, o.grp, o.grp.at)
+                    S.n.bumped = (S.n.bumped or 0) + 1
+                end
+            end
+            if before[k] == nil or fresh then
                 tagCopy(w, k, t, e, c, grp, res)
                 got = true
             elseif before[k] ~= t then
@@ -806,6 +935,15 @@ local function routeAdd(fr)
                 got = true
             elseif tags[x.k] then
                 tags[x.k].text = x.t
+            end
+        end
+        -- #94: a copy that left this container during the post (bumped, its widget not re-used): back in its queue
+        for k in pairs(before) do
+            local t = tags[k]
+            if cur[k] == nil and t and t.c and t.c.key == c.key and not t.grp.global and not t.grp.orphan then
+                pushPending(c, t.grp, t.grp.at)
+                S.n.bumped = (S.n.bumped or 0) + 1
+                dropTag(k)
             end
         end
         seen[c.key] = cur
@@ -835,24 +973,10 @@ local function afterAdd(fr)
     if #full > 0 and fr.lname ~= nil then
         for _, c in ipairs(full) do pushPending(c, grp) end
         extra = fmt("; %d full container(s): it waits there", #full)
-        -- the same id already on screen (dedup or full container): shared with this poster meanwhile. Review 0.7.0:
-        -- only a row without parameters ("{Player} Taken down", "{Status}", "{Affix} damaged" ... would show the OTHER
-        -- player's text); those wait in the pending queue only.
-        local plain = m ~= nil and type(m.text) == "string" and m.text ~= "" and not m.text:find("{", 1, true)
-        if A.route and plain and type(fr.pnum) == "number" and fr.pnum >= 1 then
-            local n = 0
-            for _, t in pairs(tags) do
-                if t.grp ~= grp and t.grp.id == fr.id and not t.grp.global and not t.grp.players[fr.pnum] then
-                    t.grp.players[fr.pnum] = true
-                    n = n + 1
-                end
-            end
-            if n > 0 then
-                for k, t in pairs(tags) do if t.grp.id == fr.id then applyTag(k) end end
-                S.n.shared = S.n.shared + 1
-                extra = extra .. fmt("; the %s copy already on screen is shared with %s", fr.id, pdesc(fr.pnum))
-            end
-        end
+        -- #94 (decoded 2026-10-18): the game never de-duplicates (every post is its own instance in every container,
+        -- shown when a slot of THAT container frees), so the copy of the same id already on screen is another
+        -- player's event: it is no longer shared with this poster (that showed P1's PERFECT LANDING on P2's half);
+        -- his own copy comes from the queue
     end
     local line = fmt("%s by %s = %s -> %s: %d new copy(ies) (%s)%s", fr.id, tostring(fr.via), pdesc(fr.pnum),
         (MSGTAB[fr.id] and MSGTAB[fr.id].c) or "every HUD container", res.n, resText(res), extra)
@@ -904,6 +1028,7 @@ end
 local function afterRemove(fr, what)
     if what == "FlushMessageContainer" then S.n.flushes = S.n.flushes + 1 else S.n.removes = S.n.removes + 1 end
     sweepGone()
+    routeReinit(what)                 -- #94: a removal refills its containers inside the call
     if next(pending) ~= nil then scan(what, true) end
     if #fr.survivors == 0 then return end
     if not A.route or cfg.UxSplitRepost == false then
@@ -1052,6 +1177,8 @@ local function onFlushPre(ctx, contP)
         for id in pairs(active) do if msgCont(id) == lname then ids[#ids + 1] = id end end
         fr.kind, fr.cont, fr.pnum, fr.via = "flush", cn, p, via
         fr.survivors = survivorsOf(ids, p)
+        -- #94 (decoded, listener case 3): a flush empties the container's own queue too
+        eachCont(lname, function(_, c) pending[c.key] = nil end)
     end)
     if not ok then cbFail("FlushMessageContainer pre", err) end
     return nil
@@ -1082,9 +1209,50 @@ local function onHandlePost()
     local ok, err = pcall(function()
         S.n.removes = S.n.removes + 1
         sweepGone()
+        routeReinit("RemoveMessageByHandle")
         if next(pending) ~= nil then scan("RemoveMessageByHandle", true) end
     end)
     if not ok then cbFail("RemoveMessageByHandle post", err) end
+    return nil
+end
+
+-- #94: UserWidget:PlayAnimationForward / PlayAnimation post (ctx, ReturnValue, InAnimation, ...) on a race message
+-- widget = its Initialise just ran (decoded: the BP's last call). The game re-uses pooled widgets at the same address,
+-- often with the same text ("Autopilot Taken down"), which the address + text diff never saw: the copy kept the
+-- previous message's player (P1's takedown on P2's half, P2's own hidden). The widget forgets its old tag and is
+-- collapsed until it is routed (inside our AddMessage call: routeAdd; else routeReinit).
+local function msgInitInner(ctx)
+    local w = ctx:get()
+    if w == nil or not U.ok(w) then return end
+    if kindOf(w) ~= "msg" then return end
+    local k = U.key(w)
+    if k == 0 then return end
+    local fr = frames[#frames]
+    local h = hidden[k]
+    if h then
+        hidden[k] = nil
+        showAgain(h)                                   -- its own look back first (an opacity hide included)
+    end
+    local old = tags[k]
+    tags[k] = nil
+    reinitSeq = reinitSeq + 1
+    reinit[k] = { w = w, at = St.nowMs(), seq = reinitSeq, frame = (fr and fr.kind == "add") and fr or nil, old = old }
+    S.n.reinits = (S.n.reinits or 0) + 1
+    if A.route then
+        local orig = pre[k] and pre[k].orig or nil
+        if orig == nil then
+            local okV, v = pcall(U.callMethod, w, "GetVisibility")
+            orig = (okV and type(v) == "number" and v ~= VIS_COLLAPSED) and v or VIS_SHOW
+        end
+        pre[k] = { w = w, orig = orig, mode = "collapse" }
+        pcall(function() w:SetVisibility(VIS_COLLAPSED) end)
+    end
+end
+
+local function onAnimFwdPost(ctx)
+    if not A.msg then return nil end
+    local ok, err = pcall(msgInitInner, ctx)
+    if not ok then cbFail("PlayAnimationForward", err) end
     return nil
 end
 
@@ -1119,6 +1287,9 @@ function M.testPost(p, id)
     forced = prev
     return ok and S.lastRoute or ("error: " .. tostring(err))
 end
+
+-- tools/test_uxsplit_msgs.lua: the player our own post (testPost / re-post) is made for, while it runs
+function M._forcedPnum() return forced and forced.pnum or nil end
 
 function M.testRemove(p, id)
     if not A.msg then return "messages not armed (" .. tostring(S.why) .. ")" end
@@ -1277,6 +1448,10 @@ local function rjPostInner(ctx, anim)
 end
 
 local function onAnimPost(ctx, ret, anim)
+    if A.msg then                                      -- #94: a WBP_Hud_Message's Initialise ends with PlayAnimation
+        local okM, errM = pcall(msgInitInner, ctx)
+        if not okM then cbFail("PlayAnimation (message)", errM) end
+    end
     if not A.ramjet or E.rjCount == 0 then return nil end
     local ok, err = pcall(rjPostInner, ctx, anim)
     if not ok then cbFail("PlayAnimation", err) end
@@ -1290,7 +1465,7 @@ end
 -- FadeProgress -1, read live 20:00 while a car sat in ramjet mode) only while some local car is FIRING its ramjet
 -- (RamjetState 3-7: on, overheating, exploding); R3 alone (ramjet mode, charging) keeps every HUD orange.
 local function anyRamjetFiring()
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         local ok, st = pcall(function()
             local car = e.pc.Pawn
             if not (U.ok(car) and U.isVehicle(car)) then return 0 end
@@ -1363,8 +1538,8 @@ end
 -- here with the same names and offsets when neither module did yet. {enabled, amount} or nil.
 local function fadeState(pcm)
     if fadeReg.bad or not U.ok(pcm) then return nil end
-    local okA, a = pcall(function() return pcm[FADE_AMT] end)
-    local okF, f = pcall(function() return pcm[FADE_FLAGS] end)
+    local okA, a = pcall(U.getField, pcm, FADE_AMT)
+    local okF, f = pcall(U.getField, pcm, FADE_FLAGS)
     if (not okA or type(a) ~= "number") and not fadeReg.tried and cfg.WreckFadeRead ~= false
         and type(RegisterCustomProperty) == "function" and type(PropertyTypes) == "table" then
         fadeReg.tried = true
@@ -1373,8 +1548,8 @@ local function fadeState(pcm)
             OffsetInternal = { Property = "DefaultAspectRatio", RelativeOffset = 0x14 } })
         pcall(RegisterCustomProperty, { Name = FADE_FLAGS, Type = PropertyTypes.ByteProperty, BelongsToClass = cls,
             OffsetInternal = { Property = "bDefaultConstrainAspectRatio", RelativeOffset = 0 } })
-        okA, a = pcall(function() return pcm[FADE_AMT] end)
-        okF, f = pcall(function() return pcm[FADE_FLAGS] end)
+        okA, a = pcall(U.getField, pcm, FADE_AMT)
+        okF, f = pcall(U.getField, pcm, FADE_FLAGS)
     end
     if not okA or not okF or type(a) ~= "number" or type(f) ~= "number" then return nil end
     if a ~= a or a < -0.01 or a > 1.01 then
@@ -1524,6 +1699,7 @@ local LEFT = nil
 local function keepLeftovers()
     local L = { gen = St.worldGen, copies = {}, tints = {}, fades = {} }
     for _, h in pairs(hidden) do L.copies[#L.copies + 1] = h end
+    for _, h in pairs(pre) do L.copies[#L.copies + 1] = h end
     for _, e in ipairs(E.list) do
         if T[e.wKey] ~= nil and T[e.wKey] ~= "none" then L.tints[#L.tints + 1] = e.widget end
         local f = F[e.pcKey]
@@ -1566,7 +1742,10 @@ end
 local function wantArmed()
     local ph = St.phase
     if ph ~= "PRERACE" and ph ~= "RACING" then return false, "phase " .. tostring(ph) end
-    if St.race.singleView == true then return false, "single-view race" end
+    -- #29: a couch sit-out (couchrules) is a one-view race with P1's clone HUD, like dormant PCs: routing stays on
+    if St.race.singleView == true and St.race.sitOut ~= true then return false, "single-view race" end
+    -- (couch-livefix r2) local PlayerControllers, not views: with dormant PCs P1's HUD is his clone (the game's own
+    -- belongs to the last, dormant, PC) and still needs the message routing - also on a one-view race
     local n = #U.localPlayers()
     if n < 2 then return false, fmt("%d local player", n) end
     return true, fmt("%d local players", n)
@@ -1575,6 +1754,7 @@ end
 -- Per-race tables (the counters stay readable after the race; they are reset when arming again).
 local function clearRace()
     frames, tags, hidden, seen, pending, active, unknownLogged = {}, {}, {}, {}, {}, {}, {}
+    reinit, pre = {}, {}
     last, forced, creating, perHud = nil, nil, nil, {}
     KIND = {}                         -- review 0.7.0: class addresses repeat once a race's Blueprint classes unload
     E.list, E.byRoot, E.byPc, E.foreign, E.sig, E.dirty, E.rj, E.rjCount = {}, {}, {}, {}, "", true, {}, 0
@@ -1620,7 +1800,17 @@ function M.ensureArmed(why)
             ok = hook(C.FN.MsgRemoveByHandle, onHandlePre, onHandlePost) and ok
             ok = hook(C.FN.MsgFlush, onFlushPre, onFlushPost) and ok
             A.msg, A.route = ok, ok and mm == "route"
-            if A.msg then onEntriesChanged() end
+            if A.msg then
+                onEntriesChanged()
+                -- #94: a message widget's Initialise (re-used pooled widgets); optional (the diff stays the fallback)
+                local okF = hook(C.FN.PlayAnimationForward, noop, onAnimFwdPost)
+                local okA = hook(C.FN.PlayAnimation, noop, onAnimPost)
+                A.msgInit = okF and okA
+                if not A.msgInit then
+                    U.warn(TAG, "messages: the Initialise hooks are off (PlayAnimationForward %s, PlayAnimation %s): a "
+                        .. "re-used message widget keeps its previous player (#94)", tostring(okF), tostring(okA))
+                end
+            end
         else
             U.warn(TAG, "messages: GfnMessagingSubsystem %s: no routing this race",
                 MS_CLASS_KEY == 0 and "class not found" or "subsystem not found")
@@ -1640,7 +1830,7 @@ function M.ensureArmed(why)
             end
         end
         if cfg.UxSplitRamjetColour ~= false then
-            A.ramjet = hook(C.FN.PlayAnimation, noop, onAnimPost)
+            A.ramjet = hook(C.FN.PlayAnimation, noop, onAnimPost)          -- (shared with the messages' #94 hook)
             if A.ramjet then pinRamjet(St.nowMs(), true) end
         end
         if cfg.UxSplitFullScreenFx ~= false then A.fsfx = hook(C.FN.FullScreenFx, noop, onFsfxPost) end
@@ -1660,9 +1850,11 @@ function M.disarm(why, quiet)
     local hadRamjet = A.ramjet
     A.on, A.msg, A.route, A.remap, A.colours, A.ramjet, A.fsfx, A.fsfxOverride, A.own =
         false, false, false, false, false, false, false, false, false
+    A.msgInit = false
     local n = unhookAll(why)
     if not quiet then
         for k in pairs(hidden) do unhideCopy(k) end
+        for _, pr in pairs(pre) do if U.ok(pr.w) then pcall(function() pr.w:SetVisibility(pr.orig) end) end end
         restoreLooks()
         if hadRamjet then pinRamjet(St.nowMs(), true) end
     else
@@ -1771,7 +1963,10 @@ function M.fastTick()
     pausedV = pausedThisTick()
     local photo = photoOn()
     A.fsfxOverride = A.fsfx and not pausedV and not photo
-    if A.msg then maintainHidden(now) end
+    if A.msg then
+        routeReinit("timer")          -- #94: an expiry refilled a container since the last tick (collapsed till now)
+        maintainHidden(now)
+    end
     fastN = fastN + 1
     if fastN % 3 ~= 0 then return end
     -- ~100 ms: copies that waited in a full container (a scan reads every child's text: not every 33 ms)

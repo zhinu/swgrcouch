@@ -15,10 +15,21 @@ cfg.SkipRaceIntro       = false     -- true: Race.SpeedyFlow.Intro/.Movies = 1 (
                                     --   the game's own dev shortcut, set once per boot by testcmd.lua)
 cfg.ViewGuard           = true      -- viewguard.lua: a still-racing local player whose view is another player's DNF
                                     --   "failed" cinematic (BP_PlayerFailedCam_C) is put back on its own car (run G)
+cfg.GuestFinishCinematic = "end"    -- couch-finish (live 2026-10-17 #9/#15/#16): a guest who finishes while another
+                                    --   local human still races gets his finish cinematic chain ENDED at once (the
+                                    --   game cuts the FIRST local player's camera to it: BP_PlayerFinishedCam_C on
+                                    --   P1's view, P1 drove blind and crashed / went out of bounds). "keep" = native
+cfg.ViewGuardForeignMs  = 30000     -- couch-finish: for this long after another local human finished / wrecked, a
+                                    --   still-racing player's view on any camera actor that is not his car or his own
+                                    --   crash camera goes back to his car at once (0 = off)
 cfg.MenuBridge          = true      -- menubridge.lua (0.7.1): a guest-owned menu (pause, player menu, settings...) takes
                                     --   its owner's A/B, and a shared post-race screen anyone's A, by clicking the
                                     --   selected button when the game did not react (run I: P2's A was dropped)
-cfg.MenuBridgeWaitMs    = 150       -- the game's own reaction window before the bridge clicks   VERIFY(V-MB-01)
+cfg.MenuBridgeP1Pause   = true      -- couch-finish (#16): P1's own race pause in a couch race takes his A / B through
+                                    --   the bridge when the game did not react (live: dead after a guest's finish)
+cfg.MenuBridgeWaitMs    = 150      -- the game's own reaction window before the bridge clicks   VERIFY(V-MB-01)
+cfg.CouchMapPauseBridge = true      -- couch-livefix r3: P1's START on the paddock run map (owned by a guest / dormant PC,
+                                    --   whose router gets no START) opens the game's paddock pause (OnPauseAction)
 -- 0.8.0 (pause phase 2, menubridge.lua): screens opened FROM a pause belong to the pause controller; each key turns its
 -- part off alone (pause.lua side: PauseSubScreen* / PauseDialogGuestUi in the Pause section).
 cfg.MenuBridgeGuestNative = "skip"  -- "skip": a guest's presses on its OWN screen are not bridged while pause.lua boosts
@@ -31,6 +42,17 @@ cfg.BackPromptHide        = true    -- 0.13.0: that QUIT GAME prompt is made inv
 cfg.BackPromptAsBack      = true    -- 0.12.0: P1's pad B on OPTIONS / RACE SETUP (which before the first race only reaches the
                                     --   game: its "QUIT GAME?" prompt, ACCEPT focused) answers that prompt No and goes
                                     --   back instead (backprompt.lua) | false = the game's prompt stays     VERIFY(V-BP-01)
+cfg.SubPageLock           = true    -- #21 (playtest 2026-10-17): a FREE MODE sub-page (RACE SETUP, GRAND PRIX, GALAXY RUN,
+                                    --   COUCH CAMPAIGN, OPTIONS) owns the screen: the main-menu tab strip is hidden and
+                                    --   LB / RB do nothing there; the footer's "Exit Game" reads SubPageBackLabel
+                                    --   (menu_tab.lua) | false = LB / RB switch the game's tabs everywhere (0.16)
+cfg.SubPageBackLabel      = "Back"  -- #21: the footer's B label on a sub-page (B goes back there: backprompt.lua)
+cfg.UiPreload             = true    -- #23: the GRAND PRIX page's art (race thumbnails, preview / podium art) is loaded in
+                                    --   the background, one texture per UiPreloadEveryMs, and held by hidden images for
+                                    --   the page's life (no LoadAsset when a view opens or a track steps) | false = on use
+cfg.UiPreloadEveryMs      = 150     -- #23: one background texture load per this many ms (each is one LoadAsset)
+cfg.BackPromptKeepArmed   = true    -- #23: backprompt's two native hooks stay registered for the whole front-end visit once
+                                    --   a sub-page armed them (no RegisterHook per sub-page open) | false = per visit
 cfg.MenuBridgeGuestPauseMenu = true -- 0.11.0: a guest's A / B on its OWN pause menu, and its B on the screens opened from
                                     --   it (Settings, Logbook), are bridged even while its UI input counts as native
                                     --   (hotfix build: the guest's A / B never acted natively; each of those presses closes
@@ -54,6 +76,15 @@ cfg.FrontEndMenuOwner     = "p1"       -- "p1": pre-create the main menu for P1;
 cfg.FrontEndMenuPrecreate = true       -- c1: on BP_Csm_FrontEnd_PickPrimaryMode (arrival after a race)   V-FEO-01/02
 cfg.FrontEndSubScreens    = true       -- c3: Settings (+ pages), Credits, Stickerbook, inspect screens and their returns
                                        --   are pre-created for P1 too                              V-FEO-11/13
+                                       --   0.13.3: also the ARCADE / SCENARIOS inspect screens and the LOGBOOK
+                                       --   (ChangeToState)                                          V-FEO-14
+cfg.FrontEndStageMenu     = true       -- 0.13.3 c4: while the LOGBOOK shows, a hidden P1 main menu waits in the Menu
+                                       --   layer for its native Back (else the return gives the menu to the guest) V-FEO-15
+cfg.FrontEndRepairPages   = true       -- 0.13.3 c5: a Settings page (View Credits, EULA, ...) owned by a guest is left and
+                                       --   re-entered for P1 (one short flash of Settings)                  V-FEO-16
+cfg.FrontEndOwnerBracket  = true       -- 0.13.3 c6: the return from Settings empties the Menu layer and builds a new main
+                                       --   menu in the same ChangeStateTo: the guests' LocalPlayer is hidden from the owner
+                                       --   helper for that one call (else the menu goes to the guest)     V-FEO-17
 cfg.FrontEndHideMultiplayer = true     -- g: hide + disable the Multiplayer tab while split-screen guests exist  V-FEO-07
 cfg.FrontEndMenuZ         = 500        -- Menu layer z of the pre-created menu
 cfg.MenuBridgeRawA        = false     -- 0.10.0: on a shared results screen a non-owner's A is also read from its raw
@@ -62,10 +93,50 @@ cfg.MenuBridgeP1Catcher   = true      -- 0.10.1: on a shared screen another play
                                     -- plain Button added to that screen and focused for P1 (Slate still routes P1's A to
                                     -- its focus; live probe 2026-10-10)                              VERIFY(V-MB-09)
 cfg.TestCommands        = false     -- testcmd.lua: run <ModDir>/test.cmd blocks (unattended live tests); off for players
-cfg.TestBots            = false     -- 0.13.0 with TestCommands: every local car is driven by the game's AI from 2.5 s after RACING
+cfg.CouchGarageNative     = true      -- a guest's GARAGE = a turn in the game's own full-screen garage (3D car, Choose Model /
+                                     --   Edit Vehicle / Edit Livery driven by HIS pad; his model, livery and kit parts saved to
+                                     --   his seat and class; P1's garage backed up and restored exactly around it;
+                                     --   garagenative.lua). false = the compact panel (also the fallback when a turn fails)
+cfg.CouchGarageExclusive  = true      -- during that turn P1's pad does nothing: the guest's PC is parked (P1's pad reaches no
+                                     --   player) and P1's Slate focus sits on an invisible sink. false = the first version
+                                     --   (P1's pad on the guest's PC)
+cfg.CouchGarageNoPurchase = true      -- during that turn the options P1's profile does not own are shown LOCKED: the guest's
+                                     --   A / hold cannot buy them with P1's profile ("LOCKED - P1'S PROFILE"); owned ones equip
+cfg.CouchGarageHideRoot  = true      -- couch-livefix r3: after that turn the game's garage root (deactivated, still drawn over
+                                     --   the paddock) is collapsed; its visibility comes back when the game activates it again
+cfg.CouchRaceExitUnlock  = true      -- couch-livefix r2: the race pause's EXIT TO MAIN MENU, locked by the game in a campaign
+                                     --   race outside the results, is unlocked while 2+ local players exist (the game's
+                                     --   QuitToMenu confirm; CONTINUE resumes the run at its last save). false = the lock.
+                                     --   couch-fix61 (AUTO-148): never in a field test (its confirm is dead there, as solo)
+cfg.CouchRecapWaitUnlocks = true     -- couch-fix61 (AUTO-149): P1's A on the act-end recap waits until the game bound its
+                                     --   own CONTINUE (after the NEW UNLOCK screens; 30 s at most). false = continue at once
+                                     --   couch-fix62 (AUTO-151): readiness read from the recap's sections (8 s quiet
+                                     --   fallback when unreadable)
+cfg.CouchGarageUndoForeign = true     -- during that turn a tab change / screen back / garage close that comes without the
+                                     --   guest's press (P1's pad through CommonUI) is put back
+cfg.DebugAiKey          = false     -- DEBUG (off in releases; test copies: true): in races a local player's L3 (left stick click) toggles
+                                     --   the game's AI on his own car ("P1: AI DRIVING" / "P1: YOU DRIVE"); debugai.lua
+cfg.TestBots            = false     -- with TestCommands (test harness only): true / "all" = every local car driven by the game's
+                                     --   AI as soon as RACING, re-applied after a respawn; "guests" = P2..P4 only (P1 = the human); "p1" = P1 only (the human plays P2); false / "off" = none
+cfg.TestBotsCrit        = "resolve" -- couch-fix50/55 (AUTO-129, test harness only): what a TestBots car does in a CRITICAL
+                                     --   MALFUNCTION. "resolve" = Server_ResolveCriticalMalfunction 4 s in (no fault is ever
+                                     --   queued). The others drive the game's own check with a B press injected through
+                                     --   Enhanced Input every frame (testcmd.lua, couch-fix55 decode): "timeout" = hold,
+                                     --   release, no press -> TimedOut (ApplyFaulyOnTimeout: a fault); "pass" = one press in
+                                     --   the success window (ApplyFaulyOnSuccess: a fault); "fail" = an early press (no
+                                     --   fault: a control); "crash" = the component's crash handler (Vehicle.Crash.Tumble)
+                                     --   in the check (ApplyFaulyOnCrashOut); "crashpre" = no press, the crash handler
+                                     --   TestBotsCritCrashMs in (ApplyFaulyOnPreTestCrash). Not "resolve": still in the
+                                     --   malfunction after TestBotsCritGiveUpMs -> the resolve (a bot never sits out the race)
+cfg.TestBotsCritGiveUpMs = 30000
+cfg.TestBotsCritCrashMs  = 1500      -- "crashpre": the crash call this long into the malfunction
 cfg.AllowHotReload      = false     -- 0.10.0: Ctrl+F11 / "couch reload" (RestartCurrentMod). Off: UE4SS's lua_close of a
                                     -- state other threads still use can crash the game (RE-UE4SS #1445); restart instead
 cfg.TestCommandPollMs   = 300
+cfg.Gauntlet            = false     -- with TestCommands (test harness only): couch-gauntlet starts at boot (or resumes
+                                    --   <ModDir>/gauntlet.txt): every node pick of the couch run takes the next race type
+                                    --   (gauntlet.lua, docs/dev/gauntlet.md)
+cfg.GauntletToast       = true      -- #82: "GAUNTLET: next = <step>" toast to P1 when the run map shows the armed nodes
 cfg.FastPollMs          = 33        -- FAST loop (join edge poll, click poll, pause poll)   VERIFY(V-CORE-02)
 cfg.MainPollMs          = 250       -- MAIN loop (phase, lobby, roster, takeover, hud, nametags, net)
 cfg.SlowPollMs          = 1000      -- SLOW loop (pending hooks, menu ensure, net slow tick, diag)
@@ -73,6 +144,23 @@ cfg.UseKslIsValid       = true      -- U.alive also asks KismetSystemLibrary:IsV
 cfg.SubsystemLookup     = "sbl"     -- "sbl" (SubsystemBlueprintLibrary) | "findfirst"  VERIFY(V-CORE-06)
 cfg.LoopErrorLogEveryMs = 5000      -- a failing loop logs at most one error line per this period
 cfg.DiagPeriodicMs      = 0         -- > 0: diag.dump() at that interval
+-- couch-racegc (gctune.lua): the mod's Lua garbage collector. Every UE4SS wrapper is a finalizable userdata and Lua 5.4's
+-- incremental collector walks all of them in one indivisible atomic step: the 10-20 ms race stalls of 2026-10-15.
+cfg.LuaGcMode           = "generational" -- "generational" (default: minor collections walk only the young garbage) |
+                                    --   "incremental" (LuaGcPause / LuaGcStepMul / LuaGcStepSize) | "off" (Lua's defaults)
+                                    --                                                                 VERIFY(V-GC-01)
+cfg.LuaGcMinorMul       = 1         -- generational: a minor collection after the heap grew this % (smaller = shorter,
+                                    --   more frequent minors; tools/gcbench.lua, 34 MB live: 1 -> 0.4 ms worst, 3 -> 1 ms)
+cfg.LuaGcMajorMul       = 400       -- generational: a major (full) collection only after the old generation grew this %
+                                    --   (outside races); the load-screen collects below reset that base
+cfg.LuaGcRaceMajorMul   = 1000      -- the same in PRERACE / RACING / POSTRACE (Lua stores it /4 in a byte: 1020 max): no major
+                                    --   collection inside a race unless the heap grew ~10x (gcbench: 400 s of heavy
+                                    --   mid-lived garbage, no major at 1000; 75-140 ms majors at 400)
+cfg.LuaGcPause          = 200       -- incremental only (Lua's default 200)
+cfg.LuaGcStepMul        = 100       -- incremental only (Lua's default 100)
+cfg.LuaGcStepSize       = 13        -- incremental only (log2 bytes, Lua's default 13 = 8 KB)
+cfg.LuaGcFullCollectGrowth = 25     -- a full collect at the load screens (phase LOADING / FRONTEND / OTHER) when the heap
+                                    --   grew this % since the last one; < 0 = never                  VERIFY(V-GC-02)
 
 -- FIRST LIVE RUN (2026-10-06): Blueprint-function hooks REGISTER but NEVER FIRE in this build (WBP_FE_MainMenu_C
 -- CustomEvent/RegisterTabs, WBP_Common_Btn_C:BP_OnClicked, the builder's Go BndEvt, the HUD lap counters'
@@ -161,8 +249,11 @@ cfg.MaxLocalPlayers = 4
 cfg.JoinPollMs      = 33            -- documentation of the FAST period used by join.poll (§1.3); FAST runs it
 cfg.JoinArmMs       = 300           -- ignore presses this soon after a dormant guest was created
 cfg.JoinWithStart   = true          -- Start also joins (besides A)
-cfg.GuestCreate     = "connected"   -- dormant guests only for pads that are plugged in ("connected") | "all" (always
-                                    --   MaxLocalPlayers-1, the pre-2026-10-07 behaviour)          VERIFY(V-JOIN-11)
+cfg.GuestCreate     = "join"        -- couch-livefix: "join" = a pad gets its LocalPlayer only when it presses A (the
+                                    --   DLL's pad watch; no dormant guest: their views / screens broke races and the
+                                    --   skip prompt, join.lua LAZY JOIN), falls back to "connected" without the pad
+                                    --   watch | "connected" = dormant guests for every plugged pad | "all" (always
+                                    --   MaxLocalPlayers-1, the pre-2026-10-07 behaviour)    VERIFY(V-JOIN-11/13)
 cfg.GuestRemoval    = "never"       -- EVERY RemovePlayer on a guest leaves a dangling input-mode listener, and the
                                     --   next control-mapping rebuild (any map load, any new PlayerController) calls
                                     --   into freed memory: the 2026-10-06 crash (join.lua GUEST LIFECYCLE). "never"
@@ -263,6 +354,19 @@ cfg.ForceCarTags          = false      -- set UI.UseScreenSpaceCarTags 1 before 
 cfg.HudOutPlayers         = "hide"     -- a local player out of the race (wrecked / spectating) gets its HUD hidden (run E:
                                        --   P2's frozen HUD stayed over its spectate view) | "keep". A player who FINISHED
                                        --   keeps its HUD. Photo mode hides every HUD we host   VERIFY(V-HUD-14/15/16)
+cfg.HudProgress           = true       -- #38 (progress.lua): every guest's HUD gets the race-progress strip at its top
+                                       --   centre (the cars ahead / behind on the track, the lap / finish flag) from his
+                                       --   own car; in a mission-instances race P1's too, each showing his own set only
+                                       --                                                V-HUD-PR1/PR2/PR3
+cfg.HudProgressMs         = 33         -- strip update period (ms; the FAST loop runs every 33)
+cfg.HudProgressScale      = "p1"       -- "p1": the guests' strips use the scale of P1's own (native) strip, read from it
+                                       --   | "fixed": HudProgressHalfLap of a lap each side of the middle
+cfg.HudProgressHalfLap    = 0.12       -- the strip's half width in laps while P1's scale is unknown (or "fixed")
+cfg.HudProgressSpan       = 0.9        -- share of the native map's 980-unit box the strip's window spans
+cfg.HudProgressRound      = true       -- pills drawn as rounded boxes (false: plain rectangles)
+cfg.HudProgressColour     = { R = 1.0, G = 0.55, B = 0.12, A = 1 }   -- AI cars' pills, the lap tick and flag
+cfg.HudProgressHumanColour = { R = 1.0, G = 1.0, B = 1.0, A = 1 }    -- the other local players' pills
+cfg.HudProgressFinishColour = { R = 1.0, G = 1.0, B = 1.0, A = 1 }   -- the flag when the line is the finish
 
 ---------------------------------------------------------------------------------------------------- UX split (uxsplit.lua, 0.7.0)
 -- Run H: "System malfunction / perfect landing and other screen. Are shared between players. Each ux should be fully
@@ -346,10 +450,14 @@ cfg.PresentOutroP1Hud     = true       -- 0.13.0: the post-race full-screen view
                                        -- stacked on top showed the last player's "You came Nth")
 cfg.WreckKeepRaceMix      = true       -- 0.13.0: P1 wrecked / finished while guests race: the game's post-race audio mix
                                        -- (CBM_PostEvent ducks every race sound) is put back to the race mix  V-WR-MIX
+cfg.OutRacerAudioMute     = true       -- #80: a local player OUT of the race (eliminated / wrecked / finished) while another
+                                       --   still races: his car's audio components are silenced (his own camera sits in it:
+                                       --   engine / airflow / wind loops covered the whole mix). Back at the race end  V-WR-AUDIO
 cfg.HudAfterburnerDrive   = true       -- 0.13.0: split races: each guest's boost (afterburner) bar shows its own car's
                                        -- energy (the game's gauge function reads player 0 only)              V-HUD-AB1
 cfg.HudRamjetBarStyle     = "game"     -- 0.13.0: the game's two-box ramjet shader; its fill renders under the orange pin
                                        --   with FadeProgress pinned +1 (matrix test). "afterburner" = plain fill  V-HUD-RJ2
+cfg.HudRamjetDiag         = false      -- DIAG (2026-10-15): one "RJDIAG" log line per player per second while the ramjet moves
 cfg.HudRamjetDrive        = true       -- 0.13.0: split races: each player's ramjet bar shows its car's ramjet heat (the
                                        -- bar's own update shows nothing in the mod's HUDs)
 cfg.HudGuestRamjetFix     = true       -- 0.13.0: a guest's ramjet bar / overheat widgets bound to the guest's car (they
@@ -360,6 +468,12 @@ cfg.PresentFromMain       = true       -- main.lua initialises and ticks present
 cfg.PresentViewMode       = "auto"     -- "auto": ONE full-screen view during loading, track intro, grid intro, side bets,
                                        --   intermission and results; split views from the ignition/countdown to the
                                        --   finish | "split": split from LOADING to the end (0.3 behaviour)  VERIFY(V-PRE-01)
+cfg.SplitDormantViews     = true       -- couch-livefix r2: in a race only P1 and the JOINED guests hold a view; a dormant
+                                       --   local player (a pad plugged in, never joined) gets none (no joined guest: ONE
+                                       --   view; else its view rect is emptied, split.lua). false = every local player
+cfg.SplitDormantClamp     = false      -- couch-livefix r3 EXPERIMENT: GameViewportClient.MaxSplitscreenPlayers = joined views.
+                                       --   Live: set and restored fine, but the game's CommonGameViewportClient still drew
+                                       --   4 quadrants - no effect on this build; kept off
 cfg.IgnitionProbeHook     = false      -- UNUSED since 0.5.1 (ignpad has no hook; the TestPreflightCheckInput hook crashed run F)
 cfg.IgnitionMode          = "auto"     -- pre-flight checks (ignition.lua + ignpad.lua; session E "the screens don't
                                        --   respond to gamepads", run F "ignition game still doesn't work"): "auto"
@@ -419,7 +533,14 @@ cfg.GuestPilots           = { "DA_Racer_Protege", "DA_Racer_Nomad", "DA_Racer_St
 cfg.GuestNameMethod       = "auto"     -- "auto" (rpc -> gamemode -> direct while the name does not stick) | "rpc" |
                                        --   "gamemode" | "direct"                               VERIFY(V-NAM-01)
 cfg.GuestNameAdopted      = true       -- also rename an adopted AI PlayerState (takeover)
-cfg.NameTagLabel          = "pnum"     -- name tags over local humans' cars: "pnum" ("P2") | "name" ("Player 2") | "both"
+cfg.NameTagLabel          = "pnum"     -- name tags over local humans' cars: "pnum" ("P2", or the slot's custom name
+                                       --   when OPTIONS > Player names / settings Name<n> sets one) | "name" ("Player 2")
+                                       --   | "both" ("P2 Player 2")
+-- Custom names per slot (FREE MODE > OPTIONS > PLAYER NAMES, settings.txt Name1..Name4, 'couch set Name2 Jules'):
+-- empty = the default above (P1: its own profile name; P2-P4: GuestNames). They replace GuestNames for the guests'
+-- PlayerStates and, for P1, its PlayerState name in this mod's races (restored in the front end).  VERIFY(V-NAM-04)
+cfg.PlayerNameMaxChars    = 16         -- longest custom name (characters; longer settings.txt values are cut)
+cfg.PlayerNameP1          = true       -- false: Name1 only labels P1's name tag, P1's PlayerState keeps the profile name
 
 ---------------------------------------------------------------------------------------------------- Input isolation (inputfix.lua)
 -- Feedback 2026-10-07: "KbM controlled the two screens (possibly 1 gamepad controlled both)". Every human car read
@@ -670,10 +791,27 @@ cfg.CardP1DirGuardMs      = 50         -- a P1 sink direction within this many m
                                        --   dropped and logged (insurance against task #14, RC-10; >= 0, 0 = off)  V-RC-07
 cfg.CardGuestClickGuardMs = 150        -- P1's sink accept is dropped while a guest's A is down or had an edge within this
                                        --   many ms (task #14: a guest's A clicking P1's focus; >= 0)          V-RC-07
-cfg.RunRepairChance       = 0.15       -- 0.13.0 GALAXY RUN: chance that a reward offer holds TEAM REPAIR (hull +1) while the hull is damaged
+cfg.RunRepairChance       = 0.15       -- GALAXY RUN: chance that a reward offer holds LEAGUE TOKEN +1 while a token is missing
+cfg.RunDays               = 3          -- 0.14 GALAXY RUN v3: map columns (days) per planet (2..5; 5 = the campaign's real depth)
+cfg.RunTokens             = "couch"    -- 0.14: starting League Tokens: "couch" (1 + 1 per extra player) | "real" (the
+                                       --   campaign's 1 per act) | a number
+cfg.RunPayoutScale        = 1.0        -- 0.14: multiplier on the campaign's credit payouts / skip bonuses (> 0)
+cfg.RunPageDeco           = true       -- 0.14 GALAXY RUN page: the campaign-look scene (map bg, planet, node graph,
+                                       --   token pips); false or any scene failure = plain rows   V-RP-02
+cfg.RunPageSounds         = true       -- 0.14: the campaign's RunMap sounds on the page (open/close, node, accept)
+cfg.RunPageInvertTabs     = true       -- 0.14: the top menu's tab labels go cream on the run page's starfield (restored on close)
+cfg.GrandPrix             = true       -- 0.16 GALACTIC GRAND PRIX (gp.lua / gppage.lua): the FREE MODE poster formerly
+                                       --   GALAXY RUN opens the Grand Prix page | false = the old GALAXY RUN page
+cfg.GPPodTourTracks       = true       -- 0.16: the Podracer tour also offers the Podracing Tour's pods on speeder circuits
+                                       --   (set "game", never raced live before 0.16)                  V-GP-03
+cfg.GPPerPlayerClass      = true       -- 0.16: speeder tours: each player races his own class (pick.arch in the recipe) |
+                                       --   false = everybody races P1's class                           V-GP-04
 cfg.CardEasyBuilds        = true       -- 0.13.0: guests' Y = SURPRISE ME (random pilot/vehicle/kit, READY), X = COPY P1's build
 cfg.CardBackTapMaxMs      = 600        -- a guest's B is "back" on release when held shorter (held 1 s = leave, join.lua;
                                        --   > 0)                                                               V-RC-04
+cfg.ConfirmWindowMs       = 5000       -- couch-fix59 AUTO-145e: every press-twice confirmation (END GRAND PRIX, END THE RUN,
+                                       --   START with un-joined pads / players not ready, ABANDON THE GALAXY RUN): the
+                                       --   second A within this many ms (real clock; < 1000 -> 5000)
 cfg.CardP1BackConfirmMs   = 3000       -- P1 at PILOT: a second back within this window goes to MODE (> 0)    V-RC-08
 -- layout (vehicle-step-v2.md §3; 0.12.0 UI v2: ui-redesign-final.md §8 / §2.5, the row fills 3584 su). The v2 values
 -- below; while UiStyle = "classic" these four keys read the 0.11.0 values (cfg.UiClassic: 3500 / 1320 /
@@ -745,6 +883,361 @@ cfg.PerkLaunchBase        = "zero"     -- launch build of a cards race: "zero" (
                                        --   no parts, PL 0) | "pilot" (speeders launch on P1's style build VBD_PvP_IA_*,
                                        --   PL 26-31: the fallback before PerkApply "off" when the AI scale with the
                                        --   launch build, RC-14; pods keep the zero base)              VERIFY(V-RC-27)
+
+---------------------------------------------------------------------------------------------------- COUCH CAMPAIGN
+-- 0.15.0 (couch.lua, couchrun.lua, couchpanel.lua, couchprerun.lua, couchlayout.lua). The game's own campaign played by
+-- 2-4 players on one PC: join the pads on the FREE MODE tab, then open the game's CAMPAIGN tab. P1's pad drives the
+-- shared screens (paddock, cinematics, run map, dialogs); every player races his own car in split screen and picks his
+-- own vehicle class, racer style, rewards and shop items on his part of the screen. The run is saved in P1's normal
+-- campaign save (the game has ONE run per profile): back up the SaveGames folder first (README "Couch campaign").
+-- Turning a key off only drops that part; with CouchCampaign = false the campaign is the game's single-player one again.
+cfg.CouchCampaign         = true       -- the campaign keeps the joined guests (their own cars in every race, split screen).
+                                       --   false = guests are closed when the campaign starts, as before 0.15.0
+cfg.CouchSkipPrologue     = true       -- a NEW run starts without the game's vehicle-tryout prologue race (one shared
+                                       --   car there; the guests would only watch). false = the game's prologue
+cfg.CouchTimeTrials       = true       -- Field Tests / Podracer Tests: every player runs P1's test vehicle at the same
+                                       --   time, the others shown as ghost cars. false = P1 races them alone
+cfg.CouchMissionInstances = true       -- a mission raced alone (first: the planet's PODRACER TEST) gives EVERY player his
+                                       --   own copy of it: same track, start setup and named opponents, his own race
+                                       --   (the other sets hidden in his view, no collision, his own place / result;
+                                       --   any player's win wins the mission). false = one shared field (others ghosted)
+cfg.CouchInstancesMaxGrid = 12         -- most racers a race with instances may hold (the tracks' grids: 12); more = the
+                                       --   shared field for that mission (logged "[instances] kickoff: no instances")
+cfg.CouchSoloInstances    = true       -- a 1-car FIELD TEST (its grid = the players only) gives each player his own
+                                       --   instance too (the others' cars hidden in his view, no collision). false = one
+                                       --   shared track, the other players' cars ghosted (couch.ghostCars). A field test
+                                       --   with its own opponents: cfg.CouchFieldTestInstances
+cfg.CouchSoloTimeLimit    = true       -- a test raced by several players (FIELD TEST / PODRACER TEST / any TimeTrial or
+                                       --   Takedowns event with a target time): another player's finish or wreck never
+                                       --   ends your test, and nobody's finish takes your time limit away: the race ends
+                                       --   at the test's own limit (race start + target) for whoever is still out.
+                                       --   false = the old rule (the others race on with no limit)
+cfg.CouchSoloLimitGraceSec = 0         -- seconds added to that limit (0 = exactly the target time)
+cfg.CouchSoloTimeTrialCap = 2.0        -- #89: a TIME TRIAL / PODRACER TEST is never ended at its target: the game lets a
+                                       --   solo player race to the line and books his (failed) time. Its limit is the
+                                       --   target x this (only a safety end for a run that never reaches the line);
+                                       --   0 = no limit at all. Takedowns keep the target (the game's own end there)
+cfg.CouchInstancesCollision = "channels" -- #59: how the copies stop touching each other. "channels" (default): every
+                                       --   guest's copy is its own collision object type (an unused game channel, the
+                                       --   car's Vehicle responses moved onto it) and ignores the Vehicle channel and
+                                       --   the later copies' channels = no physics contact between copies, contacts
+                                       --   inside each copy as the game's (re-asserted after the game's own crash /
+                                       --   no-battling profile switches). "sweeps" = the old cross-copy sweep ignore
+                                       --   only (the copies' cars still bump: P1's bots take P2's down)
+cfg.CouchFinishPlate      = true       -- #96: a player out of the race while another still races sees his own result in
+                                       --   his view ("TEST PASSED - 10/10 - 00:32.33" / place + time) and "WAITING FOR
+                                       --   P2" until the race ends, instead of a bare view of his car
+cfg.CouchInstanceHazards = true        -- #84 / #85: mines, ability blasts / shockwaves and their visuals belong to the
+                                       --   copy of the car that made them (seen and felt in that copy only); the
+                                       --   track's own mines are copied for every guest's copy. false = shared hazards
+cfg.CouchFieldTestInstances = true     -- #37 / #39: a FIELD TEST with its own opponents (TAKEDOWNS: P1 + 7 test bots)
+                                       --   gives EVERY player his own copy of that field, picked at the node: his own
+                                       --   bots (the other sets hidden in his view, no collision), his own count. false =
+                                       --   one shared field, the other players' cars ghosted (logged WARN)
+cfg.CouchFieldTestMaxGrid = 32         -- most racers such a field test may hold for all the copies. Q8 B (Jules
+                                       --   2026-10-18): every player's copy is solo's whole field (P + 7 bots): 2P = 16,
+                                       --   3P = 24, 4P = 32 racers (the game's own events stop at 12, live 2P ran 16;
+                                       --   the takedown start is rolling). COST (sim takedown gc2 / gc4, Lua
+                                       --   garbage of the whole mod in a steady race): 2P / 16 cars 644 KB/s, 4P / 32
+                                       --   cars ~1110 KB/s (a plain 4P race is ~870: the 32-car part ~240 KB/s =
+                                       --   the per-copy bot director + the copies' collision / view / hazard ticks).
+                                       --   The game's side is NOT simulated: 32 AI cars of physics + AI every frame
+                                       --   (each view draws only its own 8; shadows / audio of hidden cars may still
+                                       --   cost) - check the frame time live at 4P before trusting 32
+                                       --   More players than fit: each copy gets smaller (logged) and its takedown
+                                       --   target scaled (below); the race builder clamping the grid gives smaller
+                                       --   copies too (logged WARN, target scaled the same way)
+cfg.CouchFieldTestScaleTarget = true   -- Q8: a takedown copy smaller than solo's field (the cap above, or the builder's
+                                       --   clamp) scales the target to its bots: target x (set - 1) / 7, rounded up
+                                       --   (12 with 5 bots = 9), the same for every player, said on the HUD for
+                                       --   CouchFieldTestScaleNoticeMs. false = the event's target kept (WARN)
+cfg.CouchFieldTestScaleNoticeMs = 6000 -- how long that HUD notice stays (ms)
+cfg.CouchSoloScores       = true       -- #37: a TAKEDOWNS / RAMJET DISTANCE test raced by several players: every player
+                                       --   his own count (takedowns BY his car of HIS copy's bots, ramjet distance of
+                                       --   his car), his own HUD counter (the guests' counters fed from their own count),
+                                       --   his own verdict. false = the game's single counter (one player's)
+cfg.CouchSoloFinishAtTarget = true     -- TAKEDOWNS: a player who reaches the target count finishes his test at once
+                                       --   (his finish time = that moment). false = the game's own rule (the test runs to
+                                       --   its time limit, the reach time is the result)
+cfg.CouchTakedownSetDirector = true    -- #70 TAKEDOWNS raced as separate copies: the game's bot director (bots that fall
+                                       --   too far behind are put back ahead, a lost field lined up behind and sent past
+                                       --   the player) serves ONE player (P1) for every copy's bots. true = the mod runs
+                                       --   those same rules for each copy around its own player (the game's off for that
+                                       --   race, put back after it). false = the game's (P2's bots follow P1)
+cfg.CouchPrecisionGates   = true       -- #86 PRECISION DRIVING test raced by several players: the game checks the gates only
+                                       --   with ONE PlayerState in the race (no bonus for anybody in a couch race). true =
+                                       --   every player's own gates counted by the mod (the solo 1.5 s per gate on HIS
+                                       --   clock, his own CHECKPOINT BONUS popup / timer). false = the game's (no bonus)
+cfg.CouchSoloResults      = true       -- after such a test the result screens show P1's OWN time and verdict (the game
+                                       --   reads them from the screen's owner = the last guest) and a results band gives
+                                       --   every player his own card + the team line ("P2 PASSED: THE FIELD TEST COUNTS")
+cfg.CouchPreRunSplit      = true       -- the new-run VEHICLE SELECT / LOADOUT screens split: each guest picks his own
+                                       --   class and racer style (A = READY). false = guests copy P1's choice
+cfg.CouchPreRunNative     = true       -- the guests' pre-run halves in the game's look: RACER STYLE shows each guest the
+                                       --   game's own loadout screen (his styles, P1's unlocked favours, his START RUN =
+                                       --   READY); VEHICLE SELECT shows the game's own screen (below) or, as its fallback,
+                                       --   the 4-way garage area style with a real 3D car. false = the old compact panels
+cfg.CouchPreRunNativeCopy = true       -- #100: each guest's VEHICLE SELECT = the game's own screen (class cards, stats panel,
+                                       --   upgrade / unlock hints, locked look) with his own 3D car behind it; only P1
+                                       --   unlocks. false (or a copy that cannot be built) = the area list
+cfg.CouchPreRunWaitGuests = true       -- #104: P1's START RUN on the LOADOUT waits until every guest pressed his START RUN
+                                       --   (READY): "WAITING FOR P2" by P1's button. false = P1 is never held
+cfg.CouchPreRunWaitMs     = 180000     -- #104: safety: P1's START RUN is released after this long (0 = never)
+cfg.CouchPreRunNavBoundary = true      -- AUTO-122: P1's pre-run screen is a navigation boundary while the split is open
+                                       --   (his D-pad never runs into a guest's area). false = Slate's default
+cfg.CouchPanel            = true       -- after a race and at shops every guest gets his own area of the screen for his
+                                       --   reward / purchases. false = guests pick no rewards and buy nothing
+cfg.CouchPanelNative      = true       -- the guest's reward area uses the game's own CHOOSE AN UPGRADE cards. false =
+                                       --   a plain dark list (also used automatically when the cards cannot be built)
+cfg.CouchRewardDoneClose  = true       -- #93: a guest done with his rewards: his area closes at once, the split is laid out
+                                       --   again for the players still choosing (only P1 left = P1 full screen)
+cfg.CouchRewardFlow       = true       -- couch-rewards2: each guest's OWN post-race reward flow from HIS result (couchrewards
+                                       --   / couchflow: his hub, CREDITS BREAKDOWN, FAULTS, his own upgrade rounds - the
+                                       --   native rules). false = the old offer that mirrors P1's round
+cfg.CouchGuestRewardCards = 3          -- couch-rewards2: cards of a guest's round (the native 2 + 1 tune values; spike S6)
+cfg.CouchGuestHighRiskRarity = 2       -- couch-rewards2: an eliminator's part round's minimum rarity (spike S6)
+cfg.CouchGuestPartSlots = 4            -- #110: a guest's part slots before his Gadgeteer (the native UnlockedAffixSlots 4)
+cfg.CouchFieldTestRunBuild = false     -- couch-fix29: a FIELD TEST races the event's own test build for P1 and every guest
+                                       --   (the all-PC builder writes it); true = the old write of a guest's run build into
+                                       --   the test class (his parts / levels in a test P1 races without his)
+cfg.CouchHighRiskTop      = 3          -- couch-rewards2: a guest outside this place in an eliminator earns no round
+cfg.CouchGuestFaults      = "native"   -- couch-rewards2: "native" = a guest's critical malfunction gives HIM a fault when the
+                                       --   game's scheduler fires for it (taken off P1's run) | "off"
+cfg.CouchFaultsPollMs     = 250        -- couch-fix27 #109: the poll of P1's fault queue count (the check's outcome runs in the
+                                       --   game's tick: no hook sees it)
+cfg.CouchFaultsStateMs    = 1000       -- couch-fix27 #109: every local car's critical-malfunction state (who owns new faults)
+cfg.CouchFaultsGuestMs    = 100        -- couch-fix59 AUTO-143: each guest car's critical-malfunction state (a malfunction
+                                       --   ended by a crash / the check with no fault of the game's for it -> his own)
+cfg.CouchRewardFence      = true       -- couch-rewards2: no guest pad's focus inside P1's reward screens (couchfence)
+cfg.CouchShopNative       = true       -- the guest's shop area is the game's own shop screen (part cards, build panel)
+                                       --   with his stock and credits. false = the plain dark list (also the automatic
+                                       --   fallback when the native shop cannot be built)
+cfg.CouchShopGridMatchP1  = true       -- #105: the guest's shop copy lays its part cards out in P1's native column count
+                                       --   (P1's TV_Parts EntryWidth in his SzB_PartsSize width: 3 wide); the copy's parts
+                                       --   box no longer fills the spare width of its area (it showed 4 wide). false = 0.16
+cfg.CouchMysteryGreyDelayed = true     -- #112: at a mystery encounter a guest's choice paid by a later bookend (mystdata
+                                       --   bk: MYST_157 gamble, MYST_107 promises, MYST_108 payout, MYST_113 race deal)
+                                       --   is greyed on his half, "NOT AVAILABLE FOR GUESTS YET" (bookends are not tracked
+                                       --   per guest: he could pay and never be paid). P1 unaffected. false = selectable
+cfg.CouchRewardWaitGuests = true       -- couch-fix32 (audit 12 #13): P1 on the run map with a guest still choosing his
+                                       --   rewards: the map screens are disabled (P1's node pick waits) until every guest
+                                       --   is done; P1 holds B cfg.CouchStopForceMs to leave anyway. false = 0.16 (his
+                                       --   pick ended the post-race: the guest's open rounds became SKIP credits)
+cfg.CouchMapInputHold     = true       -- couch-fix53 (AUTO-131): during that wait the screen owner leaves pad id 0 and
+                                       --   P1's PC takes it back: P1's A reaches no CommonUI router that owns the map
+                                       --   (the disabled screens / node buttons did not stop it live). false = fix51
+cfg.CouchShopRarityTable  = true       -- couch-fix32 (audit 12 #14): a guest's Hibi's shelf rolls the shop's rarity table
+                                       --   (rundata rarity.shop, one planet behind the race rewards) for the planet, never
+                                       --   the race / eliminator table (richer shelves than P1's); Legendary parts 4,000.
+                                       --   false = 0.16 (run.lua's reward offer drew the shelf)
+cfg.CouchMysteryStrict    = true       -- couch-fix32 (audit 12 #7): a guest's mystery choice must mirror the solo outcome
+                                       --   on HIS economy: a choice with any effect the mod cannot give him (a League token,
+                                       --   a run favour such as a sabotage, a run unlock, a reward pool no part of his car
+                                       --   fits) is greyed when it also pays / charges him; reward pools roll their own
+                                       --   rarity + fault (mystdata POOLS / GROUPS: MYST_049 = 2 Rare FAULTY parts); P1's
+                                       --   follow-up interactions (bookends of his deals) are never a guest's. false = 0.16
+cfg.CouchGuestShop        = true       -- on the run map (no split) a guest's A opens HIS own shop ("(A) SHOP" hint)
+cfg.CouchMapGuestShop     = false      -- couch-rewards #10 (Jules 2026-10-17: unequal - the solo campaign has no shop on the
+                                       --   map): the guests' "(A) SHOP" hint on the run map. false = guests shop at the
+                                       --   shops P1 visits (Hibi's / scrap, split). true = the old map hint
+cfg.CouchMapGuestGarage   = false      -- couch-rewards #10/#11: the guests' "GARAGE" hint on the run map (the compact garage
+                                       --   outside the paddock). false = a guest's garage is his native full-screen turn
+                                       --   offered in the paddock after P1 leaves his own garage (CouchGarageOffer)
+cfg.CouchGarageOffer      = true       -- couch-rewards #4: after P1 leaves his own paddock garage, each joined guest in turn
+                                       --   gets "P2: PRESS A FOR YOUR GARAGE" (A = his native garage turn, B = no thanks)
+cfg.CouchGarageOfferMs    = 15000      -- the offer is withdrawn after this long without an answer
+cfg.CouchP1GarageGuard    = false      -- couch-rewards #6 / #26: P1's OWN paddock garage with guests joined: the model shown
+                                       --   must be one of P1's two slots of the class THE GAME opened (never a class
+                                       --   switch: the paddock has a garage per class), else ONE reload per visit; every
+                                       --   guest's CstSubsystem / P1's other classes are put back if the visit changed
+                                       --   them. OFF by default (#26: the first version fought the screen live)
+cfg.CouchP1GarageRootA    = true       -- couch-p1garage #27: P1's A on his OWN garage root (ids swapped for it) enters the
+                                       --   hero page his focus is on when the game did not act (menubridge)
+cfg.CouchP1GaragePageA    = true       -- couch-p1garage #27: P1's A on his own garage page clicks the option he focuses
+                                       --   (never a hold / locked one) when the game did not act; LB / RB always bridged
+cfg.CouchShopRestock      = 250        -- his own shop's RESTOCK price (x (1 + restocks this planet))
+cfg.CouchGarage           = true       -- his own GARAGE (garage.lua): on the run map his D-pad moves to the "GARAGE" hint
+                                       --   beside "(A) SHOP", A opens it: model, livery template, colours, finish of his
+                                       --   car (per seat and class, Mods/SWGRCouch/guest-garage.txt; never P1's garage)
+cfg.CouchGarageApply      = "upload"   -- how his livery reaches his car in a race: "upload" = his PlayerState's
+                                       --   VehicleCustomisationComponent:Server_UpdateVehicleRecipe(his recipe), the
+                                       --   game's own per-player path | "tags" = the tags on his car's recipe actor +
+                                       --   OnRep_VehicleRecipe() | "off" (only his MODEL, through his grid entry)
+cfg.CouchGarageUnlocks    = "p1"       -- the options a guest may pick: "p1" = what P1 owns (the game's own unlock /
+                                       --   purchase test on P1's account) | "all" = every option of the game
+cfg.CouchGarageTries      = 3          -- uploads per guest and race at most (a car the game rebuilt gets it again)
+-- 4-WAY GARAGE (garage4.lua / garage4ui.lua, docs/dev/guest-garage.md section 8): every player builds his car at the
+-- same time in his own area of the screen (2 players top / bottom strips, 3-4 quadrants), his own 3D car, his own pad.
+-- Both switches stay false until the in-game checks (section 8.6) passed.
+cfg.Garage4Way            = false      -- FREE MODE / GALACTIC GRAND PRIX: A on a racer card's VEHICLE stage opens the
+                                       --   4-way garage for every player (model = every PRE_* preset of his class, every
+                                       --   livery template / colours / finish unlocked); his livery is uploaded onto his
+                                       --   car in the race (P1's too: in memory for that race, his saves never touched)
+cfg.CouchGarage4Way       = false      -- COUCH CAMPAIGN: the guests' GARAGE on the run map shows each guest's 3D car in
+                                       --   his area (options = CouchGarageUnlocks, his store = guest-garage.txt)
+cfg.Garage4Bays3D         = true       -- the 3D car per area (vpreview photo bays: 4 at most, still captures on change)
+cfg.Garage4Spin           = false      -- the 3D cars turn (a capture every Garage4SpinCaptureMs per bay); false = stills
+cfg.Garage4SpinCaptureMs  = 250        -- min ms between two captures of a turning bay (> 0; the budget over all bays is
+                                       --   SetupPreviewCaptureBudget per FAST tick)
+cfg.Garage4BayLivery      = "refresh"  -- how a bay's car shows a livery: "refresh" = the tags on its CustomisationComponent's
+                                       --   ActiveRecipe + RefreshRecipe() | "ui" = UpdateUISelection(type, tag, -1) per
+                                       --   tag (the game's garage path) | "off" (the preset's own livery)   VERIFY(G4-02)
+cfg.Garage4ShowHidden     = false      -- also offer the catalog's hidden options (pre-order entitlements) in FREE MODE
+cfg.Garage4Z              = 900        -- viewport z of the front-end 4-way garage (over the RACERS page)
+cfg.CouchCampaignTile     = true       -- F01: COUCH CAMPAIGN tile on the Campaign tab (replaces the Deluxe upsell) + its players page
+cfg.CouchActPosters       = true       -- F02: the COUCH CAMPAIGN page shows the campaign's acts (ACT I-III): an unlocked
+                                       --   act starts a NEW run of it (a run in progress is abandoned after a confirm).
+                                       --   false = the page's NEW CAMPAIGN poster (the game's own restart) as in F01
+cfg.CouchDeleteProgress   = true       -- #98: FREE MODE > OPTIONS > ADVANCED > Delete all couch progress (only while the COUCH save
+                                       --   profile of tools/swgr-save-profile.sh is live; refused otherwise)
+cfg.CouchSaveAccountId    = ""         -- F02: the SaveGames/<account> folder whose .swgr-profile marker is checked;
+                                       --   "" = every account in Steam's loginusers.vdf (Proton)
+cfg.CouchShopBridge       = true       -- while a guest shares the paddock shop, P1's A buys the card HE has focused and
+                                       --   his B leaves the shop (the game's own click / back; skipped when his native
+                                       --   press already acted). false = P1's native A / B only
+cfg.CouchStopWaitGuests   = true       -- #77: at a shared shop / Scrap Dealer stop P1's leave (his B) is held while a
+                                       --   joined guest is still shopping (P1's area: "WAITING FOR P2"); the stop closes
+                                       --   once every guest left (his LEAVE / B), false = P1's leave closes it at once
+cfg.CouchStopWaitMs       = 0          -- ... at most this long after P1's leave (the guests still shopping are closed,
+                                       --   their purchases kept); 0 = no time limit (Jules's Q9: hard wait, hold B to
+                                       --   force)
+cfg.CouchStopBackGuard    = true       -- couch-fix43: while a guest shops, P1's stop screen is no CommonUI back handler
+                                       --   (his B is read from his pad -> WAITING FOR P2); false = only the back hooks
+cfg.CouchStopForceMs      = 2000       -- ... or P1 holds B this long to leave at once (his A = back to shopping)
+cfg.CouchPadWatchBridge   = true       -- on a guest-owned shared screen P1's A / B / VIEW are also read from his pad's
+                                       --   raw presses (the input filter's pad watch: any pad type, Steam Input too);
+                                       --   couch-fix48: a guest's B in his shop / dealer area too (parked pads).
+                                       --   false = only what the game's input reports
+cfg.CouchMysteryTeamSave  = true       -- couch-fix48: a guest's TEAM mystery favour is saved at once (the run's native
+                                       --   save via CampaignRun:OnLeaveShop); false = the next checkpoint carries it
+cfg.CouchGenericBridge    = true       -- any other guest-owned paddock screen: P1's A clicks the button he focuses and
+                                       --   his B runs the screen's back, only when the game did not react (never a
+                                       --   hold / locked button). false = such screens get P1's native input only
+cfg.CouchGarageKeepSwap   = true       -- P1's own garage keeps P1's pad on its pages (Choose Model, Edit Vehicle,
+                                       --   Edit Livery) while the garage is open. false = the screen scan decides
+cfg.CouchOrphanScreens    = true       -- a screen without a readable owner that opens over a shared screen stays P1's
+cfg.CouchBuildView        = true       -- P1's VIEW BUILD (player menu, build page): each guest sees his own build on the
+                                       --   game's build page in his area. false = the build page stays P1's only
+cfg.CouchBackerNative     = true       -- #78: on VIEW BUILD's BACKER INFO tab each guest's area is the game's own
+                                       --   BACKER INFO page (the team's backer and contract, his favours). false =
+                                       --   the plain text plate
+cfg.CouchBackers         = true       -- couch-fix21 (#90, Jules 2026-10-18): every guest has his OWN backer contract
+                                      --   (couchbacker.lua / couchbackerui.lua): his own pick on his half of CHOOSE A
+                                      --   BACKER CONTRACT, his contract counted from his own car, his own check-in and
+                                      --   reward, his BACKER INFO. false = the team's backer (P1's) as before
+cfg.CouchShareMeta       = true       -- couch-fix35 (Jules's Q6): the guests' tuning / kit points and their tracked
+                                      --   unlock counters (field tests, scrap dealer buys, style takedowns / wins /
+                                      --   events, planets with a favour) are added to P1's account (couchmeta.lua);
+                                      --   false = guests earn nothing for the account
+cfg.CouchBackerShareUnlocks = true    -- couch-fix21: a backer favour a guest earns (a Satisfactory run with his backer)
+                                      --   is unlocked on P1's account (SPUnlockSubsystem UnlockTag) = every player's
+                                      --   pre-run favours; false = kept in couch-run.txt's shared store only
+cfg.CouchPanelNativeHover = true       -- the focused reward card uses the game's own highlight. false = a simpler
+                                       --   highlight drawn by the mod (try it if a guest's card looks wrong when focused)
+cfg.CouchRootSplit        = true       -- during a split moment P1's WHOLE screen (every game screen, its background,
+                                       --   header, dialogs, tooltips) moves into his area. false = only the one native
+                                       --   screen is shrunk (0.15 first version: its frame stayed full screen)
+cfg.CouchRootBacker       = true       -- 2 players: the game's paper on both sides of P1's half-size screen in his strip
+cfg.CouchCreditsChip      = true       -- map / shop / rewards screens: each guest's credits in a chip beside P1's native
+                                       --   credits (top right; hidden while a split shows the guests' own areas)
+cfg.CouchSkipBridge       = true       -- couch: any player's A held on the (guest-owned) skip-cinematic screen skips it
+cfg.CouchSkipHoldMs       = 800        --   hold time (ms; the game's own hold is 750 ms and goes first when it works)
+cfg.CouchSkipChainMs      = 8000       --   after a skip, the next shots' skip screens within this time are skipped too
+                                       --   (one skip = the whole presentation); 0 = every shot needs its own hold
+cfg.CouchSkipReown        = true       --   couch-livefix: a guest- / dormant-owned skip screen shows its prompt and ring from
+                                       --   the mod's hold and is re-owned to P1's PC (the one in the skippable cutscene)
+                                       --   before its Clicked event (the game's skip reads the OWNER)  VERIFY(V-CC-SKIP2)
+                                       --   couch-skip (#33): re-owned to EVERY local PC in a skippable cutscene in turn
+                                       --   (each plays its own intro chain; the race waits for all), P1 last
+cfg.CouchSkipSweep        = true       --   couch-skip (#33): inside the chain window (paddock / PRERACE), a local PC's
+                                       --   skippable chain that started after the skip gets its SkipCinematicChain
+                                       --   (no skip screen needed); never the ignition (not skippable)  VERIFY(V-CC-SKIP3)
+cfg.CouchActionTags       = true       -- couch campaign menus: the footers' "[P1] / [P2]" prompt prefixes are removed (the
+                                       --   engine numbers them from the swapped pad ids: P1's prompts read "[P2]").
+                                       --   Each player's area is his own. false = the engine's tags
+cfg.CouchOwnerUiImc       = true       -- while P1's pad drives a screen a guest owns, that guest's UI input context is
+                                       --   raised (the map / NEXT PLANET take P1's A and D-pad). false = bridge only
+cfg.CouchSwapPark         = true       -- while P1's pad drives a guest-owned screen AND a guest split is open (vehicle /
+                                       --   loadout pick, rewards, shop), P1's own PlayerController waits on a spare pad id
+                                       --   (6) instead of the screen owner's: that guest's pad then reaches no player
+                                       --   of the game, only his own area (his A no longer confirms P1's screen, a
+                                       --   short A press counts). The ids come back when the split closes.
+                                       --   false = P1's PC carries the guest's pad id during the split (0.15 first version)
+cfg.CouchSwapParkAlways   = true       -- (with CouchSwapPark) the spare id also while NO split is open (results, credits,
+                                       --   run recap, strike popups, paddock pause, NEXT PLANET): the screen owner's pad
+                                       --   then never reaches P1's player (his short A / B no longer act on P1's screen).
+                                       --   false = parked only while a guest split is open
+cfg.CouchSaveOwner        = true       -- couch-savepath: the campaign saves (run + meta) always go to P1's account folder
+                                       --   (SaveGames/<steamid>/): while the pad ids are swapped they follow the local
+                                       --   player that holds pad id 0. false = the old behaviour: saves written while a
+                                       --   guest-owned screen is up land in the account-less SaveGames/ root slot
+cfg.CouchSaveOwnerManager = true       --   (advanced, with CouchSaveOwner) also the save manager's own LocalPlayer (new save
+                                       --   objects copy it). false = only the existing save objects
+cfg.CouchSaveListener     = true       -- couch-savepath: the mod's own (invisible) save icon listens to the campaign save
+                                       --   manager's save events (the friends' run checkpoints). false = the game's own
+                                       --   icon (when it exists) and the run-clock fallback only
+cfg.CouchDormantScreens   = true       -- couch-savepath: after every guest left (their pads dormant), the paddock /
+                                       --   post-race screens the game gives to a dormant guest's player are driven by P1's
+                                       --   pad (the same pad-id swap as with joined guests). false = off (soft lock)
+cfg.CouchToastMs         = 4000      -- the "COUCH CAMPAIGN: P2 JOINS THE RUN" banner when the couch rules turn on, in
+                                       --   ms (shown once per session and guest set). 0 = no banner
+cfg.CouchPanelZ           = 1000       -- (advanced) screen layer of the guests' areas; must stay above the game's
+                                       --   post-race screens (500)
+cfg.CouchTeamResult       = "best"     -- 0.15 COUCH CAMPAIGN rules (couchrules.lua): whose finish the campaign books - "best"
+                                       --   (eliminator top 3 / must-win met when the BEST human makes it) | "p1" (P1 only)
+cfg.CouchIngestGate       = true       -- 0.15: the result gate (one booking per race; without it every human's finish is
+                                       --   booked into P1's run natively: double credits, a guest's 4th = a token)
+cfg.CouchWreckToken       = "all"      -- 0.15: "all" = a wreck costs a token only when every human wrecked (refunds) |
+                                       --   "each" = every human's wreck costs one (native, extended to guests)
+cfg.CouchWreckRefundRewards = false    -- couch-fix30 (audit 12 Q2, recommendation = solo rule): a REFUNDED wreck gives
+                                       --   back the team's League Token only - P1's own wreck costs him his reward round
+                                       --   like a wrecked guest's (false). true = the old rule: P1's refunded wreck also
+                                       --   gets his reward round back. (Pending Jules's answer to Q2.)
+cfg.CouchRiskBand         = 1          -- 0.15: "p1" rule, eliminations: a guest in the last N places closes the gate (>= 1)
+cfg.CouchFinalWinSwap     = true       -- 0.15: "best": a guest winning the run's final event shows as P1's win
+cfg.CouchChampionGrid     = true       -- 0.15: Championship (HeadToHead) grid +guests, so they race the boss too
+cfg.CouchBossIntroSwap    = true       -- #97: a championship with guests plays the track's own intro instead of the boss
+                                       --   story intro (its Player + Rival car bindings froze the game with 2 local chains)
+cfg.CouchBossInstances    = true       -- couch-fix38 (Jules Q12 B): a championship / boss race with guests = one copy of
+                                       --   the boss race per player (his own boss car, field and result; couchrules D8,
+                                       --   instances.lua); the act is won if ANY player beats his own boss ("best"). false
+                                       --   = the shared boss race (D7: every player races the one boss). Needs
+                                       --   CouchMissionInstances and CouchChampionGrid.
+cfg.CouchRivalRaces       = true       -- couch-fix58 (Jules: every player races every campaign race): a RIVAL CHALLENGE
+                                       --   (the head-to-head vs a named rival) gets every guest a place (couchrules D5):
+                                       --   the team's challenge is won if ANY player beats the rival. false = guests sit
+                                       --   it out (the old rule, CouchSitOutShare below)
+cfg.CouchRivalInstances   = true       -- couch-fix58: ... raced as one copy per player (each vs his own copy of the
+                                       --   rival, like CouchBossInstances); false / no spare AI PlayerState = one shared
+                                       --   race (every player vs the one rival). Needs CouchMissionInstances.
+cfg.CouchSitOutShare      = 0.5        -- 0.15: a guest sitting out (rival challenge) gets this x the planet's skip bonus
+cfg.CouchSaveCounter    = true       -- couch-livefix r2: the guests' checkpoints follow the run save objects' request counters
+                                     --   (ULocalPlayerSaveGame.CurrentSaveRequest; the save hooks never fire live).
+                                     --   false = the run clock alone
+cfg.CouchGuestStartCredits = "p1"     -- couch-econ: a guest's run starts with P1's starting credits (couch-fix31: P1's
+                                       --   RUN-START figure, noted per run id - a late joiner never gets P1's wallet
+                                       --   now); a number = that many; false = 0 (the pre-econ behaviour)
+cfg.CouchSeatPadMemory    = true       -- couch-fix31: a pad that joins sits down in the seat its ControllerId held last
+                                       --   time (kept in couch-run.txt across a relaunch), not in join order; a seat
+                                       --   remembered for another pad that is here is kept free for it. false = join order
+cfg.CouchWreckCredits     = 0          -- couch-econ: a wrecked guest's credits (native: a wrecked racer is never paid)
+cfg.CouchBets             = true       -- 0.15 (couchbets.lua): the pre-race /CHALLENGES (side bets) split: each guest gets
+                                       --   the game's own challenges screen in his area, same racers and stakes, his own
+                                       --   credits. false = the challenges stay P1's only
+cfg.CouchBetsNative       = true       -- the guest's area shows the game's own challenges screen. false = a plain list
+cfg.CouchBetRule          = "beat"     -- a guest's challenge is won when he finishes AHEAD of that racer ("beat") |
+                                       --   when that racer finishes worse than his predicted place ("predicted")
+cfg.CouchBetPayout        = 2          -- a won challenge pays stake x this into the guest's credits (2 = stake back + the
+                                       --   same again); a lost one keeps the stake; a race left before its result refunds
+cfg.CouchBetWaitGuests    = true       -- couch-rewards #8: P1's challenge / decline waits until every joined guest has
+                                       --   challenged or declined (P1's area: "WAITING FOR P2"); then the game moves on
+cfg.CouchBetWaitMs        = 20000      -- ... at most this long after P1's pick (a guest who has not chosen = declined);
+cfg.CouchBetForceMs       = 2000       -- ... or P1 holds A this long once more to move on at once
+cfg.CouchBetHoldMs = 750               -- /CHALLENGES: every row is a hold (decoded bRequiresHold); used when the row's own
+                                       -- GetRequiredHoldTime is unreadable (CommonUI's default HoldTime 0.75 s)
+cfg.CouchBetP1Bridge      = true       -- the challenges screen belongs to a guest's PlayerController: P1's focus is put on
+                                       --   it and his A runs the button he focuses (HOLD A = DECLINE), unless the game
+                                       --   already acted. false = P1's native input only
 
 ---------------------------------------------------------------------------------------------------- Pause (pause.lua)
 -- 0.7.0 (run H: a guest's Start soft-locked the game in [PauseMenu] with no screen, no pause screen of a split race took
@@ -846,7 +1339,7 @@ cfg.PauseRestartConfirm   = "dialog"   -- "dialog": the game's Btn_RetryRace + i
                                        --   by a native pre-hook on ArcadeSubsystem:RequestRestartEvent (registered while
                                        --   such a race is RACING) | "twice": an own row, confirmed by a second press
                                        --   within PauseRestartConfirmMs (no hook, no dialog: if V-RST-03 fails)  V-RST-03/12
-cfg.PauseRestartConfirmMs = 3000       -- "twice": the second press must come within this time (> 0)  VERIFY(V-RST-12)
+cfg.PauseRestartConfirmMs = 5000       -- "twice": the second press must come within this time (> 0)  VERIFY(V-RST-12)
 cfg.FastBootSignIn        = "always"   -- 0.13.0 "always": the 10 s SIGN IN STATUS wait at every main menu visit is skipped
                                        -- (Steam offline never signs in; online the login goes on in the background);
                                        -- "off": the game's wait
@@ -1007,6 +1500,13 @@ cfg.GfxPresets = {
         ["r.Shadow.Virtual.Enable"] = 0, ["r.Lumen.DiffuseIndirect.Allow"] = 0, ["r.Streaming.PoolSize"] = 3000,
     },
 }
+-- Correctness values applied in EVERY split race, whatever SplitGraphics says (also "off"); saved and restored like the
+-- preset. r.SSGI.Quality 0: screen-space GI breaks every view but the first one. Levels whose lighting actor
+-- (BP_GlobalLighting_HDRI_Base's unbound PostProcess) forces DynamicGlobalIlluminationMethod 2 (ScreenSpace) with
+-- IndirectLightingIntensity 2.25 (Husky; Jakku has 0) gave P2 a dark / brown / blown-out white-magenta picture while P1
+-- was fine. Proven live 2026-10-14 on Jakku with both views on P1's car: method 2 -> P2 sand black (P1 normal), method
+-- 0 or r.SSGI.Quality 0 -> both halves equal within 1 %. false = off.
+cfg.GfxSplitFixes = { ["r.SSGI.Quality"] = 0 }
 cfg.GfxAutoQualityMaxViews = 2         -- "auto": quality for <= 2 views, performance above
 cfg.GfxApplyMode           = "console" -- "console" (every cvar via ExecuteConsoleCommand, ARCHITECTURE contract) |
                                        -- "usersettings" (sg.* through GameUserSettings setters + ApplyNonResolution-
@@ -1087,18 +1587,37 @@ cfg.Defaults = {
     LastRaceRacers     = "",             -- 0.10.0 RACERS step per pad "<ControllerId>=<pilot>@<preset>@<loadout code>;..."
     OpponentTier       = 1,              -- 0.12.0 RACE SETUP > MODE "Opponents": the speeder build tier the race launches
                                          --   on, i.e. the AI's strength (1 = TIER 1 [0%] .. 6 = TIER 6 [58%]); pods: 1
-    RunLength          = "off",          -- 0.13.0 OPTIONS > Galaxy run: "off" | "4" | "6" | "9" races (run.lua; the run
-                                         --   itself is in run.txt)
+    RunLength          = "off",          -- OPTIONS > Galaxy run: "off" | "qualifier" | "league" | "kestar" | "sprint"
+                                         --   (0.14 v3: the armed League preset; run.lua; the run itself is in run.txt)
     OpponentMatch      = false,          -- 0.13.0 CUSTOM Opponents "MATCH THE PLAYERS" (perkapply.matchLoadout)
     PlayMode           = "quick",        -- 0.13.0 FREE MODE QUICK RACE / CUSTOM RACE posters: "quick" (QUICK RACE: every
                                          --   human on the Opponents tier kit, no PERKS stage, quick.lua) | "custom"
-    RunPick            = "4",            -- 0.13.0 FREE MODE GALAXY RUN poster: the run length its A starts ("4" | "6" |
-                                         --   "9"; RIGHT on the poster steps it, RunLength arms the run)
+    Name1              = "",             -- FREE MODE OPTIONS > PLAYER NAMES: custom name of P1..P4 ("" = the default:
+    Name2              = "",             --   P1's profile name, cfg.GuestNames for P2-P4; nametags.lua)
+    Name3              = "",
+    Name4              = "",
+    RunPick            = "qualifier",    -- FREE MODE GALAXY RUN poster: the League preset its A starts ("qualifier" |
+                                         --   "league" | "kestar" | "sprint"; RIGHT steps it, RunLength arms the run)
+    CouchMysteryTeam   = "greyed",       -- couch-fix39 (audit Q10) OPTIONS > COUCH CAMPAIGN > Guests' team mystery choices:
+                                         --   "greyed" (couch-fix32: a guest's choice with a TEAM effect - a League token, a
+                                         --   sabotage / debuff / difficulty / shop favour - is greyed) | "allowed" (he may
+                                         --   take it: its team effect goes onto the shared run, counted once per encounter
+                                         --   when P1 or another guest took the same; his economy effects stay his own).
+                                         --   Deals paid by a later bookend stay greyed for guests either way (couchrun)
+    CouchEconomy       = "own",          -- couch-fix35 (Jules's Q1): COUCH CAMPAIGN rules > P1's rewards. "own" = P1's
+                                         --   wallet / reward round follow HIS own place (the team's best result only for
+                                         --   tokens, must-win events and the act) | "best" = the best result carries
+                                         --   everyone (the old rule). couchrules.ownEconomy, read at each race end
 }
+-- couch-fix36 (Jules's audit decision Q4; OPTIONS > COUCH CAMPAIGN; couchpenalty.lua). couch-fix41: no backer token
+-- rule any more (solo parity: an unhappy backer never costs a League Token; CouchBackerTokens is retired)
+cfg.Defaults.CouchBrokerPenalty = "both"  -- a guest's Broker penalty: "both" (the shared run's events become Eliminators
+                                          --   for everybody) | "owner" (his own eliminator payout rule only)
 
 ---------------------------------------------------------------------------------------------------- override checks
 -- Allowed values of the string selectors (config_user.lua overrides outside these lists are ignored with a warning).
 local ENUMS = {
+    LuaGcMode = { "generational", "incremental", "off" },        -- couch-racegc (gctune.lua)
     SubsystemLookup = { "sbl", "findfirst" },
     ClickMode = { "hook", "poll" },
     FastBootEpic = { "off", "keep" },
@@ -1106,7 +1625,7 @@ local ENUMS = {
     LobbyNavHighlight = { "both", "style", "focus" },
     LobbyNavKeyboard = { "always", "kbp1", "never" },
     BuilderAdopt = { "live", "go" },
-    GuestCreate = { "connected", "all" },
+    GuestCreate = { "join", "connected", "all" },
     GuestRemoval = { "never", "launch", "always" },
     OurTabSyncFix = { "clear", "off" },
     LobbyRootMode = { "setting_list", "own" },
@@ -1171,6 +1690,7 @@ local ENUMS = {
     NoWreckMethod = { "build", "cvar", "topup" },
     WreckSlowMo = { "off", "last", "game" },
     WreckCinematic = { "end", "keep" },
+    GuestFinishCinematic = { "end", "keep" },
     WreckSpectateTarget = { "human", "leader", "ai" },
     WreckViewGuard = { "auto", "force", "off" },
     WreckViewFallback = { "racer", "own" },
@@ -1215,6 +1735,7 @@ local ENUMS = {
     PilotSeatCheck = { "log", "refresh", "off" },
     PerkApply = { "full", "passives", "off" },
     PerkRamjet = { "keep", "on", "off" },
+    TestBotsCrit = { "resolve", "timeout", "pass", "fail", "crash", "crashpre" },     -- couch-fix50 AUTO-129 / fix55
     PerkCritMalfunctions = { "keep", "on", "off" },
     PerkLaunchBase = { "zero", "pilot" },
     SetupPreviewSpinStage = { "vehicle", "all", "none" },
@@ -1231,27 +1752,39 @@ local ENUMS = {
     UiTraitGlyph = { "decorator", "runs" },
     CardFigureTint = { "mid", "plain" },
     VehicleNameSource = { "load", "find", "table" },
+    -- 0.15 guest garage
+    CouchGarageApply = { "upload", "tags", "off" },
+    CouchGarageUnlocks = { "p1", "all" },
+    -- 4-way garage
+    Garage4BayLivery = { "refresh", "ui", "off" },
+    -- #38 race-progress strip
+    HudProgressScale = { "p1", "fixed" },
 }
 -- Keys whose value is a string selector OR a number (FinishGraceSec: "all" | seconds >= 0; PauseMenuZ: "auto" | Z >= 0;
 -- UxSplitSubHalfFrac: "auto" | a fraction 0..1). max is optional.
 local MIXED = { FinishGraceSec = { strings = { "all" }, min = 0 }, PauseMenuZ = { strings = { "auto" }, min = 0 },
                 UxSplitSubHalfFrac = { strings = { "auto" }, min = 0, max = 1 } }
 -- Table-valued keys that also accept false (= feature off).
+-- booleans that also accept a few selector strings (H01 2026-10-15: TestBots "all"/"guests" were rejected)
+local BOOL_OR_ENUM = { TestBots = { "all", "guests", "p1", "off" } }
 local FALSEABLE = { GfxSingleViewCvars = true, GuestPilots = true, PilotExtras = true }
 -- Table-valued keys with a fixed shape: n numbers >= min (one per player count), a colour { R, G, B, A }, or a rect
 -- {x, y, w, h} (positional or named, w and h > 0).
 local SHAPES = { CardW = { n = 4, min = 1 }, CardGap = { n = 4, min = 0 }, CardPanelColour = { colour = true },
+                 HudProgressColour = { colour = true }, HudProgressHumanColour = { colour = true },
+                 HudProgressFinishColour = { colour = true },
                  UiPageOrigin = { rect = true } }
 -- 0.12.0: keys without a default (nil = unset) that config_user.lua may still set; value = the type they must have.
 local NILABLE = { UiPageOrigin = "table" }
 -- 0.12.0: keys that take a number > 0 or a per-channel table {r, g, b} (positional or named) of numbers > 0.
 local NUM_OR_RGB = { PreviewStudioGain = true }
 -- Numbers that must be > 0 (a 0 period would run a loop on every engine tick).
-local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
+local POSITIVE = { CouchGarageTries = true, Garage4SpinCaptureMs = true, FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
                    LobbyNavRepeatMs = true, LobbyFocusKeepMs = true, SetupMaxRacers = true, SetupMaxRacersPlane = true,
                    SetupListMax = true, WreckCamMaxDistUU = true, WreckCamBadMs = true, PhotoModeCacheMs = true,
                    IgnitionPadAssistWindowMs = true, WreckViewReapplyMs = true, CrashCamMaxDistUU = true,
                    IgnitionSilentPresses = true, IgnitionSilentPressesP1 = true, TestCommandPollMs = true,
+                   TestBotsCritGiveUpMs = true, TestBotsCritCrashMs = true,
                    PauseLostMenuMs = true, IgnitionMapReprobeMs = true, WreckRigFov = true, UxSplitFadeMax = true,
                    PauseInputsBackMs = true, PauseNoSubStateMs = true,
                    -- 0.11.0 RESTART RACE
@@ -1274,7 +1807,12 @@ local POSITIVE = { FastPollMs = true, MainPollMs = true, SlowPollMs = true, Fast
                    -- 0.11.0 narrow-view HUD
                    HudNarrowBelow = true, HudNarrowScale = true,
                    -- 0.12.0 UI v2
-                   InputModeDebounceMs = true, StatusPillMs = true, UiTitleBoxH = true }
+                   InputModeDebounceMs = true, StatusPillMs = true, UiTitleBoxH = true,
+                   -- couch-racegc (gctune.lua)
+                   LuaGcMinorMul = true, LuaGcMajorMul = true, LuaGcRaceMajorMul = true, LuaGcPause = true,
+                   LuaGcStepMul = true, LuaGcStepSize = true,
+                   -- #38 race-progress strip
+                   HudProgressMs = true, HudProgressHalfLap = true, HudProgressSpan = true }
 -- 0.10.0: numbers that must be >= 0 (0 = off / at once).
 local NONNEG = { CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
                  SetupPreviewCaptureMs = true,
@@ -1288,6 +1826,12 @@ local CLAMP = { PerkPartSlots = { 1, 10 }, PerkTraitSlots = { 1, 4 } }
 -- nil when v may replace cfg[k], else the reason it is ignored.
 local function overrideProblem(k, v)
     if FALSEABLE[k] and v == false then return nil end
+    local boe = BOOL_OR_ENUM[k]
+    if boe then
+        if type(v) == "boolean" then return nil end
+        for _, a in ipairs(boe) do if v == a then return nil end end
+        return "must be true, false, " .. table.concat(boe, ", ")
+    end
     local mixed = MIXED[k]
     if mixed then
         if type(v) == "number" and v >= mixed.min and (mixed.max == nil or v <= mixed.max) then return nil end

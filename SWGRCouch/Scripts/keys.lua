@@ -119,6 +119,7 @@ local HELP = {
   "couch host | connect [addr[:port]] | disconnect",
   "couch gfx <auto|performance|quality|off>",
   "couch set <Key> <value>                write settings.txt",
+  "couch set Name2 Jules                  P2's custom name (Name1..Name4; 'default' clears it)",
   "couch reload                           RestartCurrentMod()",
 }
 

@@ -56,12 +56,14 @@ local TAG = "main"
 -- lobby, OPTIONS, RACE SETUP and cmap; its "menu" / "phase" listeners drop the page's widgets) is listed right after ui,
 -- cards2 (the v2 RACERS cards, cards.lua's API) right after cards, so a load error shows at boot like cards / cmap. No
 -- init, no loop of their own: lobby / setup / cmap / racers reach them lazily (U.mod) and tick them from their polls.
-local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join", "split", "vehicles", "setup", "vpreview",
+local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join", "couchseat", "split", "vehicles", "setup", "vpreview",
                   "cmap", "pilots", "perkdata", "perks", "quick", "perkapply", "cards", "cards2", "racers",
                   "builder", "launch", "inputfix", "hud", "uxsplit", "subsplit", "present", "ignition", "ignpad", "wreck",
                   "crashcam", "nametags", "gfx", "pause",
                   "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
-                  "restart", "feowner", "backprompt", "run" }
+                  "restart", "feowner", "backprompt", "run", "runpage", "couch", "couchrules", "couchsolo", "soloscore", "precision", "finishplate", "instances", "couchrun", "couchpanel",
+                  "couchfence", "couchrewards", "couchflow", "couchbacker", "couchpenalty", "couchbackerui", "couchfaults", "couchfavours", "couchlayout", "couchprerun", "couchroot", "couchbets", "couchmeta", "debugai", "garagenative", "couchacts", "couchpage", "gpdata", "gp", "gppage",
+                  "custdata", "garage", "garage4", "garage4ui", "gctune", "progress" }
 local mods = {}
 for _, name in ipairs(MODULES) do
   local ok, m = pcall(require, name)
@@ -77,6 +79,7 @@ local missingFn = {}
 -- Calls mods[name][fnName](...) inside its own error guard (tag = module name). Returns the U.try results.
 -- U.tryEvery, not U.try: the loop ticks below run every 33/250 ms, and a persistent fault must log its traceback
 -- once, then at most one line per cfg.LoopErrorLogEveryMs (sched.every's own throttle never sees these errors).
+local profDone                       -- the profiler's tail (below call): results passed through, nothing packed
 local function call(name, fnName, ...)
   local m = mods[name]
   if not m then return false end
@@ -89,7 +92,52 @@ local function call(name, fnName, ...)
     end
     return false
   end
+  -- Tick profiler (stutter hunt, 2026-10-14): off unless _G.SWGRCouch_prof is set by testcmd
+  -- (`lua _G.SWGRCouch_prof=true`). Per "module.fn": calls, total / max ms and calls over 2 ms, in
+  -- _G.SWGRCouch_profData (read with `lua return require('diag').profReport and ...` or directly).
+  if _G.SWGRCouch_prof then
+    local kb0 = collectgarbage("count")
+    local gt = mods.gctune
+    local c0 = gt and gt.cycleCount() or 0
+    local t0 = St.preciseMs()
+    -- couch-racegc: no table.pack of the results (the profiler's own garbage was in every module's alloc)
+    return profDone(name, fnName, kb0, c0, t0, U.tryEvery(name .. "." .. fnName, nil, name, f, ...))
+  end
   return U.tryEvery(name .. "." .. fnName, nil, name, f, ...)
+end
+
+profDone = function(name, fnName, kb0, c0, t0, ...)
+    local t1 = St.preciseMs()
+    local kb1 = collectgarbage("count")
+    local gt = mods.gctune
+    local c1 = gt and gt.cycleCount() or 0
+    if t0 and t1 then
+      local D = _G.SWGRCouch_profData or {}
+      _G.SWGRCouch_profData = D
+      local k = name .. "." .. fnName
+      local e = D[k] or { n = 0, sum = 0, max = 0, over2 = 0, phase = {} }
+      D[k] = e
+      local d = t1 - t0
+      e.n, e.sum = e.n + 1, e.sum + d
+      if d > e.max then e.max = d end
+      -- couch-racefast: a spike during which the Lua heap SHRANK ran a GC step (sweep / finalizers) - not the module's
+      -- own work. gc = those spikes; alloc = KB allocated by the module (garbage feeds the GC)
+      e.alloc = (e.alloc or 0) + math.max(0, kb1 - kb0)
+      if St.phase == "RACING" then
+        e.rn, e.rsum = (e.rn or 0) + 1, (e.rsum or 0) + d
+        if d > (e.rmax or 0) then e.rmax = d end
+      end
+      if d > 2 then
+        e.over2 = e.over2 + 1; e.phase[St.phase or "?"] = (e.phase[St.phase or "?"] or 0) + 1
+        -- a collector cycle ran inside (gctune's sentinel) or the heap shrank: a GC pause, not the module's own work
+        if kb1 < kb0 or c1 ~= c0 then e.gc = (e.gc or 0) + 1 end
+      end
+      if c1 ~= c0 then
+        e.cyc = (e.cyc or 0) + 1                    -- calls during which a collector cycle ran
+        if St.phase == "RACING" and d > (e.rcycMax or 0) then e.rcycMax = d end
+      end
+    end
+    return ...
 end
 
 local phase = mods.phase
@@ -133,9 +181,11 @@ end
 --    present (0.4.0): listeners only (cfg.PresentFromMain = true; with false hud.lua initialises and ticks it).
 --    wreck (2026-10-07): listeners only ("leaving" / FRONTEND give the cvars back); its custom property is registered
 --    lazily on the game thread (first armed race timeout), never here.
-local INIT_ORDER = { "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
+local INIT_ORDER = { "gctune", "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
                      "uxsplit", "subsplit", "hud", "present", "wreck", "crashcam", "gfx", "pause", "net", "netfix", "diag",
-                     "testcmd", "viewguard", "menubridge", "restart", "feowner", "run" }
+                     "testcmd", "viewguard", "menubridge", "restart", "feowner", "run", "runpage", "couch", "couchrules", "couchsolo",
+                     "soloscore", "precision", "finishplate", "couchrun", "couchbacker", "couchpenalty", "couchpanel", "couchfaults", "couchfavours", "couchprerun", "couchroot", "couchbets", "gp", "gppage", "garage",
+                     "garage4", "progress" }
 for _, name in ipairs(INIT_ORDER) do
   if name ~= "present" or cfg.PresentFromMain == true then call(name, "init") end
 end
@@ -227,22 +277,34 @@ local function fastTick()
   -- 0.10.0: keyboard presses queued by keyq's event-loop callbacks run here, on the game thread, in every phase
   U.try(TAG, mods.keyq and mods.keyq.drain or function() end)
   measureFast()
+  -- couch-fix60 (AUTO-146): the race world checked before any race module (a silent seamless travel collects the race's
+  -- pawns before the MAIN poll sees the new world): gone = the phase poll ran now, no race module this tick
+  local raceGone = false
+  if isRace() then
+    local okW, gone = call("phase", "fastWorldCheck")
+    raceGone = okW == true and gone == true
+  end
   if St.join.active then call("join", "poll") end
   -- every ClickMode: ui.pollClicks runs the lobby's pad/keyboard navigation (cfg.LobbyPadNav) and, in ClickMode
   -- "poll" (default: BP_OnClicked never fires in this build), the selected-toggle click detection
   if St.menu.visible and not frontHeld() then call("ui", "pollClicks") end
   -- 0.12.0: P1's B on OPTIONS / RACE SETUP reaches only the game (its QuitGame prompt): answered No + the page's back
   call("backprompt", "fastTick")
+  call("couchpanel", "fastTick")   -- 0.15 COUCH CAMPAIGN: the guest's half of a reward / shop moment
+  call("couchprerun", "fastTick")  -- 0.15 COUCH CAMPAIGN: the guests' vehicle / racer style split at a run's start
+  call("couchpage", "fastTick")    -- 0.15 F01: the COUCH CAMPAIGN tile (Campaign tab) and its players page
+  call("gppage", "fastTick")       -- 0.16: the GALACTIC GRAND PRIX page (focus looks, LEFT / RIGHT traps, standings open)
   call("fastboot", "signInTick")   -- 0.13.0: the 10 s SIGN IN STATUS wait of every front-end visit skipped
   -- guests (GuestPauseMode "poll", or "hud" + GuestPauseFallback) and P1 while its HUD is re-hosted (P1PausePoll);
   -- pause.poll decides who. 0.7.0: it also runs the split-race pause layers A-G (HUD input guard, request hook arming,
   -- pre-created screen, guests' IMC_UI, focus, safety net, after-wreck restart). It must stay FIRST in this block:
   -- uxsplit.fastTick reads this tick's pause state from it (St.pause.menuWasPaused, full-screen effects override).
-  if isRace() then
+  if isRace() and not raceGone then
     call("pause", "poll")
     -- 0.7.1 (run I): guest-owned menus and shared post-race screens take A/B through a click bridge (after pause.poll:
     -- it reads this tick's St.pause.menuWasPaused)
     call("menubridge", "fastTick")
+    call("couch", "skipFast")      -- couch-livefix r3: the cinematic skip hold + its ring every FAST tick (PRERACE)
     -- 0.11.0: RESTART RACE (placed by pause.lua's calls): hook arming, the re-check of the row, the confirmed request ->
     -- RequestResetRace; after menubridge (a bridged Accept on the confirm dialog lands in this tick's pause state)
     call("restart", "fastTick")
@@ -252,6 +314,15 @@ local function fastTick()
     -- the game ends an offline race 2 s after the first human finish/wreck: the guard must see the armed timeout well
     -- inside that window; also no-wreck top-ups, slow-mo, the wrecked players' spectate/view guard
     call("wreck", "fastTick")
+    -- 0.15 COUCH CAMPAIGN rules: the campaign's result gate (one booking per race: best human / P1) + strike ledger
+    call("couchrules", "fastTick")
+    call("precision", "fastTick")  -- #86: every player's own precision-test gates (the game's need one PlayerState)
+    call("soloscore", "fastTick")  -- #37: each player's own takedown / ramjet score (P1 pinned as the game's tracked one)
+    call("couchbacker", "raceTick") -- couch-fix21 #90: each guest's own backer contract counted from his own car
+    call("couchfaults", "fastTick") -- couch-fix27 #109: a guest's critical malfunction faults HIS part, not P1's
+    call("instances", "fastTick")  -- #59: the guests' copies back on their own collision channel after a game profile switch
+    -- 0.15 COUCH CAMPAIGN: the pre-race /CHALLENGES (side bets) split - each guest's own challenges screen, P1's bridge
+    call("couchbets", "fastTick")
     -- 0.5.1: a local human's crash (not a wreck): guest crash view, fades, emulated slow-mo (wreck.lua owns wrecks)
     call("crashcam", "fastTick")
     call("viewguard", "fastTick")
@@ -261,16 +332,32 @@ local function fastTick()
     call("ignpad", "raceTick")     -- 0.13.0: P1's B recovers a critical malfunction (fed like a guest's)
     call("hud", "fastAfterburner") -- 0.13.0: guests' boost bars read their own car (the game reads player 0)
     call("hud", "fastRamjet")     -- 0.13.0: every player's ramjet bar shows its own car's heat (split races)
+    call("progress", "fastTick")  -- #38: every guest's own race-progress strip (top centre, his own car's view)
     -- 0.7.0: hidden message copies kept hidden, waiting copies matched, per-player danger tints / fades (~100 ms)
     call("uxsplit", "fastTick")
     -- 0.7.2: subtitle line poll (fallback of its config hook), line end -> clones idle, clone visibility; after pause.poll
     -- (it reads this tick's St.pause.menuWasPaused to hold its waiting requests while paused)
     call("subsplit", "fastTick")
+    call("debugai", "fastTick")    -- debug (cfg.DebugAiKey): L3 toggles the AI on the player's own car
+    call("split", "viewTick")      -- couch-livefix r2: dormant local players (plugged, never joined) hold no view
+  elseif St.phase == "OTHER" then
+    -- 0.15 COUCH CAMPAIGN: the paddock's shared screens (event map, NEXT PLANET overview, mystery list) take P1's A /
+    -- D-pad through menubridge's couch mode. Before this call the bridge never ran in the paddock (its couchPaddock
+    -- branch was dead code: "all planets unselectable", live 2026-10-14). Returns at once outside a couch campaign.
+    call("menubridge", "fastTick")
+    call("garagenative", "fastTick")   -- a guest's garage turn in the game's own garage (cfg.CouchGarageNative)
+    call("couch", "skipFast")          -- couch-livefix r3: the cinematic skip hold + its ring every FAST tick
   end
 end
 
 local function mainTick()
   call("phase", "tick")
+  call("couch", "tick")         -- 0.15 COUCH CAMPAIGN: shared-screen pad routing (paddock + post-race)
+  -- #82 couch-gauntlet (a TestCommands build only: loaded by testcmd): the next step armed on the run map's nodes
+  local gt = package.loaded["gauntlet"]
+  if type(gt) == "table" and type(gt.armTick) == "function" then U.try("gauntlet", gt.armTick) end
+  call("couchrun", "syncTick")  -- runsync: the guests' checkpoint journal (resume check, run-save clock fallback)
+  call("couchfavours", "runTick") -- #110: P1's run knocked out -> a guest's Mad Genius III token at the next tour
   if isFrontEnd() then
     local held = frontHeld()       -- 0.12.0: nothing of the dying front end during the launch hold
     if not held then call("lobby", "tick") end
@@ -288,12 +375,20 @@ local function mainTick()
     call("roster", "tick")
     call("launch", "raceTick")     -- LOADING: per-player vehicle override retries (cheap no-op otherwise)
     call("takeover", "tick")
+    call("couchrun", "raceTick")   -- 0.15 COUCH CAMPAIGN: a guest's seated pilot (his body) back after the travel
+    call("couchfavours", "raceTick") -- #110: each guest's own Mad Genius crash allowance, Underhanded Upperhand
+    call("garage", "raceTick")     -- 0.15 COUCH CAMPAIGN: a guest's own livery (his GARAGE) on his car once it exists
+    call("garage4", "raceTick")    -- 4-way garage (FREE MODE / GRAND PRIX): each player's livery on his car (P1 included)
     call("inputfix", "tick")       -- also polled by its own loop (cfg.InputFixOwnLoopMs); de-duplicated inside
     -- wreck before present/hud: this tick's HUD already knows the timeout fallback (Remaining line) state
     call("wreck", "tick")          -- backup of the FAST timeout guard (8 MAIN ticks inside the 2 s window)
     -- present first: this tick's HUD visibility already knows whether the race runs on one view
     if cfg.PresentFromMain == true then call("present", "tick") end
     call("hud", "tick")
+    call("couchsolo", "mainTick")       -- couch-fieldtest #35: a race-alone test's result screens show P1's own result + band
+    call("precision", "mainTick")       -- #86: the guests' own CHECKPOINT BONUS popups
+    call("soloscore", "mainTick")       -- #37: the guests' own takedown / ramjet counters in their HUDs
+    call("finishplate", "mainTick")     -- #96: a player out of the race sees his own result + WAITING FOR P2
     call("uxsplit", "tick")        -- 0.7.0: arm/disarm backup, this tick's HUD list, 1 s copy scan, MPC pin, probe
     call("subsplit", "tick")       -- 0.7.2: arm (once the subtitle widget exists) / disarm, players, layout, clones, probe
     call("nametags", "tick")
@@ -314,6 +409,7 @@ local function slowTick()
     call("join", "hotplugTick")    -- 0.8.1: a hot-plugged pad takes P1 (deferred from a race to the next front end)
   end
   call("diag", "periodic")
+  call("garagenative", "slowTick")   -- repairs P1's garage after an interrupted guest turn
 end
 
 local FAST = sched.every("fast", cfg.FastPollMs, fastTick)

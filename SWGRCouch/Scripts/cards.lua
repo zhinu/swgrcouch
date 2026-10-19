@@ -2367,7 +2367,7 @@ function M.layout(n)
             end
             local left = (i > 1) and gap or 0
             if bc.gap ~= left
-                and pcall(function() X.slots[i]:SetPadding({ Left = left, Top = 0, Right = 0, Bottom = 0 }) end) then
+                and U.ok(X.slots[i]) and pcall(function() X.slots[i]:SetPadding({ Left = left, Top = 0, Right = 0, Bottom = 0 }) end) then
                 bc.gap = left
             end
         end

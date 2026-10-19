@@ -842,7 +842,7 @@ function M.checkDriverConfig()
     return
   end
   local defs = eng.NetDriverDefinitions
-  local okN, n = pcall(function() return defs:GetArrayNum() end)
+  local okN, n = pcall(U.callMethod, defs, "GetArrayNum")
   if not okN or type(n) ~= "number" then
     U.warn(TAG, "checkDriverConfig: NetDriverDefinitions not readable")
     St.net.driverChecked = true

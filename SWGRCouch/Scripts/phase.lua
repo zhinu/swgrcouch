@@ -104,11 +104,20 @@ function M.stats() return stats end
 local PHOTO_CSM = "/Game/Griffin/Config/StateMachines/PauseMenus/CSM_PauseMenus_Photomode.CSM_PauseMenus_Photomode"
 local photo = { at = -1e12, v = false, why = nil, last = false }
 
+-- class names by pawn address, per world (couch-racefast: GetClass + FName -> string for every local pawn every 200 ms
+-- of the race; a pawn's class never changes, a new pawn - photo mode's - has another address)
+local pawnCls = { gen = nil, by = {} }
 local function pawnClassName(pc)
+  if pawnCls.gen ~= St.worldGen then pawnCls.gen, pawnCls.by = St.worldGen, {} end
   local ok, n = pcall(function()
     local p = pc.Pawn
     if not U.ok(p) then return "" end
-    return p:GetClass():GetFName():ToString()
+    local k = U.key(p)
+    local c = pawnCls.by[k]
+    if c then return c end
+    c = U.className(p)
+    if c ~= "" then pawnCls.by[k] = c end
+    return c
   end)
   return (ok and type(n) == "string") and n or ""
 end
@@ -120,7 +129,7 @@ local function detectPhoto()
     return U.ok(pm) and pm.bPhotoModeActive == true
   end)
   if okM and active then return true, "PhotoModeManager.bPhotoModeActive" end
-  for _, lp in ipairs(U.localPlayers()) do
+  for _, lp in ipairs(U.localPlayersRO()) do
     if U.ok(lp.pc) then
       local n = pawnClassName(lp.pc)
       if n:find("PhotoModePawn", 1, true) then return true, string.format("P%d possesses %s", lp.index, n) end
@@ -148,7 +157,7 @@ local function photoEdge()
   photo.last = v
   if v then
     local pawns = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
       if U.ok(lp.pc) then pawns[#pawns + 1] = string.format("P%d=%s", lp.index, pawnClassName(lp.pc)) end
     end
     U.log(TAG, "photo mode OPEN (%s); pawns: %s - modules back off until it closes", tostring(why),
@@ -285,6 +294,10 @@ local function racePhase(gs)
     if U.csmActive("CSM_PostRace", true) == true then return "POSTRACE" end
     return "RACING"
   end
+  -- a campaign CONTINUE saved in the post-event flow (EContinueRunState PostEvent) loads the race world straight into
+  -- the results / rewards (IsLoadingSaveIntoPostEvent): the race never starts, CSM_PostRace is active. Without this
+  -- the phase stayed PRERACE under the rewards and no POSTRACE module ran (no P2 reward area, live 2026-10-14).
+  if U.csmActive("CSM_PostRace", true) == true then return "POSTRACE" end
   local vehicles = gs.Vehicles
   if U.arrayCount(vehicles) > 0 then return "PRERACE" end
   return "LOADING"
@@ -374,7 +387,8 @@ local function onNewWorld(w, forced)
 end
 
 local function tickInner()
-  local w = U.world()
+  -- couch-fix60: the fresh world (U.world's RACING cache could hand out the old, not yet purged, race world)
+  local w = U.worldFresh()
   if not U.ok(w) then return "no world" end
   local wk = U.key(w)
   if wk ~= St.worldKey or forceNewWorld then
@@ -387,7 +401,7 @@ local function tickInner()
     -- GameState keeps its address; the transition world reads gs = nil; a client going 0 -> GameState is excluded),
     -- so a different non-zero GameState in the "same" world means a new world.
     -- VERIFY(V-DIAG-01): a "GameState replaced in place" line appears only after a hard travel (stats.gsWorlds).
-    local okG, g = pcall(function() return w.GameState end)
+    local okG, g = pcall(U.getField, w, "GameState")
     local gk0 = (okG and U.ok(g)) and U.key(g) or 0
     if gk0 ~= 0 and St.gsKey ~= 0 and gk0 ~= St.gsKey and not isTransitionMap() then
       stats.gsWorlds = stats.gsWorlds + 1
@@ -459,6 +473,31 @@ local function bootWatch(why)
       tostring(U.levelName()))
   end)
   U.warn(TAG, "phase still BOOT %.0f ms after load (%s); V-CORE-14", now - bootSinceMs, desc)
+end
+
+-- couch-fix60 (AUTO-146, crash_2026_10_18_21_32_31 + 22_25_08, live round 5, 2/2: pause > EXIT TO MAIN MENU > ACCEPT on
+-- the grid of a boss / head-to-head instances race). The game leaves a race by a SILENT seamless travel: every
+-- "leaving the race" of round 5 says "(poll)", no OnSeamlessTravelStarted / RequestReturnToMenus / LoadMap hook fires.
+-- The race world's pawns and AI PlayerStates are collected at the switch, but the race was only left at the next MAIN
+-- poll (up to 250 ms later); FAST ticks in between ran every race module on the dead race (instances' boss pacing read
+-- `p.PlayerState` of a freed pawn: UE4SS.dll+0x406099 in UStruct::FindProperty under the member __index, FName
+-- 0x1E0DB = PlayerState in both dumps). THIS, first thing of every FAST tick in a race phase: the current world
+-- against St.worldKey; a different (or no) world = the phase poll runs NOW (leaving -> "leaving" listeners -> new
+-- world generation) before any race module. -> true when the race modules must not run this tick.
+local fastGoneGen = nil
+function M.fastWorldCheck()
+  if not M.isRace() then return false end
+  local w = U.worldFresh()
+  local wk = U.key(w)
+  if wk ~= 0 and wk == St.worldKey and not forceNewWorld then return false end
+  stats.fastWorldChecks = (stats.fastWorldChecks or 0) + 1
+  if fastGoneGen ~= St.worldGen then
+    fastGoneGen = St.worldGen
+    U.log(TAG, "the race world is gone under the FAST loop (world %s -> %s, phase %s): phase poll now, before any race "
+      .. "module (AUTO-146)", tostring(St.worldKey), tostring(wk), tostring(St.phase))
+  end
+  if wk ~= 0 then M.tick() end
+  return true
 end
 
 function M.tick()

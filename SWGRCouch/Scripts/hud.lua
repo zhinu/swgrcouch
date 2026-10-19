@@ -112,6 +112,7 @@ local VIS_HIDE = C.E.Vis.Collapsed
 local RESULTS_LAYERS = { C.E.UILayer.Menu, C.E.UILayer.HUD, C.E.UILayer.MenuOverlay }
 
 local panelCls, userWidgetCls -- cached UClasses (re-validated)
+local initWorldGen = nil      -- St.worldGen when this Lua state initialised hud.lua (hot-reload sweeps)
 
 local function H() return St.hud end
 
@@ -183,6 +184,7 @@ end
 M._fitInterior = fitInterior
 
 local function fnameLower(w)
+    if not U.ok(w) then return "" end         -- GetFName on a null wrapper is a native AV
     local ok, s = pcall(function() return w:GetFName():ToString() end)
     if ok and s then return string.lower(s) end
     return ""
@@ -256,7 +258,8 @@ end
 local function ownedBy(x, w)
     local o = x
     for _ = 1, 6 do
-        local ok, nxt = pcall(function() return o:GetOuter() end)
+        if not U.ok(o) then return false end  -- GetOuter on a null wrapper is a native AV
+        local ok, nxt = pcall(U.callMethod, o, "GetOuter")
         if not ok or not U.ok(nxt) then return false end
         if sameObj(nxt, w) then return true end
         o = nxt
@@ -269,10 +272,10 @@ end
 -- the dead HUD's members. Checked: same class, same WidgetTree address, every cached member alive, and the
 -- first member's outer chain leads to w.
 local function cacheValid(e, w)
-    if not (e and sameObj(e.widget, w)) then return false end
-    local okC, cls = pcall(function() return w:GetClass() end)
+    if not (e and sameObj(e.widget, w)) or not U.ok(w) then return false end   -- U.ok: null w = native AV in GetClass
+    local okC, cls = pcall(U.callMethod, w, "GetClass")
     if not okC or U.key(cls) ~= e.clsKey then return false end
-    local okT, tree = pcall(function() return w.WidgetTree end)
+    local okT, tree = pcall(U.getField, w, "WidgetTree")
     if not okT or U.key(tree) ~= e.treeKey then return false end
     local m = e.m
     local probe
@@ -341,8 +344,9 @@ local function membersOf(w)
     if not res.bot then
         for _, n in ipairs(BOT_NAMES) do local x = w[n]; if U.ok(x) then res.bot = x; break end end
     end
-    local okC, cls = pcall(function() return w:GetClass() end)
-    local okT, tree = pcall(function() return w.WidgetTree end)
+    local okC, cls = false, nil
+    if U.ok(w) then okC, cls = pcall(U.callMethod, w, "GetClass") end   -- U.ok: null GetClass = native AV
+    local okT, tree = pcall(U.getField, w, "WidgetTree")
     h.found[k] = { widget = w, m = res, clsKey = okC and U.key(cls) or 0, treeKey = okT and U.key(tree) or 0 }
     U.dbg(TAG, "members of %s: laps=%d pos=%d bot=%s markers=%s", U.pathOf(w), #res.laps, #res.poss,
         tostring(res.bot ~= nil), tostring(res.markers ~= nil))
@@ -420,7 +424,7 @@ end
 local function holoOf(bot)
     if not U.ok(bot) then return nil end
     for _, n in ipairs({ "WBP_Hud_CharacterHolo", "WBP_Hud_CharacterHolo_Memory" }) do
-        local ok, x = pcall(function() return bot[n] end)
+        local ok, x = pcall(U.getField, bot, n)
         if ok and U.ok(x) then return x end
     end
     return nil
@@ -452,6 +456,16 @@ local function viewSizes(lps)
         if U.ok(g) then twoP = g.TwoPlayerSplitscreenLayout end   -- Byte, written by split.applyLayoutSettings
     end)
     local n, views = #lps, {}
+    -- couch-livefix r2: dormant local players hold no view (split.lua): the joined players' own rects
+    local vf = nil
+    pcall(function() vf = lazy("split").viewFractions() end)
+    if type(vf) == "table" then
+        for _, lp in ipairs(lps) do
+            local f = vf[lp.index]
+            if f then views[lp.index] = { w = f.fw * full.w, h = f.fh * full.h } end
+        end
+        return views, full, single
+    end
     for _, lp in ipairs(lps) do
         local fw, fh = 1, 1
         if n == 2 then
@@ -735,9 +749,9 @@ end
 -- Who owns a widget, for the log: "P1", "P<n> (guest)", "none", or "other <path>" (a PC that is no local player,
 -- e.g. a stale PC of the previous world).
 local function ownerDesc(w)
-    local okO, owner = pcall(function() return w:GetOwningPlayer() end) -- UWidget:GetOwningPlayer() -> Object
+    local okO, owner = pcall(U.callMethod, w, "GetOwningPlayer") -- UWidget:GetOwningPlayer() -> Object
     if not okO or not U.ok(owner) then return "none", nil end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if sameObj(lp.pc, owner) then
             if lp.index == 1 then return "P1", owner end
             return string.format("P%d (guest, ctrlId %s)", lp.index, tostring(lp.ctrlId)), owner
@@ -758,8 +772,8 @@ local function noteGameHud(w, how)
     loggedHud[k] = true
     fitInterior(w, "game")                                -- P1's view in 4P is a quarter too (rehost / leave modes)
     local desc = ownerDesc(w)
-    local okV, inVp = pcall(function() return w:IsInViewport() end)
-    local okP, par = pcall(function() return w:GetParent() end)
+    local okV, inVp = pcall(U.callMethod, w, "IsInViewport")
+    local okP, par = pcall(U.callMethod, w, "GetParent")
     -- VERIFY(V-HUD-02c): which object owns the UIManager-created race HUD (expected P1; session B suggests not).
     U.log(TAG, "game HUD %s via %s: owner=%s inViewport=%s parent=%s", U.pathOf(w), how, desc,
         tostring(okV and inVp), (okP and U.ok(par)) and U.pathOf(par) or "none")
@@ -1023,11 +1037,57 @@ local function syncEventInfo(e)
     end
 end
 
+-- #37: a race-alone test's counter that soloscore.lua feeds from the guest's OWN score (his private RaceEventVM)
+local function ownCounter(n)
+    local ok, own = pcall(function() return U.mod("soloscore").ownsGuestCounter(n) end)
+    if ok and own == true then return true end
+    -- #86: the precision test's CHECKPOINT BONUS popup, fed from the guest's own gates (precision.lua)
+    local okP, ownP = pcall(function() return U.mod("precision").ownsGuestCounter(n) end)
+    return okP and ownP == true
+end
+
+-- #69 (tester #3, Sentinel I precision test): P2's HUD had no target-time line, P1's showed 01:45.00. WBP_Hud_BestLapTime
+-- (decoded) shows the race VM's BestTime (bWantsBestTime: P1's own best = collapsed in a guest HUD) OR its
+-- CurrentTargetTime (bWantsTargetTime: the event's target, picked by the shared clock) - the same for every player of a
+-- race-alone test (couchsolo: field tests, podracer tests), so a guest keeps it there.
+local function sharedTargetTime(n)
+    if string.lower(n) ~= "wbp_hud_bestlaptime" then return false end
+    local ok, yes = pcall(function()
+        local cs = U.mod("couchsolo")
+        if not cs.raceAlone() then return false end
+        local vm = cs._raceVM()
+        return U.ok(vm) and vm.bWantsTargetTime == true and vm.bWantsBestTime ~= true
+    end)
+    return ok and yes == true
+end
+
+-- soloscore.lua: the members named `name` of a guest HUD entry (its widget tree walk, cached)
+function M.guestMembers(e, name)
+    if not (e and U.ok(e.widget)) then return {} end
+    local mem = membersOf(e.widget)
+    local out = {}
+    for _, x in ipairs((mem and mem.raw and mem.raw[string.lower(name)]) or {}) do if U.ok(x) then out[#out + 1] = x end end
+    return out
+end
+
 local function collapseGlobalParts(e, mem)
     if e.pnum == 1 then return end -- P1's clone shows P1's own global data: nothing to hide
+    -- #38 (progress.lua): the guest's own race-progress strip keeps the map's centre triangle (his own mark)
+    local keep = nil
+    local prog = lazy("progress")
+    if prog and type(prog.guestKeeps) == "function" then
+        local okK, k = pcall(prog.guestKeeps, e.widget)
+        if okK and type(k) == "table" then keep = k end
+    end
     for _, n in ipairs(cfg.GuestHudCollapse or {}) do
         local l = mem.raw[string.lower(n)]
-        if l and #l > 0 then
+        if ownCounter(n) then
+            U.logOnce("hud.owncounter." .. n, TAG, "guest HUDs: %s kept (fed from each guest's own score: soloscore)", n)
+        elseif sharedTargetTime(n) then
+            U.logOnce("hud.target." .. n, TAG, "guest HUDs: %s kept (the test's target time: the same for every player)", n)
+        elseif keep and keep[string.lower(n)] then
+            U.logOnce("hud.keep." .. n, TAG, "guest HUDs: %s kept (the race-progress strip's own mark)", n)
+        elseif l and #l > 0 then
             for _, x in ipairs(l) do
                 if U.ok(x) then
                     x:SetVisibility(VIS_HIDE)
@@ -1036,7 +1096,7 @@ local function collapseGlobalParts(e, mem)
             end
         else
             U.logOnce("hud.nocollapse." .. n, TAG, "GuestHudCollapse member %s not found in %s", n,
-                U.pathOf(e.widget:GetClass()))
+                U.pathOf(U.ok(e.widget) and e.widget:GetClass() or nil))
         end
     end
     if cfg.GuestHudNotifications == "remove" then
@@ -1068,6 +1128,8 @@ local function collapseGlobalParts(e, mem)
         end
     end
 end
+
+M._collapseGlobalParts = collapseGlobalParts   -- for tools/test_progress.lua
 
 -- Create (once per PC per race) the HUD of a local player other than the HUD owner of the game.
 function M.ensureGuest(pc, pnum)
@@ -1108,7 +1170,7 @@ function M.ensureGuest(pc, pnum)
     -- then the clone's bindings are P1's only pause path)
     local gameHudIsP1s = false
     if pnum == 1 and U.ok(p1hud) then
-        local okO, o = pcall(function() return p1hud:GetOwningPlayer() end)
+        local okO, o = pcall(U.callMethod, p1hud, "GetOwningPlayer")
         gameHudIsP1s = okO and sameObj(o, pc)
     end
     if pnum == 1 and cfg.P1CloneInput ~= true and gameHudIsP1s then
@@ -1139,7 +1201,7 @@ function M.ensureGuest(pc, pnum)
     -- Memory-variant lap counters (rewritten every Tick by their BP): need the UpdateCurrentLap post-hook
     e.memoryLaps = {}
     for _, lc in ipairs(e.lapCounterList) do
-        local okP, cp = pcall(function() return U.pathOf(lc:GetClass()) end)
+        local okP, cp = pcall(function() return U.pathOf(U.ok(lc) and lc:GetClass() or nil) end)
         if okP and cp == C.BP.LapCounterMemory then e.memoryLaps[#e.memoryLaps + 1] = lc end
     end
     e.memoryLapSet = {}
@@ -1364,7 +1426,8 @@ end
 -- MulticastInline, runtime JMAP) is scanned with UE4SS's GetBindings; a binding whose object is a widget owned by
 -- this guest's PC is removed there and added (same UFunction name) to the guest car's delegate. The guest car's own
 -- events then drive the guest's parts. The two ignition delegates are left to present.lua (its own re-point).
--- Scanned every MAIN tick for the first ~10 s of a HUD (BP bindings may come late), then every ~2 s; a guest car
+-- Scanned in slices (VD_SLICE_EARLY / VD_SLICE delegates per MAIN tick): a full sweep every ~1.5 s for the first
+-- ~10 s of a HUD (BP bindings may come late), then every ~2 s; a guest car
 -- change (takeover) re-adds the learned bindings to the new car. A failing API sets e.rebindFailed (logged once).
 -- VERIFY(V-HUD-10): "P2 HUD: n binding(s) moved from P1's car" and P2's boost/throttle icons follow P2's car.
 local VD_NAMES = {
@@ -1386,6 +1449,7 @@ local VD_NAMES = {
     "OnShieldCorrosionStarted", "OnShieldCorrosionFinished", "OnSlowMotionTriggered", "OnSlowMotionEnded",
     "OnCinematicCameraSwitch", "OnVehicleDamagedDelegate",
 }
+local VD_SLICE_EARLY, VD_SLICE = 10, 8   -- GetBindings per MAIN tick (first ~10 s of a HUD / afterwards)
 
 local function ownedByPC(obj, pc)
     local ok, r = pcall(function() return sameObj(obj:GetOwningPlayer(), pc) end)
@@ -1400,6 +1464,62 @@ end
 -- if its bar's "Vehicle State" is not that car's, Construct is run again on the three widgets (they bind the car the
 -- game's way). Once per car per HUD (a re-run on a bound widget would double its bindings).
 local RAMJET_WIDGETS = { "WBP_HUD_RamjetBar_C", "WBP_Hud_RamjetOverheatWarning_C", "WBP_Hud_RamjetMessage_C" }
+-- Race smoothness (Jules 2026-10-15: hud.tick spikes up to ~97 ms at the race start): the three FindAllOf walks above
+-- (~30 ms each in a race world) ran in ONE MAIN tick per guest car. The widgets now report themselves through
+-- NotifyOnNewObject (hud.init, one notify per class, the wrapper only stored: no UObject work in the callback) and
+-- are read from that list. Without the notify (or no bar of this player reported after RJ_SEEN_WAIT_TICKS) the walk
+-- runs one class per MAIN tick, and the two other classes are walked only when the bar is not bound yet.
+local RAMJET_PATHS = {
+    WBP_HUD_RamjetBar_C = "/Game/Griffin/UI/Widgets/HUD/WBP_HUD_RamjetBar.WBP_HUD_RamjetBar_C",
+    WBP_Hud_RamjetOverheatWarning_C =
+        "/Game/Griffin/UI/Widgets/HUD/WBP_Hud_RamjetOverheatWarning.WBP_Hud_RamjetOverheatWarning_C",
+    WBP_Hud_RamjetMessage_C = "/Game/Griffin/UI/Widgets/HUD/WBP_Hud_RamjetMessage.WBP_Hud_RamjetMessage_C",
+}
+local RJ_SEEN_MAX = 64            -- wrappers kept per class (oldest dropped; dead ones pruned on read)
+-- couch-racegc (live 2026-10-16: hud.fastAfterburner 16 spikes of 20-25 ms per race = its FindAllOf every 15 s; the
+-- ramjet re-find walk ~19 more): the afterburner bars report themselves too; both re-finds read these lists.
+local AB_PATH = "/Game/Griffin/UI/Widgets/HUD/WBP_HUD_Afterburner.WBP_HUD_Afterburner_C"   -- live class path
+local abSeen = {}                 -- afterburner bar wrappers reported by NotifyOnNewObject (cleared on "leaving")
+function M._abSeen(obj)
+    if obj == nil then return end
+    abSeen[#abSeen + 1] = obj
+    if #abSeen > RJ_SEEN_MAX then table.remove(abSeen, 1) end
+end
+-- the live wrappers of a seen list (dead ones dropped from it)
+local function seenAlive(list)
+    local keep = {}
+    for _, w in ipairs(list) do if U.ok(w) then keep[#keep + 1] = w end end
+    return keep
+end
+local RJ_SEEN_WAIT_TICKS = 8      -- MAIN ticks (~2 s) a guest car waits for a reported bar before the walk fallback
+local rjSeen = {}                 -- short class -> wrappers reported by NotifyOnNewObject (cleared on "leaving")
+
+-- NotifyOnNewObject callback (hud.init): store only (the object is still being constructed).
+function M._rjSeen(cn, obj)
+    if obj == nil or RAMJET_PATHS[cn] == nil then return end
+    local l = rjSeen[cn]
+    if not l then l = {}; rjSeen[cn] = l end
+    l[#l + 1] = obj
+    if #l > RJ_SEEN_MAX then table.remove(l, 1) end
+end
+function M._rjSeenClear() rjSeen = {}; abSeen = {} end
+
+-- the live wrappers of one class owned by pc: from the notify list (pruned), or one FindAllOf walk
+local function ramjetOwned(cn, pc, fromWalk)
+    local out, keep = {}, {}
+    local src = fromWalk and (FindAllOf(cn) or {}) or (rjSeen[cn] or {})
+    for _, w in ipairs(src) do
+        if U.ok(w) then
+            if not fromWalk then keep[#keep + 1] = w end
+            pcall(function()
+                if U.key(w:GetOwningPlayer()) == U.key(pc) then out[#out + 1] = w end
+            end)
+        end
+    end
+    if not fromWalk then rjSeen[cn] = keep end
+    return out
+end
+
 local function rebindRamjet(e)
     if cfg.HudGuestRamjetFix == false then return end
     local pawn = e.pc.Pawn
@@ -1408,29 +1528,55 @@ local function rebindRamjet(e)
     if e.ramjetCar == ck then return end
     local vs = pawn.VehicleState
     if not U.ok(vs) then return end
-    local bars, others = {}, {}
-    for i, cn in ipairs(RAMJET_WIDGETS) do
-        for _, w in ipairs(FindAllOf(cn) or {}) do
-            pcall(function()
-                if U.ok(w) and U.key(w:GetOwningPlayer()) == U.key(e.pc) then
-                    if i == 1 then bars[#bars + 1] = w else others[#others + 1] = w end
+    local function isBound(bars)
+        local bound = false
+        pcall(function() local cur = bars[1]["Vehicle State"]; bound = U.ok(cur) and U.key(cur) == U.key(vs) end)
+        return bound
+    end
+    local bars, others
+    local rw = e.rjWalk
+    if rw and rw.ck ~= ck then rw = nil; e.rjWalk = nil end
+    if not rw and _G.SWGRCouch_rjSeenNotify == true then
+        bars = ramjetOwned(RAMJET_WIDGETS[1], e.pc, false)
+        if #bars == 0 then
+            e.rjSeenWait = (e.rjSeenWait or 0) + 1
+            if e.rjSeenWait < RJ_SEEN_WAIT_TICKS then return end   -- the HUD's parts are not built yet: the next tick
+            U.logOnce("hud.rjseenmiss", TAG, "ramjet bar of P%s not reported by NotifyOnNewObject: one FindAllOf per "
+                .. "MAIN tick instead", tostring(e.pnum))
+        else
+            others = {}
+            if not isBound(bars) then
+                for i = 2, #RAMJET_WIDGETS do
+                    for _, w in ipairs(ramjetOwned(RAMJET_WIDGETS[i], e.pc, false)) do others[#others + 1] = w end
                 end
-            end)
+            end
         end
     end
-    if #bars == 0 then return end                       -- the HUD's parts are not built yet: the next tick
-    e.ramjetCar = ck
-    local bound = false
-    pcall(function() local cur = bars[1]["Vehicle State"]; bound = U.ok(cur) and U.key(cur) == U.key(vs) end)
-    if bound then
+    if not others then
+        -- walk fallback: ONE class per MAIN tick (a FindAllOf is ~30 ms in a race world)
+        rw = rw or { ck = ck, i = 1, bars = {}, others = {} }
+        e.rjWalk = rw
+        local cn = RAMJET_WIDGETS[rw.i]
+        for _, w in ipairs(ramjetOwned(cn, e.pc, true)) do
+            if rw.i == 1 then rw.bars[#rw.bars + 1] = w else rw.others[#rw.others + 1] = w end
+        end
+        if rw.i == 1 then
+            if #rw.bars == 0 then e.rjWalk = nil; return end   -- the HUD's parts are not built yet: the next tick
+            if isBound(rw.bars) then rw.i = #RAMJET_WIDGETS end -- bound: the other classes are not needed
+        end
+        if rw.i < #RAMJET_WIDGETS then rw.i = rw.i + 1; return end
+        bars, others, e.rjWalk = rw.bars, rw.others, nil
+    end
+    if #bars == 0 then return end
+    e.ramjetCar, e.rjSeenWait = ck, nil
+    if isBound(bars) then
         U.log(TAG, "P%s ramjet bar already bound to its car (V-HUD-RJ)", tostring(e.pnum))
         return
     end
     local n = 0
     for _, w in ipairs(bars) do if pcall(function() w:Construct() end) then n = n + 1 end end
     for _, w in ipairs(others) do if pcall(function() w:Construct() end) then n = n + 1 end end
-    local okB = false
-    pcall(function() local cur = bars[1]["Vehicle State"]; okB = U.ok(cur) and U.key(cur) == U.key(vs) end)
+    local okB = isBound(bars)
     U.log(TAG, "P%s ramjet bar / overheat widgets bound to P%s's car: Construct re-run on %d widget(s), bar %s (V-HUD-RJ)",
         tostring(e.pnum), tostring(e.pnum), n, okB and "ok" or "STILL UNBOUND")
 end
@@ -1461,7 +1607,15 @@ local function rebindToGuestCar(e)
                 end
             end
         end
-        if r.ticks > 40 and r.ticks % 8 ~= 0 then return end   -- ~10 s every tick, then every ~2 s
+        -- a SLICE of the delegates per MAIN tick (race smoothness 2026-10-15: all 57 GetBindings in one tick, every
+        -- tick for ~10 s and then every ~2 s, made the patchGuest spikes): a full sweep every ~1.5 s for the first
+        -- ~10 s, then every ~2 s, as before
+        local per = (r.ticks <= 40) and VD_SLICE_EARLY or VD_SLICE
+        local names = {}
+        for _ = 1, math.min(per, #VD_NAMES) do
+            r.cursor = (r.cursor or 0) % #VD_NAMES + 1
+            names[#names + 1] = VD_NAMES[r.cursor]
+        end
         local vd = p1car.VehicleDelegates
         if not U.ok(vd) then return end
         -- 0.7.0 (V-UX-10): the game's own hidden HUD ("clone" mode) is owned by a guest PC too (the UIManager's owner in
@@ -1469,7 +1623,7 @@ local function rebindToGuestCar(e)
         -- the global MPC, its critical-malfunction dimming is invisible anyway), never moved to the guest's car.
         local gameHud = (cfg.UxSplitGameHud ~= false and p1Mode() == "clone" and U.ok(H().p1hud)) and H().p1hud or nil
         local moved, stripped = 0, 0
-        for _, name in ipairs(VD_NAMES) do
+        for _, name in ipairs(names) do
             local md = vd[name]
             for _, b in ipairs(md:GetBindings() or {}) do
                 local obj = b.Object
@@ -1594,9 +1748,22 @@ function M.patchGuest(e)
     -- position: only when the HUD's owner PS is not the racer [HUD 6 #6]: a takeover without PlayerState adoption,
     -- or (client) an adoption whose raw pc.PlayerState write did not replicate (V-TKO-05) while the pawn's
     -- PlayerState (set natively in PossessedBy, replicated) is the racer. Independent of cfg.TakeoverAdoptPS.
+    -- couch-trial2: a mission with instances shows the place inside the player's OWN race (instances.lua)
+    local instPos = nil
+    if e.posWidgets and #e.posWidgets > 0 and U.ok(ps) then
+        local inst = lazy("instances")
+        if inst and type(inst.localPosition) == "function" then
+            local okI, lp = pcall(inst.localPosition, ps)
+            if okI and type(lp) == "number" then
+                instPos = lp
+                U.logOnce("hud.instpos" .. tostring(e.pnum) .. ":" .. tostring(St.worldGen), "instances", "HUD: P%s's position shows his own race's place "
+                    .. "(%d now; global %s)", tostring(e.pnum), lp, tostring(comp and U.ok(comp) and comp.EventPosition))
+            end
+        end
+    end
     if e.posWidgets and #e.posWidgets > 0 and comp and U.ok(comp) and U.ok(ps)
-        and not sameObj(ps, e.pc.PlayerState) then
-        local pos = comp.EventPosition
+        and (instPos ~= nil or not sameObj(ps, e.pc.PlayerState)) then
+        local pos = instPos or comp.EventPosition
         if type(pos) == "number" and pos > 0 then
             local ps_ = tostring(pos)
             for _, pw in ipairs(e.posWidgets) do
@@ -1826,7 +1993,7 @@ local function logResultsInput(w)
         local modal = w.bIsModal                       -- UCommonActivatableWidget.bIsModal (Bool property)
         local cfgDesc = "?"
         -- BP_GetDesiredInputConfig() -> Struct FUIInputConfig (BlueprintNativeEvent, 0 params); may not be callable
-        local okC, ic = pcall(function() return w:BP_GetDesiredInputConfig() end)
+        local okC, ic = pcall(U.callMethod, w, "BP_GetDesiredInputConfig")
         if okC and type(ic) == "table" then
             local parts = {}
             for k, v in pairs(ic) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
@@ -1945,7 +2112,7 @@ function M.manageSpectateWidget()
         if h.spectateVis == nil then h.spectateVis = cur end
         if cur ~= VIS_HIDE then w:SetVisibility(VIS_HIDE) end     -- re-applied: the CSM/BP may show it again
         if mode == "hide_inactive" and not h.spectateDeactivated then
-            local okA, act = pcall(function() return w:IsActivated() end)
+            local okA, act = pcall(U.callMethod, w, "IsActivated")
             if okA and act == true and pcall(function() w:DeactivateWidget() end) then h.spectateDeactivated = true end
         end
         return
@@ -2066,7 +2233,7 @@ local function sweepOrphanP1Clones(h)
             if isGame or not sameObj(w:GetOwningPlayer(), p1) then return end
             local hudClass = false
             for _, cls in ipairs(classes) do
-                local okA, isA = pcall(function() return w:IsA(cls) end)  -- UObject:IsA(UClass) [UE4SS]
+                local okA, isA = pcall(U.callMethod, w, "IsA", cls)  -- UObject:IsA(UClass) [UE4SS]
                 if okA and isA == true then hudClass = true end
             end
             if not hudClass then return end
@@ -2173,7 +2340,7 @@ local function stillRacingPC(pc)
     local ps = racerPS(pc)
     local comp = U.ok(ps) and ps.RaceEventComponent or nil
     if not (comp and U.ok(comp)) then return nil end
-    local ok, r = pcall(function() return comp:IsStillRacing() end)
+    local ok, r = pcall(U.callMethod, comp, "IsStillRacing")
     if not ok or type(r) ~= "boolean" then return nil end
     return r
 end
@@ -2249,6 +2416,7 @@ function M.fastChallenge()
             if text and not U.ok(e.chalTx) and St.nowMs() >= (e.chalRetryMs or 0) then
                 local tx = timerBox(e)
                 local okC = pcall(function()
+                    if not U.ok(tx) then error("no timer text yet") end   -- GetClass on a null wrapper = native AV
                     local tw = StaticConstructObject(tx:GetClass(), tx:GetOuter())
                     tx:GetParent():AddChildToHorizontalBox(tw)
                     -- the timer's Font_Numbers has digits only (live: "BOOST 38 S" showed "38"): the HUD labels'
@@ -2295,11 +2463,21 @@ function M.fastAfterburner()
     local lps = U.localPlayers(); if #lps < 2 then return end
     local now = St.nowMs()
     if AB.world ~= St.worldGen then AB.e = {}; AB.world = St.worldGen; AB.findMs = -1e12 end
-    if now - AB.findMs > 2000 then
+    -- STUTTER FIX (2026-10-14 tick profiler: 18-20 ms spikes every 2 s here): the FindAllOf (a walk of the whole object
+    -- array) runs every 2 s only while a guest has no driven bar yet, else every 15 s; the library CDO is cached.
+    local guests = #lps - 1
+    local have = 0; for _, x in pairs(AB.e) do if U.ok(x.w) then have = have + 1 end end
+    if now - AB.findMs > ((have >= guests) and 15000 or 2000) then
         AB.findMs = now
         local p1 = U.key(lps[1].pc)
-        local lib = StaticFindObject(KMLIB)
-        for _, w in ipairs(FindAllOf("WBP_HUD_Afterburner_C") or {}) do pcall(function()
+        local lib = U.findLoaded(KMLIB)
+        local src
+        if _G.SWGRCouch_abNotify == true then
+            abSeen = seenAlive(abSeen); src = abSeen          -- reported by NotifyOnNewObject: no object-array walk
+        else
+            src = FindAllOf("WBP_HUD_Afterburner_C") or {}
+        end
+        for _, w in ipairs(src) do pcall(function()
             local wk = U.key(w)
             if AB.e[wk] or not (U.ok(w) and w:IsVisible()) then return end
             local pc = w:GetOwningPlayer()
@@ -2336,22 +2514,118 @@ end
 -- 0.13.0 (Jules, live 2026-10-12, URGENT: "the bar fills in solo, it's only broken in split"): WBP_HUD_RamjetBar's
 -- Tick fills its material from UIBlueprintFunctionLibrary.GetEngineOverheatingPercentage(self) /
 -- GetRamJetReadyGaugePercentage(self), which read PLAYER 0's car: in a split race every bar showed P1's ramjet (live:
--- P2's bars carried P1's values). P1's bar is right; a guest's bar image gets a material instance of its own (the BP
--- keeps writing its own one, no longer drawn) driven here from the player's own car (P1 too: one verified path), with the game's mapping recorded live
--- in solo (2026-10-12 18:47): RamjetPercentage = RamjetHeat x EngineHeatWeight while the ramjet runs (RamjetState 3 /
--- 6), else 0; ChargingPercentage = 1 from Ready (state >= 1), else ~1 - heat / 0.47 while it recharges; [B]IsReady? =
--- 1 from Ready; [B]Overheated = clamp(remap(fill, 0.8 w, 1.1 w)). Every FAST tick while racing, bars re-found every 2 s.
+-- P2's bars carried P1's values). Every bar image gets a material instance of its own (the BP keeps writing its own
+-- one, no longer drawn) driven here from the player's own car (P1 too: one verified path), with the game's mapping
+-- recorded live in solo (2026-10-12 18:47): RamjetPercentage = RamjetHeat x EngineHeatWeight while the ramjet runs
+-- (RamjetState 3 / 6), else 0; ChargingPercentage = 1 from Ready (state >= 1), else the recharge gauge;
+-- [B]IsReady? = 1 from Ready; [B]Overheated = clamp(remap(fill, 0.8 w, 1.1 w)).
+-- 0.15 REGRESSION FIX (Jules 2026-10-15, own pad, split: "no fill in the bottom-right bar, no redline alert", P1 and
+-- P2; worked in 0.13.1):
+--   * dac2e9b re-found the bars every 15 s once each player had a LIVE one. A bar the game rebuilds (pause -> HUD
+--     re-placed, CSM hand-over) leaves the old widget alive (not collected yet), so the new, DRAWN bar stayed on the
+--     game's own material for up to 15 s per rebuild - and the game's material fills from player 0 / its own unbound
+--     "Vehicle State". Back to the 0.13.1 rule: re-found every 2 s (RJ_FIND_MS), plus at once when a driven bar is
+--     no longer visible.
+--   * the bar's Construct (work/ramjet/WBP_HUD_RamjetBar.disasm.txt @1426) runs IMG_Ramjet:SetBrushFromMaterial(
+--     this.Material) again whenever the widget is re-constructed (re-added after a pause, hud.rebindRamjet's Construct
+--     re-run): our material was then no longer the one drawn, forever (the instance was only made once per widget).
+--     Now the drawn brush is checked every tick and our material put back (V-HUD-RJ3).
+--   * the game's CheckShouldSetMinimumHeat: while ramjetting a fill under MinRamjetPercentage eases to it (lerp 0.5
+--     per Tick), so the game's bar shows from the first frame of a burn even before the heat climbs; ours sat at 0.
 local KML = "/Script/Engine.Default__KismetMaterialLibrary"
+local RJ_FIND_MS = 2000
+-- live2 stutter hunt (Jules 2026-10-15: "races must be flawless"): the FindAllOf walk costs up to ~30 ms in a 2P race
+-- (a visible hitch) and ran every 1-2 s all race long. Re-finds are now event-driven: a NEW bar widget (the game's
+-- HUD rebuild: race start, CSM hand-over, pause / resume) is reported by NotifyOnNewObject (hud.init) and re-found
+-- RJ_NEW_DELAYS after it; a resume re-finds too; a driven bar collected or hidden re-finds at once (max 1/s). No
+-- periodic walk once the notify is installed (cfg.HudRamjetPeriodicFind = true brings the 2 s walk back).
+local RJ_HIDDEN_MIN_MS = 1000
+local RJ_NEW_DELAYS = { 150, 1500 }
+local RJ_BAR_CLASS = "/Game/Griffin/UI/Widgets/HUD/WBP_HUD_RamjetBar.WBP_HUD_RamjetBar_C"
+function M._rjNewBar() local h = H(); h.rjNewMs = St.nowMs(); h.rjNewDone = 0 end   -- notify callback: no UObject work
+
+-- pure: the material values of one bar from the car's ramjet values. prevFill = the bar's last fill (the game eases
+-- toward its minimum from the value already on the material), minFill = the bar's MinRamjetPercentage (nil/0 = none).
+-- -> { EngineHeatWeight, RamjetPercentage, ChargingPercentage, IsReady, Overheated }
+function M.ramjetParams(st, heat, bypassOverheat, bypassHeat, wt, prevFill, minFill)
+    st = tonumber(st) or 0
+    heat = math.max(0, tonumber(heat) or 0)
+    wt = tonumber(wt) or 0.74
+    -- live 18:55 (explosion recorded): 3 on, 4 overheating (heat 1.0), 7 exploded; the fill must stay through 4-7
+    -- box 1 = heat x w while on (3); box 2 = the overheat (4-6): w + BypassOverheatingPercentage x (1 - w)
+    -- (live 19:06: 0.23 -> 0.83 -> 1.0 at the explosion, state 7 = full)
+    local fill = 0
+    if st == 3 then
+        fill = math.min(1, heat) * wt
+        local mn = tonumber(minFill) or 0
+        if mn > 0 and fill < mn then                       -- the game's CheckShouldSetMinimumHeat
+            local prev = math.max(0, math.min(1, tonumber(prevFill) or 0))
+            fill = prev + (mn - prev) * 0.5
+        end
+    elseif st >= 4 and st <= 6 then
+        -- live 2026-10-15 final (autopilot burn, RJDIAG vs GetEngineOverheatingPercentage): heat x w + bypass x (1 - w);
+        -- state 6 cools down with the heat (0.94 -> 0.10), the old "w + bypass" froze our bar at 0.74 until state 0
+        local by = math.max(0, math.min(1, tonumber(bypassOverheat) or 0))
+        fill = math.min(1, heat) * wt + by * (1 - wt)
+    elseif st == 7 then
+        fill = 1
+    end
+    -- charging gauge refit live 2026-10-15 00:10 against the game's own GetRamJetReadyGaugePercentage (player 0, 26
+    -- samples): ready = (1 - RamjetBypassHeat) x (1 - heat / 0.5) while recharging, 1 from Ready (state >= 1)
+    local byp = math.max(0, math.min(1, tonumber(bypassHeat) or 0))
+    local charge = (st >= 1) and 1 or math.max(0, math.min(1, (1 - byp) * (1 - heat / 0.5)))
+    return { EngineHeatWeight = wt, RamjetPercentage = fill, ChargingPercentage = charge,
+             IsReady = (st >= 1) and 1 or 0, Overheated = math.max(0, math.min(1, (fill - 0.8 * wt) / (0.3 * wt))) }
+end
+
+local function brushIs(w, mid)
+    local ok, same = pcall(function() return U.key(w.IMG_Ramjet.Brush.ResourceObject) == U.key(mid) end)
+    if ok then return same end
+    return nil                                             -- unreadable: the caller re-brushes on a timer
+end
+
 function M.fastRamjet()
     if St.phase ~= "RACING" or cfg.HudRamjetDrive == false then return end
     local h = H()
     local lps = U.localPlayers()
     if #lps < 2 then return end                          -- solo: the game's own HUD is right
     local now = St.nowMs()
-    if now - (h.rjFindMs or -1e12) > 2000 or h.rjWorld ~= St.worldGen then
-        if h.rjWorld ~= St.worldGen then h.rjMid = {} end
+    local paused = false
+    pcall(function() paused = U.csmPaused() == true end)
+    if h.rjPaused and not paused then M._rjNewBar() end           -- a resume: the HUD may be re-placed
+    h.rjPaused = paused
+    local refind = h.rjWorld ~= St.worldGen or h.rjBars == nil
+    if not _G.SWGRCouch_rjNotify or cfg.HudRamjetPeriodicFind == true then
+        refind = refind or now - (h.rjFindMs or -1e12) > RJ_FIND_MS   -- no notify: the 0.13.1 periodic walk
+    end
+    if h.rjNewMs then                                             -- a new bar: re-find after each delay, once
+        local d = RJ_NEW_DELAYS[(h.rjNewDone or 0) + 1]
+        if d == nil then h.rjNewMs = nil
+        elseif now - h.rjNewMs >= d then refind = true; h.rjNewDone = (h.rjNewDone or 0) + 1 end
+    end
+    if not refind then
+        for _, bars in pairs(h.rjBars) do                -- a driven bar hidden / collected: its successor at once
+            for _, w in ipairs(bars) do
+                if not U.ok(w) then refind = true; break end
+                local okV, vis = pcall(U.callMethod, w, "IsVisible")
+                if okV and vis == false then refind = true; break end
+            end
+            if refind then break end
+        end
+        if refind and now - (h.rjFindMs or -1e12) < RJ_HIDDEN_MIN_MS then refind = false end   -- at most 1 walk per second
+    end
+    if refind then
+        h.rjFinds = (h.rjFinds or 0) + 1                  -- live2: re-find count (read after a race; no log per walk)
+        if h.rjWorld ~= St.worldGen then h.rjMid, h.rjFill, h.rjBrushMs = {}, {}, {} end
         h.rjFindMs, h.rjWorld, h.rjBars = now, St.worldGen, {}
-        for _, w in ipairs(FindAllOf("WBP_HUD_RamjetBar_C") or {}) do
+        local src
+        if _G.SWGRCouch_rjBarSeen == true then
+            rjSeen["WBP_HUD_RamjetBar_C"] = seenAlive(rjSeen["WBP_HUD_RamjetBar_C"] or {})
+            src = rjSeen["WBP_HUD_RamjetBar_C"]               -- reported by NotifyOnNewObject: no object-array walk
+        else
+            src = FindAllOf("WBP_HUD_RamjetBar_C") or {}
+        end
+        for _, w in ipairs(src) do
             pcall(function()
                 if U.ok(w) and w:IsVisible() then
                     local k = U.key(w:GetOwningPlayer())
@@ -2361,7 +2635,7 @@ function M.fastRamjet()
             end)
         end
     end
-    h.rjMid = h.rjMid or {}
+    h.rjMid, h.rjFill, h.rjBrushMs = h.rjMid or {}, h.rjFill or {}, h.rjBrushMs or {}
     for _, e in ipairs(lps) do
         local pk = U.key(e.pc)
         local bars = h.rjBars[pk]                          -- every player in a split race, P1 too (same mapping)
@@ -2370,19 +2644,37 @@ function M.fastRamjet()
                 local car = e.pc.Pawn
                 if not (U.ok(car) and U.isVehicle(car)) then return end
                 local vs = car.VehicleState
-                local heat = math.max(0, tonumber(vs.RamjetHeat) or 0)
+                local heat = tonumber(vs.RamjetHeat) or 0
                 local st = tonumber(vs.RamjetState) or 0
+                -- couch-fix27 #108: each player's ramjet at the start (native: NotReady, heat 0.50, bypass 0.25 for every
+                -- racer in 5473 RJDIAG samples of 8 speeder sessions = an EMPTY charging gauge at GO), once at GO and
+                -- once 3 s in, so a full gauge at the start can be told from the data
+                local t0 = St.race and tonumber(St.race.startedAtMs)
+                if t0 then
+                    h.rjStart = (h.rjStartGen == St.worldGen) and h.rjStart or {}
+                    h.rjStartGen = St.worldGen
+                    local done = h.rjStart[pk] or 0
+                    local due = (done == 0) or (done == 1 and now - t0 >= 3000)
+                    if due and done < 2 then
+                        h.rjStart[pk] = done + 1
+                        local av, byp = -1, -1
+                        pcall(function() av = tonumber(vs.RamjetAvailability) or -1 end)
+                        pcall(function() byp = tonumber(vs.RamjetBypassHeat) or -1 end)
+                        U.log(TAG, "P%d ramjet at %s: state %d heat %.2f bypass %.2f availability %d (#108)", e.index,
+                            done == 0 and "GO" or "GO+3s", st, heat, byp, av)
+                    end
+                end
                 for _, w in ipairs(bars) do
                     if U.ok(w) then
                         local wk = U.key(w)
                         local mid = h.rjMid[wk]
                         if not U.ok(mid) then
-                            local lib, parent = StaticFindObject(KML), nil
+                            local lib, parent = U.findLoaded(KML), nil
                             -- "afterburner" style: the ramjet material only SHOWS its fill while the global MPC is in
                             -- the ramjet colour state (one value for every HUD: blue on all, Jules 21:0x). The
                             -- afterburner bar shader ignores the MPC: a plain per-player fill under any colours.
                             if cfg.HudRamjetBarStyle == "afterburner" then
-                                pcall(function() parent = StaticFindObject(
+                                pcall(function() parent = U.findLoaded(
                                     "/Game/Griffin/UI/Library/Materials/HUD/M_UI_HUD_AfterburnerBar.M_UI_HUD_AfterburnerBar") end)
                             end
                             if not U.ok(parent) then pcall(function() parent = w.Material.Parent end) end
@@ -2390,35 +2682,67 @@ function M.fastRamjet()
                                 mid = lib:CreateDynamicMaterialInstance(w, parent, FName("None"), 0)
                                 if U.ok(mid) then
                                     w.IMG_Ramjet:SetBrushFromMaterial(mid)
-                                    h.rjMid[wk] = mid
+                                    h.rjMid[wk], h.rjBrushMs[wk] = mid, now
                                     U.log(TAG, "P%s ramjet bar: own material, driven from P%s's car (V-HUD-RJ2)",
                                         tostring(e.index), tostring(e.index))
                                 end
                             end
+                        else
+                            local drawn = brushIs(w, mid)
+                            if drawn == false or (drawn == nil and now - (h.rjBrushMs[wk] or -1e12) >= 500) then
+                                -- re-constructed: the BP put its own material back on the image
+                                pcall(function() w.IMG_Ramjet:SetBrushFromMaterial(mid) end)
+                                h.rjBrushMs[wk] = now
+                                U.logEvery("hud.rjrebrush" .. tostring(e.index), 5000, TAG,
+                                    "P%s ramjet bar re-constructed by the game: own material put back (V-HUD-RJ3)",
+                                    tostring(e.index))
+                            end
+                        end
+                        -- DIAG (cfg.HudRamjetDiag, 2026-10-15, Jules: "ramjet still not working, no redline, no fill"):
+                        -- once a second per player while anything ramjet-ish moves, the raw car state, what we draw and
+                        -- the game's OWN gauge functions with THIS bar as context (do they follow the bar's owner or
+                        -- player 0?) and the game's own material on the bar, into the UE4SS log (V-HUD-RJD)
+                        -- ANSWERED (#55, overnight 2026-10-18 tester #2, 4P Jakku): the "P1ctx" columns (the library
+                        -- gauges and the game's material) read the SAME value for all four players in every sample (AI
+                        -- cars in an active burn included) and reset for everyone when P1's bot was switched: they follow
+                        -- P1's car, never this bar's owner. The ready gauge also tops out at 1 - P1's bypass / 2 (0.90
+                        -- at bypass 0.20; 0.80 / 0.85 / 0.87 / 0.89 at 0.39 / 0.29 / 0.24 / 0.21): a "stall" at 0.90 is
+                        -- a FULL gauge, not a blocked charge. Per player = st / heat / byHeat / byOver / t / drawn.
+                        if cfg.HudRamjetDiag ~= false then
+                            h.rjDiagMs = h.rjDiagMs or {}
+                            local moving = st ~= 1 and st ~= 2 or heat > 0
+                            if moving and now - (h.rjDiagMs[wk] or -1e12) >= 1000 then
+                                h.rjDiagMs[wk] = now
+                                local lib = U.findLoaded("/Script/Griffin.Default__UIBlueprintFunctionLibrary")
+                                local nOv, nRd, nBy, gRj, gCh, gOv, rt, bh, bo = -1, -1, -1, -1, -1, -1, -1, -1, -1
+                                local wt0 = tonumber(w.EngineHeatWeight) or 0.74
+                                pcall(function() nOv = lib:GetEngineOverheatingPercentage(w, wt0, 0.0) end)
+                                pcall(function() nRd = lib:GetRamJetReadyGaugePercentage(w, wt0, 0.0) end)
+                                pcall(function() nBy = lib:GetBypassOverheatingPercentage(w) end)
+                                pcall(function() gRj = w.Material:K2_GetScalarParameterValue(FName("RamjetPercentage")) end)
+                                pcall(function() gCh = w.Material:K2_GetScalarParameterValue(FName("ChargingPercentage")) end)
+                                pcall(function() gOv = w.Material:K2_GetScalarParameterValue(FName("[B]Overheated")) end)
+                                pcall(function() rt = vs.RamjettingTime end)
+                                pcall(function() bh = vs.RamjetBypassHeat end)
+                                pcall(function() bo = vs.BypassOverheatingPercentage end)
+                                U.log(TAG, "RJDIAG P%d st=%d heat=%.2f byHeat=%.2f byOver=%.2f t=%.1f | drawn=%.2f | P1ctx native ovh=%.2f rdy=%.2f by=%.2f | P1ctx gameMID rj=%.2f chg=%.2f ovh=%.2f (V-HUD-RJD)",
+                                    e.index, st, heat, tonumber(bh) or -1, tonumber(bo) or -1, tonumber(rt) or -1,
+                                    tonumber(h.rjFill[wk]) or -1, tonumber(nOv) or -1, tonumber(nRd) or -1,
+                                    tonumber(nBy) or -1, tonumber(gRj) or -1, tonumber(gCh) or -1, tonumber(gOv) or -1)
+                            end
                         end
                         if U.ok(mid) then
-                            local wt = tonumber(w.EngineHeatWeight) or 0.74
-                            -- live 18:55 (explosion recorded): 3 on, 4 overheating (heat 1.0), 7 exploded; the fill must
-                            -- stay through 4-7 (it dropped to 0 at the critical moment)
-                            -- box 1 = heat x w while on (3); box 2 = the overheat (4-6): w + BypassOverheatingPercentage
-                            -- x (1 - w) (live 19:06: 0.23 -> 0.83 -> 1.0 at the explosion, state 7 = full)
-                            local fill = 0
-                            if st == 3 then
-                                fill = math.min(1, heat) * wt
-                            elseif st >= 4 and st <= 6 then
-                                local by = math.max(0, math.min(1, tonumber(vs.BypassOverheatingPercentage) or 0))
-                                fill = wt + by * (1 - wt)
-                            elseif st == 7 then
-                                fill = 1
-                            end
-                            local charge = (st >= 1) and 1 or math.max(0, math.min(1, 1 - heat / 0.47))
-                            mid:SetScalarParameterValue(FName("EngineHeatWeight"), wt)
-                            mid:SetScalarParameterValue(FName("RamjetPercentage"), fill)
-                            mid:SetScalarParameterValue(FName("ChargingPercentage"), charge)
-                            mid:SetScalarParameterValue(FName("[B]IsReady?"), (st >= 1) and 1 or 0)
-                            mid:SetScalarParameterValue(FName("[B]Overheated"),
-                                math.max(0, math.min(1, (fill - 0.8 * wt) / (0.3 * wt))))
-                            mid:SetScalarParameterValue(FName("Slider"), fill)   -- afterburner-style parent
+                            local minFill = nil
+                            pcall(function() minFill = tonumber(w.MinRamjetPercentage) end)
+                            local p = M.ramjetParams(st, heat, vs.BypassOverheatingPercentage, vs.RamjetBypassHeat,
+                                tonumber(w.EngineHeatWeight) or 0.74, h.rjFill[wk], minFill)
+                            h.rjFill[wk] = p.RamjetPercentage
+                            mid:SetScalarParameterValue(FName("EngineHeatWeight"), p.EngineHeatWeight)
+                            mid:SetScalarParameterValue(FName("RamjetPercentage"), p.RamjetPercentage)
+                            mid:SetScalarParameterValue(FName("ChargingPercentage"), p.ChargingPercentage)
+                            mid:SetScalarParameterValue(FName("[B]IsReady?"), p.IsReady)
+                            mid:SetScalarParameterValue(FName("[B]Overheated"), p.Overheated)
+                            mid:SetScalarParameterValue(FName("Slider"), p.RamjetPercentage)   -- afterburner-style parent
                         end
                     end
                 end
@@ -2435,7 +2759,16 @@ function M.fastTimer()
     if now < (h.timerNextMs or 0) then return end
     h.timerNextMs = now + 50
     local p1 = U.p1()
-    if not U.ok(p1) or stillRacingPC(p1) ~= false then
+    -- #86: in a couch precision test every guest's clock carries his OWN gate bonus (precision.guestClock), written
+    -- from the start, P1 still racing or not
+    local okC, clockOf = pcall(function()
+        local pr = U.mod("precision")
+        local st = pr._state()
+        if st and st.gen == St.worldGen and st.native == false then return pr.guestClock end
+        return nil
+    end)
+    if not okC then clockOf = nil end
+    if not clockOf and (not U.ok(p1) or stillRacingPC(p1) ~= false) then
         h.timerP1Out = nil
         return
     end
@@ -2443,6 +2776,25 @@ function M.fastTimer()
     if not U.ok(gs) then return end
     local okT, el = pcall(function() return gs:GetServerWorldTimeSeconds() - gs.RaceStartTime end)
     if not okT or type(el) ~= "number" then return end
+    if clockOf then
+        for _, e in pairs(h.guests) do
+            if e.pnum ~= 1 and U.ok(e.widget) and U.ok(e.pc) and stillRacingPC(e.pc) == true then
+                local t = clockOf(e, el)
+                if type(t) == "number" then
+                    local tx = guestTimerText(e)
+                    if tx and U.ok(e.timerOrig) and e.timerOrig:GetVisibility() ~= 1 then
+                        pcall(function() e.timerOrig:SetVisibility(1) end)
+                    end
+                    local text = fmtRaceTime(t)
+                    if tx and e.timerShown ~= text then
+                        e.timerShown = text
+                        pcall(function() tx:SetText(FText(text)) end)
+                    end
+                end
+            end
+        end
+        return
+    end
     if not h.timerP1Out then
         h.timerP1Out = true
         U.log(TAG, "P1 is out of the race at %s: the guests' race timers are written by the mod (task #35)",
@@ -2496,12 +2848,25 @@ function M.tick()
     local lps = U.localPlayers()
     -- prune HUDs of players that are gone (F7 leave, travel re-created the PC, widget collected)
     local present = {}
-    for _, lp in ipairs(lps) do if U.ok(lp.pc) then present[U.key(lp.pc)] = true end end
+    -- couch-livefix r2: a dormant local player (plugged, never joined) holds no view in this race (split.lua): no HUD
+    local split = lazy("split")
+    -- #29: a couch guest SITTING OUT this race (no grid entry, couchrules) holds no view either: P1 keeps his clone
+    local sitOut = St.race.singleView == true and St.race.sitOut == true
+    local rules = sitOut and lazy("couchrules") or nil
+    local ctrlOf = {}
+    if sitOut then for _, lp in ipairs(lps) do if U.ok(lp.pc) then ctrlOf[U.key(lp.pc)] = lp.ctrlId end end end
+    local function noView(pc)
+        if sitOut and M.sitsOut(rules, ctrlOf[U.key(pc)]) then return true end
+        if not (split and split.noView) then return false end
+        local ok, v = pcall(split.noView, pc)
+        return ok and v == true
+    end
+    for _, lp in ipairs(lps) do if U.ok(lp.pc) and not noView(lp.pc) then present[U.key(lp.pc)] = true end end
     for k, e in pairs(h.guests) do
         if not present[k] or not U.ok(e.pc) or not U.ok(e.widget) then M.removeGuest(k) end
     end
     -- St.race.singleView: guests of a race the mod did not launch (join's "race_enter" guard), no guest views
-    if #lps < 2 or St.race.singleView == true then
+    if M.guestPassOff(#lps, St.race.singleView, St.race.sitOut) then
         -- The last guest just left (F7) or the views were dropped: give back what is still applied. The guests are
         -- pruned, so guestStillRacing() is false and manageLocalResults() restores a hidden/deactivated results
         -- panel; updateVisibility() keeps a re-hosted P1 HUD (or the P1 clone) following the pause/post-race rules
@@ -2515,6 +2880,10 @@ function M.tick()
         if next(h.guests) ~= nil or h.gameLayout ~= nil then U.tryEvery("hud.layouts", nil, TAG, M.updateLayouts, lps) end
         return
     end
+    -- Race smoothness (2026-10-15): the two hot-reload sweeps walked FuseHudWidget twice (~30 ms each) in the first
+    -- MAIN tick of EVERY race. A previous Lua state's HUDs can only exist in the world this Lua state was loaded into
+    -- (a travel destroys the old world's PCs and their widgets): any later world skips them.
+    if St.worldGen ~= initWorldGen then h.orphansSwept, h.p1OrphansSwept = true, true end
     if not h.orphansSwept then U.try(TAG, sweepOrphanHuds, h, lps) end
     if not h.p1OrphansSwept then U.try(TAG, sweepOrphanP1Clones, h) end
     local p1hud = M.findP1Hud()
@@ -2555,7 +2924,7 @@ function M.tick()
     end
     local join = lazy("join")
     for _, lp in ipairs(lps) do
-        if lp.index >= 2 and U.ok(lp.pc) then
+        if lp.index >= 2 and U.ok(lp.pc) and not noView(lp.pc) then
             U.try(TAG, function()
                 local pnum
                 if join and join.displayNumForPC then pnum = join.displayNumForPC(lp.pc) end   -- unique per player
@@ -2574,6 +2943,20 @@ function M.tick()
     U.try(TAG, M.manageLocalResults)
     U.try(TAG, M.manageSpectateWidget)
     if wreckHidesRemaining() then U.try(TAG, collapseRemaining, h) end
+end
+
+-- #29: the per-player HUD pass stops on one local player and on a single-view race the mod did not launch; a couch
+-- sit-out (couchrules: singleView + sitOut) keeps it, the guest being view-less like a dormant player (P1's clone,
+-- no guest HUD). Pure (tools/test_sitouthud.lua).
+function M.guestPassOff(nLps, singleView, sitOut)
+    if (tonumber(nLps) or 0) < 2 then return true end
+    return singleView == true and sitOut ~= true
+end
+-- a guest's ctrlId sits this race out (couchrules.isSittingOut)
+function M.sitsOut(rules, ctrlId)
+    if type(rules) ~= "table" or type(rules.isSittingOut) ~= "function" or ctrlId == nil then return false end
+    local ok, v = pcall(rules.isSittingOut, ctrlId)
+    return ok and v == true
 end
 
 function M.clearAll()
@@ -2664,7 +3047,7 @@ function M.notifEntries()
                 for _, x in ipairs((mem.raw or {})[string.lower(n)] or {}) do
                     if U.ok(x) then
                         local okT, tn = pcall(function() return x.TargetName:ToString() end)
-                        local okP, panel = pcall(function() return x.NotificationSubPanel end)
+                        local okP, panel = pcall(U.getField, x, "NotificationSubPanel")
                         if okT and type(tn) == "string" and okP and U.ok(panel) then
                             conts[#conts + 1] = { w = x, name = tn, panel = panel, tree = n }
                         end
@@ -2673,8 +3056,8 @@ function M.notifEntries()
             end
             mem.conts = conts
             if #conts == 0 then
-                U.logOnce("hud.noconts." .. U.pathOf(a.widget:GetClass()), TAG, "no notification container found in %s "
-                    .. "(message routing has nothing to route there)", U.pathOf(a.widget:GetClass()))
+                U.logOnce("hud.noconts." .. U.pathOf(U.ok(a.widget) and a.widget:GetClass() or nil), TAG, "no notification container found in %s "
+                    .. "(message routing has nothing to route there)", U.pathOf(U.ok(a.widget) and a.widget:GetClass() or nil))
             end
         end
         out[#out + 1] = { pc = a.pc, pnum = a.pnum, widget = a.widget, bot = mem.bot, conts = mem.conts }
@@ -2692,6 +3075,42 @@ end
 
 function M.init()
     local h = H()
+    initWorldGen = St.worldGen                         -- the hot-reload sweeps run in this world only (M.tick)
+    -- live2: the ramjet bars' re-find trigger (see RJ_NEW_DELAYS); once per game session (hot reloads re-run init),
+    -- through U.mod so a reloaded hud.lua gets the calls
+    if not _G.SWGRCouch_rjNotify and type(NotifyOnNewObject) == "function" then
+        -- the bar's notify also records the new widget (rebindRamjet reads that list instead of FindAllOf)
+        local okN = pcall(NotifyOnNewObject, RJ_BAR_CLASS, function(obj)
+            pcall(function() U.mod("hud")._rjNewBar() end)
+            pcall(function() U.mod("hud")._rjSeen("WBP_HUD_RamjetBar_C", obj) end)
+        end)
+        _G.SWGRCouch_rjBarSeen = okN
+        _G.SWGRCouch_rjNotify = okN
+        U.log(TAG, "ramjet bars: re-find on NotifyOnNewObject %s (no periodic FindAllOf)", okN and "installed" or "FAILED")
+    end
+    -- race smoothness 2026-10-15: the overheat warning / ramjet message report themselves too (rebindRamjet). Only
+    -- when this session's bar notify records its widget (a bar notify from an older hud.lua does not)
+    if _G.SWGRCouch_rjBarSeen and not _G.SWGRCouch_rjSeenNotify and type(NotifyOnNewObject) == "function" then
+        local okAll = true
+        for cn, path in pairs(RAMJET_PATHS) do
+            if cn ~= "WBP_HUD_RamjetBar_C" then
+                okAll = pcall(NotifyOnNewObject, path, function(obj)
+                    pcall(function() U.mod("hud")._rjSeen(cn, obj) end)
+                end) and okAll
+            end
+        end
+        _G.SWGRCouch_rjSeenNotify = okAll
+        U.log(TAG, "ramjet widgets: guest re-bind from NotifyOnNewObject %s (no FindAllOf at the race start)",
+            okAll and "installed" or "FAILED")
+    end
+    if not _G.SWGRCouch_abNotify and type(NotifyOnNewObject) == "function" then
+        local okA = pcall(NotifyOnNewObject, AB_PATH, function(obj)
+            pcall(function() U.mod("hud")._abSeen(obj) end)
+        end)
+        _G.SWGRCouch_abNotify = okA
+        U.log(TAG, "afterburner bars: re-find from NotifyOnNewObject %s (no FindAllOf every 15 s)",
+            okA and "installed" or "FAILED")
+    end
     h.guests = h.guests or {}
     h.lapCounters = h.lapCounters or {}
     h.found = h.found or {}
@@ -2718,7 +3137,7 @@ function M.init()
             U.try(TAG, present.init)
         end
     end
-    St.on("leaving", TAG, function() M.clearAll() end)
+    St.on("leaving", TAG, function() M.clearAll(); M._rjSeenClear() end)
     St.on("phase", TAG, function(new)
         if new == "FRONTEND" or new == "OTHER" or new == "LOADING" then M.clearAll() end
     end)

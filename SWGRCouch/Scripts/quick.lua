@@ -40,6 +40,9 @@ end
 
 -- A GALAXY RUN of this class is on, or RunLength is set (run.prelaunch starts one at the next launch): its builds rule.
 function M.runOwns(arch)
+    -- 0.16: a GALACTIC GRAND PRIX owns every launch while it is on (gp.prelaunch writes the builds)
+    local okG, gpOn = pcall(function() return U.mod("gp").owns() end)
+    if okG and gpOn == true then return true end
     local ok, r = pcall(U.mod, "run")
     if not (ok and type(r) == "table") then return false end
     local okA, owns = pcall(function()

@@ -336,7 +336,8 @@ local function resolvePicks(plan, hc)
             local c = {}
             for k, v in pairs(p) do c[k] = v end
             c.ctrlId = h.ctrlId
-            if type(c.pilotId) == "string" and Pm.allowed(c.pilotId, arch) then
+            -- 0.16: a pick in its own class (pick.arch, a GALACTIC GRAND PRIX card) is checked against that class
+            if type(c.pilotId) == "string" and Pm.allowed(c.pilotId, tonumber(c.arch) or arch) then
                 taken[c.pilotId] = h.ctrlId
             else
                 c.pilotId = nil
@@ -348,11 +349,12 @@ local function resolvePicks(plan, hc)
         local c = out[h.pnum]
         if not (c and c.pilotId) then
             c = c or { ctrlId = h.ctrlId }
-            local e = Pm.defaultFor(arch, h.pnum == 1, taken, nil, h.ctrlId)
+            local a = tonumber(c.arch) or arch
+            local e = Pm.defaultFor(a, h.pnum == 1, taken, nil, h.ctrlId)
             c.pilotId, taken[e.id] = e.id, h.ctrlId
-            if not (type(c.presetId) == "string" and V().presetById(arch, c.presetId)) then
-                local d = V().presets(arch)[V().defaultPresetIndex(arch, h.pnum)]
-                c.presetId = Pm.signature(e, arch) or (d and d.id) or nil
+            if not (type(c.presetId) == "string" and V().presetById(a, c.presetId)) then
+                local d = V().presets(a)[V().defaultPresetIndex(a, h.pnum)]
+                c.presetId = Pm.signature(e, a) or (d and d.id) or nil
             end
             out[h.pnum] = c
             filled[#filled + 1] = string.format("P%d=%s/%s", h.pnum, e.id, tostring(c.presetId))
@@ -408,7 +410,7 @@ local BUILD_SCALARS = { "PawnOverride", "CrashAbility", "PowerLevelMaxRemainder"
 
 local function userdataType(v)
     if type(v) ~= "userdata" then return type(v) end
-    local ok, t = pcall(function() return v:type() end)
+    local ok, t = pcall(U.callMethod, v, "type")
     return ok and tostring(t) or "?"
 end
 
@@ -517,7 +519,7 @@ assignGuestPilots = function(racers, n, humans)
             g.r.Pilot = def
             local okPS = pcall(function() g.ps.Pilot = def end)
             local back = "?"
-            pcall(function() back = g.r.Pilot:GetFName():ToString() end)
+            pcall(function() if U.ok(g.r.Pilot) then back = g.r.Pilot:GetFName():ToString() end end)   -- null GetFName = AV
             out[#out + 1] = string.format("P%d=%s%s", g.pnum, back, okPS and "" or " (PlayerState.Pilot refused)")
         else
             out[#out + 1] = string.format("P%d=(no free pilot)", g.pnum)
@@ -556,9 +558,11 @@ local function applyRecipe(choice, plan)
         if pnum then
             nh = nh + 1
             U.try(TAG, function()
-                if tonumber(r.VehicleType) ~= arch then r.VehicleType = arch end
+                -- 0.16: a pick may name its own class (pick.arch: a GALACTIC GRAND PRIX guest in another speeder class)
                 local pick = plan.players[pnum]
-                local pr = pick and pick.presetId and V().presetById(arch, pick.presetId) or nil
+                local a = (type(pick) == "table" and tonumber(pick.arch)) or arch
+                if tonumber(r.VehicleType) ~= a then r.VehicleType = a end
+                local pr = pick and pick.presetId and V().presetById(a, pick.presetId) or nil
                 local cls = pr and V().presetClass(pr) or nil
                 if cls then
                     r.VehicleCustomisation = cls
@@ -702,7 +706,7 @@ local function logRaceRecipe()
         for i = 1, racers:GetArrayNum() do
             local r = racers[i]
             local cust = "-"
-            pcall(function() cust = r.VehicleCustomisation:GetFName():ToString() end)
+            pcall(function() local v = r.VehicleCustomisation; if U.ok(v) then cust = v:GetFName():ToString() end end)
             parts[#parts + 1] = string.format("%s/%s", C.enumName(C.E.Archetype, tonumber(r.VehicleType)), cust)
         end
         U.log(TAG, "race recipe: %d racer(s): %s", #parts, table.concat(parts, " "))
@@ -865,7 +869,7 @@ function M.start(opts)
         -- real clock: St.nowMs (os.clock) ran ~1.5x fast under Wine (2026-10-07: a 5 s window expired in 3.5 s)
         local now = U.mod("setup").realMs()
         if not (now <= dormantOk.untilMs and dormantOk.text == dormant) then
-            dormantOk.untilMs, dormantOk.text = now + 5000, dormant
+            dormantOk.untilMs, dormantOk.text = now + U.confirmMs(), dormant
             status(dormant .. ": PRESS A ON IT, OR START AGAIN FOR AN AI CAR IN ITS VIEW")
             return false
         end
@@ -882,6 +886,9 @@ function M.start(opts)
     U.try(TAG, function() U.mod("quick").forcePlan(plan) end)
     -- 0.13.0 GALAXY RUN: a run race launches the players' run builds and the race's AI tier (run.lua; a new run
     -- starts here when OPTIONS > Galaxy run is set). Before the grid patch and the perk launch base use the plan.
+    -- 0.16 GALACTIC GRAND PRIX (gp.lua): its next race gets the GP builds (equal-upgrade budget, no parts), each
+    -- player's own speeder class (pick.arch) and the GP's AI tier. Before run.prelaunch (which refuses while a GP is on).
+    U.try(TAG, function() U.mod("gp").prelaunch(choice, plan) end)
     U.try(TAG, function() U.mod("run").prelaunch(choice, plan) end)
     local patched = false
     U.try(TAG, function() patched = prepareGrid(choice, plan, humans) end)

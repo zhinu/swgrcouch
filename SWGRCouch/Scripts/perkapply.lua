@@ -16,10 +16,19 @@
 --   setup.lua: c.build = launchBase(arch). racers.lua: systems(arch) at step entry (hands the flags to perks.lua),
 --     abilityCost(id) for the detail tag's COST.
 -- Writes follow perks-loadout.md §5.4: fields of existing elements only (never a Lua table into a struct or an array,
--- never a resize, never an index past GetArrayNum()); a nil class write is a no-op in UE4SS, so empty ability slots
+-- never a resize, never an index past GetArrayNum() - except couch-fix29's AffixSlots growth for a couch guest, see
+-- above); a nil class write is a no-op in UE4SS, so empty ability slots
 -- come from the zero base. No hook, no FindAllOf, no soft pointer (every object comes from a static path of
 -- perkdata.lua / pilots.lua), no UIManager query. Every game call runs in U.try / pcall; one player's failure never
 -- stops the others.
+-- couch-fix29 (audit 12 issue 1, the COUCH CAMPAIGN): couchrun.applyBuilds hands applyAll plan.couch = true. A couch
+-- guest's campaign entry was converted by no launch (the campaign builders write only P1's / a field test's build):
+-- live 2026-10-18 08:32:23 / 08:36:46 "P2 6 part(s) beyond the build's 0 slot(s) not applied" = every part, fault and
+-- favour slot of his car cosmetic. pick.partSlots grows that entry's AffixSlots to his own slot count (the native
+-- SetNum of 0x1471bece2, done the way launch.writeEntries grows a struct TArray: a read at Num + 1 is UE4SS's
+-- AddZeroed, a zeroed FVehicleAffix = an empty Invalid slot) before the parts are written; pick.styleTraits = his
+-- racer style's traits. Its race-world pass is M.couchRaceTick (couchrun.raceTick, every campaign race type): the
+-- verify, his traits as passives (the native run applies only P1's style), the late fallback, one summary line.
 -- VERIFY ids: V-RC-19 (patch 4 -> 6 -> 4), V-RC-20 (pilots), V-RC-21 (read-back, PRERACE verify), V-RC-22 (traits),
 -- V-RC-23 (seated pilot), V-RC-24 (pod entry), V-RC-26 (re-map by ControllerId), V-RC-27 (AI parity, PerkLaunchBase),
 -- V-RC-32 (systems), V-RC-33 (energy costs without loading an ability class), V-PRK-06 (state lost in travel).
@@ -49,7 +58,7 @@ local UP_DIR      = "/Game/Griffin/Vehicles/Common/Upgrades/UpgradeDefinitions/"
 local CDO_PREFIX  = "/Script/Griffin.Default__"
 local ANIM_CLS    = "/Script/Griffin.VehicleAnimationComponent"
 local SHARED      = "perkapply.patch"     -- shared variable C.MOD .. "." .. SHARED (main.lua's naming)
-local STATUS_INVALID, STATUS_ACTIVE, STATUS_FAULTY = 0, 1, 2                       -- EAffixStatus
+local STATUS_INVALID, STATUS_ACTIVE, STATUS_FAULTY, STATUS_FIXED = 0, 1, 2, 3       -- EAffixStatus
 
 -- Module state in St.perks (diag): patch = the in-memory base-build patch {path, name, u0, m0, want, obj} | nil;
 -- systems[arch] = flags read from the base; costs[cfg] = EnergyCost | false; lastApply = "P1 ok P2 ok"; race = the
@@ -150,9 +159,9 @@ local function humanList(racers, n, humans)
         if e.pnum then list[#list + 1] = e; byKey[key] = e end
     end
     for i = 1, (tonumber(n) or 0) do
-        local okR, r = pcall(function() return racers[i] end)
+        local okR, r = pcall(U.getField, racers, i)
         if okR and r ~= nil then
-            local okP, ps = pcall(function() return r.Player end)
+            local okP, ps = pcall(U.getField, r, "Player")
             local e = okP and U.ok(ps) and byKey[U.key(ps)] or nil
             if e then
                 e.r = r
@@ -435,7 +444,7 @@ function M.assignPilots(racers, n, humans, plan)
             if U.ok(ps) and isLocal[U.key(ps)] then return end
             local bot = (not U.ok(ps)) or remote == 0
             if not bot then
-                local okB, v = pcall(function() return ps.bIsABot end)
+                local okB, v = pcall(U.getField, ps, "bIsABot")
                 bot = okB and v == true
             end
             local name = nameOf(r.Pilot)
@@ -511,9 +520,51 @@ local function statusOf(cfgObj, p)
     return p.faulty and STATUS_FAULTY or STATUS_ACTIVE
 end
 
+-- FINDING #20: a faulty part the player had repaired at the scrap dealer (couchrun p.fixed) races Fixed, the status
+-- BlackMarketVM:RepairItem leaves on the game's own affix (its FaultyRules off). pure: -> EAffixStatus
+function M.partStatus(status, repaired)
+    if repaired and status == STATUS_FAULTY then return STATUS_FIXED end
+    return status
+end
+
 -- One build entry from a loadout (§6 step 6.4), each field group in its own pcall. mode "full" also writes the parts.
 -- -> errors (list), part slots of the entry, planned parts beyond them.
-local function writeEntry(e, lo, arch, mode, clearEmpty)
+-- couch-rewards2: a part a critical malfunction faulted (couchrun p.faults[id] = the AFX_Faulty_* fault) races Faulty
+-- with the fault as its SecondaryAffix (the native ApplyAffixFaultChanges adds the fault onto the part [L]: spike S8).
+-- pure: -> status, the fault id to load (nil = none)
+function M.faultFor(id, faults)
+    local f = type(faults) == "table" and id and faults[id] or nil
+    if not f then return nil, nil end
+    return STATUS_FAULTY, f
+end
+
+-- couch-fix29: an entry's AffixSlots grown to want (max 10, MaximumAffixSlots) for a couch guest: one element per read
+-- at Num + 1 (UE4SS AddZeroed, launch.writeEntries' live-proven growth of a struct TArray), each set Invalid; the
+-- entry's UnlockedAffixSlots / MaximumAffixSlots follow (the native invariant: AffixSlots.Num = UnlockedAffixSlots).
+-- Never shrinks. -> slots before, slots after
+local SLOTS_MAX = 10
+function M.growSlots(e, want)
+    local n0 = U.arrayCount(e.AffixSlots)
+    want = math.min(SLOTS_MAX, math.floor(tonumber(want) or 0))
+    if want <= n0 then return n0, n0 end
+    local arr = e.AffixSlots
+    for i = n0 + 1, want do
+        if U.arrayCount(arr) ~= i - 1 then break end
+        local a = arr[i]                                    -- the read at Num + 1 appends one zeroed element
+        a.PrimaryAffix = nil
+        a.SecondaryAffix = nil
+        a.Status = STATUS_INVALID
+        a.PlaneSpecific = false
+    end
+    local n1 = U.arrayCount(e.AffixSlots)
+    pcall(function()
+        if tonumber(e.UnlockedAffixSlots) ~= n1 then e.UnlockedAffixSlots = n1 end
+        if (tonumber(e.MaximumAffixSlots) or 0) < n1 then e.MaximumAffixSlots = n1 end
+    end)
+    return n0, n1
+end
+
+local function writeEntry(e, lo, arch, mode, clearEmpty, fixed, faults, slots)
     local errs = {}
     local function step(what, fn)
         local ok, err = pcall(fn)
@@ -579,8 +630,17 @@ local function writeEntry(e, lo, arch, mode, clearEmpty)
         step("clear crash", function() e.CrashAbility = CreateInvalidObject() end)
     end
     -- parts: the fields of the slots the launch build gave (pod traits too: they work in normal slots on pods)
-    local nSlots, dropped = 0, 0
+    local nSlots, dropped, grown = 0, 0, nil
     if mode == "full" then
+        if slots then
+            step("part slots", function()
+                local n0, n1 = M.growSlots(e, slots)
+                if n1 ~= n0 then grown = { n0, n1 } end
+                if n1 < math.min(SLOTS_MAX, math.floor(tonumber(slots) or 0)) then
+                    error(string.format("AffixSlots %d -> %d, %d wanted", n0, n1, slots))
+                end
+            end)
+        end
         nSlots = U.arrayCount(e.AffixSlots)
         for i = 1, nSlots do
             step("part " .. i, function()
@@ -595,14 +655,24 @@ local function writeEntry(e, lo, arch, mode, clearEmpty)
                 a.PrimaryAffix = cfgObj
                 a.SecondaryAffix = nil
                 a.PlaneSpecific = false
-                a.Status = cfgObj and statusOf(cfgObj, p) or STATUS_INVALID
+                a.Status = cfgObj and M.partStatus(statusOf(cfgObj, p), type(fixed) == "table" and fixed[id] == true)
+                    or STATUS_INVALID
+                local fst, fid = M.faultFor(id, faults)
+                if cfgObj and fst then
+                    local fd = D.PARTS[fid]
+                    local fo = fd and U.obj(fd.path) or nil
+                    if U.ok(fo) then a.SecondaryAffix = fo end
+                    a.Status = fst
+                    U.log(TAG, "loadout: part %s races FAULTY (%s%s)", tostring(id), tostring(fid),
+                        U.ok(fo) and "" or ": fault config not loaded, status only")
+                end
             end)
         end
         for i = nSlots + 1, #lo.parts do if lo.parts[i] then dropped = dropped + 1 end end
     end
     -- system flags only when configured; UseHealth is wreck.lua's, PawnOverride is never touched
     for k, v in pairs(flagWrites(arch)) do step(k, function() e[k] = v end) end
-    return errs, nSlots, dropped
+    return errs, nSlots, dropped, grown
 end
 
 -- Everything of a build entry the plan names, read back: {lv = {[0..5]}, pl, ab = {4}, crash, nSlots, parts = {},
@@ -699,7 +769,8 @@ local function loadoutOf(pick, arch, pilotStyle, pnum)
     local Kp = K()
     local lo, notes, how = nil, nil, nil
     if type(pick.loadout) == "table" then
-        lo, notes = Kp.validate(pick.loadout, arch, pilotStyle)
+        -- couch-fix29: a couch guest's parts fill HIS slot count (pick.partSlots), not the board's PerkPartSlots
+        lo, notes = Kp.validate(pick.loadout, arch, pilotStyle, pick.partSlots)
         how = "plan"
     elseif type(pick.code) == "string" and pick.code ~= "" then
         local why
@@ -727,13 +798,23 @@ local function applyOne(h, arch, plan, mode, race)
     local pilotId = type(pick) == "table" and pick.pilotId or nil
     local pilotStyle = nil
     if type(pilotId) == "string" then pcall(function() pilotStyle = P().styleKey(pilotId, arch) end) end
+    -- couch-fix29: a field test races the test's own build (P1 too): only the guest's traits, nothing written
+    if type(pick) == "table" and pick.traitsOnly == true then
+        race.players[h.ctrlId ~= nil and h.ctrlId or ("p" .. pnum)] = { pnum = pnum, ctrlId = h.ctrlId, pcKey = h.pcKey,
+            traitsOnly = true, extraTraits = pick.styleTraits, styleText = pick.styleText, traitText = "-", arch = arch,
+            kind = pick.kind }
+        U.log(TAG, "loadout: P%d races the %s's own build (as P1): traits only", pnum, tostring(pick.kind or "event"))
+        return { ok = true, text = "traits only" }
+    end
     local lo, how = loadoutOf(pick, arch, pilotStyle, pnum)
     if not lo then
         U.log(TAG, "loadout: P%d has no pick: it races the launch build", pnum)
         return { ok = true, skipped = true, text = "no pick" }
     end
     -- recorded before any write: the race tick checks and completes what got through
-    local rec = { pnum = pnum, ctrlId = h.ctrlId, pilotId = pilotId, lo = lo, how = how, traitText = "-" }
+    local rec = { pnum = pnum, ctrlId = h.ctrlId, pilotId = pilotId, lo = lo, how = how, traitText = "-", arch = arch,
+                  pcKey = h.pcKey, extraTraits = type(pick) == "table" and pick.styleTraits or nil,
+                  styleText = type(pick) == "table" and pick.styleText or nil, kind = type(pick) == "table" and pick.kind or nil }
     race.players[h.ctrlId ~= nil and h.ctrlId or ("p" .. pnum)] = rec
     local rbs = ps.RacerBuildState
     local vbs = rbs.VehicleBuilds
@@ -746,7 +827,14 @@ local function applyOne(h, arch, plan, mode, race)
     local res = { ok = true, partial = false, text = "" }
     for k, idx in ipairs(idxs) do
         local e = vbs[idx + 1]
-        local errs, nSlots, dropped = writeEntry(e, lo, arch, mode, S().baseZero == false)
+        -- couch-fix29: a couch entry holds whatever earlier races left in it: his empty ability / crash slots are cleared
+        local errs, nSlots, dropped, grown = writeEntry(e, lo, arch, mode, race.couch == true or S().baseZero == false,
+            type(pick) == "table" and pick.fixed or nil, type(pick) == "table" and pick.faults or nil,
+            type(pick) == "table" and pick.partSlots or nil)
+        if grown then
+            U.log(TAG, "loadout: P%d entry %d part slots %d -> %d (his own slot count, couch-fix29)", pnum, idx, grown[1],
+                grown[2])
+        end
         local rb = readEntry(e)
         local diffs = compare(rb, lo, mode, arch)
         local line = rbText(rb, arch, idx)
@@ -788,6 +876,10 @@ function M.applyAll(racers, n, humans, plan)
     end
     ensureListener()
     local race = { arch = arch, mode = mode, launchMs = St.launch.atMs, players = {}, done = {}, allDone = nil }
+    if plan.couch == true then                          -- couch-fix29: M.couchRaceTick's record, not a launch's
+        race.couch, race.applyWk, race.launchMs, race.kind = true, St.worldGen, nil, plan.kind
+        race.p1Arch = tonumber(plan.p1Arch)
+    end
     st.race, st.raceText = race, "-"
     if mode == "off" then
         -- no loadout is written (the classic build); the race tick still checks the seated pilots (PilotSeatCheck)
@@ -804,7 +896,11 @@ function M.applyAll(racers, n, humans, plan)
     M.systems(arch)                                    -- RC-2 flags into perks.lua before validating
     local parts = {}
     for _, h in ipairs(humanList(racers, n, humans)) do
-        local okR, res = U.try(TAG, applyOne, h, arch, plan, mode, race)
+        -- 0.15 COUCH CAMPAIGN: a pick may name its own class (pick.arch: each guest races his own vehicle)
+        local pk = M.pickFor(plan, h)
+        local a = (type(pk) == "table" and tonumber(pk.arch)) or arch
+        if a ~= arch then M.systems(a) end
+        local okR, res = U.try(TAG, applyOne, h, a, plan, mode, race)
         if not okR or type(res) ~= "table" then res = { ok = false, partial = false, text = "error" } end
         report.players[h.pnum] = res
         if res.skipped then
@@ -976,13 +1072,38 @@ local function updateRaceText(race)
     S().raceText = "traits " .. table.concat(t, " ")
 end
 
+-- The traits a record applies, {id, path} each: its loadout's (perkdata TRAITS ids) + couch-fix29's style traits (static
+-- paths, camstyles.lua), each once.
+local function traitsOf(rec)
+    local out, seen = {}, {}
+    local lo = rec.lo
+    if type(lo) == "table" then
+        for _, id in ipairs(lo.traits or {}) do
+            if id and not seen[id] then
+                seen[id] = true
+                local t = D.TRAITS[id]
+                out[#out + 1] = { id = id, path = t and t.path or nil }
+            end
+        end
+    end
+    for _, path in ipairs(rec.extraTraits or {}) do
+        local id = type(path) == "string" and (path:match("%.([%w_]+)$") or path) or nil
+        if id and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = { id = id, path = path }
+        end
+    end
+    return out
+end
+M._traitsOf = traitsOf
+
 -- One local human in the race world, once per world when his PlayerState and car exist. -> true = done.
 local function raceOne(lp, rec, race)
     local pc = lp.pc
     if not U.ok(pc) then return false end
     local ps, pawn = pc.PlayerState, pc.Pawn
     if not (U.ok(ps) and U.ok(pawn)) then return false end
-    local arch, mode, lo, pnum = race.arch, race.mode, rec.lo, rec.pnum
+    local arch, mode, lo, pnum = rec.arch or race.arch, race.mode, rec.lo, rec.pnum
     local live = nil                                   -- config names of the live passives (nil: unreadable)
     local partsMissing, lost = false, false
     -- (lo = nil: PerkApply "off", only the pilot check below runs)
@@ -1023,6 +1144,9 @@ local function raceOne(lp, rec, race)
             local levelsOk = true
             if rb then for s = 0, 5 do if rb.lv[s] ~= lo.tune[s] then levelsOk = false end end end
             lost = nOk < nWant or crashOk == false or not levelsOk
+            rec.vText = string.format("build %s, levels %s, abilities %d/%d, crash %s, parts %s/%d live", #diffs == 0 and "ok"
+                or "DIFFERS", levelsOk and "ok" or "LOST", nOk, nWant, crashOk == nil and "?" or (crashOk and "ok" or "missing"),
+                live and tostring(liveP) or "?", wantP)
             U.log(TAG, "loadout: P%d in race: build %s, abilities %d/%d, crash %s, parts %s/%d live (V-RC-21)", pnum,
                 #diffs == 0 and "ok" or "differs", nOk, nWant, crashOk == nil and "?" or (crashOk and "ok" or "missing"),
                 live and tostring(liveP) or "?", wantP)
@@ -1042,20 +1166,17 @@ local function raceOne(lp, rec, race)
     end
     -- traits: the game's own way to apply a style's traits is AddPassive per trait (PL §1.3 #6); Server_ApplyPassive
     -- reaches it, a Server RPC that runs locally on the standalone / listen host (PL §5.2 #5)
-    if lo and opt("PerkTraits", true) ~= false then
+    if (lo or rec.traitsOnly) and opt("PerkTraits", true) ~= false then
         U.try(TAG, function()
             local n0 = passiveCount(ps)
             local want, applied = 0, 0
-            for _, id in ipairs(lo.traits) do
-                if id then
-                    want = want + 1
-                    local t = D.TRAITS[id]
-                    local obj = t and U.obj(t.path) or nil
-                    if U.ok(obj) and pcall(function() ps:Server_ApplyPassive(obj) end) then
-                        applied = applied + 1
-                    else
-                        U.warn(TAG, "loadout: P%d trait %s not applied", pnum, id)
-                    end
+            for _, t in ipairs(traitsOf(rec)) do
+                want = want + 1
+                local obj = t.path and U.obj(t.path) or nil
+                if U.ok(obj) and pcall(function() ps:Server_ApplyPassive(obj) end) then
+                    applied = applied + 1
+                else
+                    U.warn(TAG, "loadout: P%d trait %s not applied", pnum, t.id)
                 end
             end
             local n1 = passiveCount(ps)
@@ -1093,6 +1214,12 @@ local function raceOne(lp, rec, race)
     end
     if mode == "full" and lost then
         U.warn(TAG, "loadout: P%d abilities/levels lost in travel: the car races without them (V-PRK-06)", pnum)
+    end
+    -- couch-fix29: the per-race line of what reached a guest's car
+    if race.couch then
+        U.log(TAG, "couch car: P%d in the %s race (%s): %s; traits %s%s", pnum, tostring(rec.kind or race.kind or "campaign"),
+            archName(arch), rec.traitsOnly and "the event's own build (as P1's)" or tostring(rec.vText or "build not checked"),
+            tostring(rec.traitText), rec.styleText and (" (" .. rec.styleText .. ")") or "")
     end
     -- seated pilot (PS §6.6): "log" compares; "refresh" writes the pick back and rebuilds the seated pilot
     local seat = opt("PilotSeatCheck", "log")
@@ -1228,7 +1355,7 @@ function M.raceTick()
     if not St.race.launchedByUs then return end
     if St.phase ~= "PRERACE" and St.phase ~= "RACING" then return end
     local race = S().race
-    if type(race) ~= "table" then return end
+    if type(race) ~= "table" or race.couch then return end       -- couch-fix29: a couch record is couchRaceTick's
     if race.launchMs ~= St.launch.atMs then return end           -- the record of an earlier launch
     local vp = St.launch.vehPlan
     if type(vp) == "table" and vp.flow ~= nil and vp.flow ~= "cards" then return end
@@ -1251,6 +1378,82 @@ function M.raceTick()
         end
     end
     if waiting == 0 then race.allDone = wk end
+end
+
+-- couch-fix29: the COUCH CAMPAIGN's race-world pass (couchrun.raceTick, PRERACE / RACING of every campaign race type).
+-- The record couchrun.applyBuilds made at the node pick / kickoff belongs to the FIRST race world after it (a later
+-- world = a later race whose pick wrote nothing: never re-used). Each guest is found by his PlayerController (the pad-id
+-- swap of a guest-owned PRERACE screen changes ControllerIds, never the controller), then raceOne: verify, traits,
+-- late fallback, the "couch car" line. Once per world also P1's car (read-only: his build entry and live passive count,
+-- the parity evidence). Gives up after COUCH_TRIES ticks per world (a guest whose car never spawns).
+local COUCH_TRIES = 160
+local function p1Evidence(race, wk)
+    if race.p1Logged == wk then return end
+    local lp = U.localPlayers()[1]
+    local ps, pawn = nil, nil
+    pcall(function() ps = lp.pc.PlayerState; pawn = lp.pc.Pawn end)
+    if not (U.ok(ps) and U.ok(pawn)) then return end
+    race.p1Logged = wk
+    local arch = race.p1Arch
+    local text = arch ~= nil and (M.readBack(ps, arch)) or "class unknown"
+    local podIdx = nil
+    pcall(function() podIdx = tonumber(ps.RacerBuildState.ArchetypeToUseForPlane) end)
+    U.log(TAG, "couch car: P1 in the %s race (his own, read only): %s; %s passive(s) live; pods read entry %s",
+        tostring(race.kind or "campaign"), text, tostring(passiveCount(ps) or "?"), tostring(podIdx or "?"))
+end
+
+function M.couchRaceTick()
+    if St.phase ~= "PRERACE" and St.phase ~= "RACING" then return end
+    local race = S().race
+    if type(race) ~= "table" or not race.couch then return end
+    local wk = St.worldGen
+    if race.couchWk == nil then
+        if wk == race.applyWk then return end                   -- still the world of the pick
+        race.couchWk = wk
+    end
+    if race.couchWk ~= wk or race.allDone == wk then return end
+    U.try(TAG, p1Evidence, race, wk)
+    race.tries = (race.tries or 0) + 1
+    local waiting, left = 0, {}
+    for _, lp in ipairs(U.localPlayers()) do
+        if lp.index ~= 1 and U.ok(lp.pc) then
+            local pk = U.key(lp.pc)
+            local rec, key = nil, nil
+            for k, r in pairs(race.players) do
+                if r.pcKey ~= nil and r.pcKey == pk then rec, key = r, k end
+            end
+            if not rec and race.players[lp.ctrlId] and race.players[lp.ctrlId].pcKey == nil then
+                rec, key = race.players[lp.ctrlId], lp.ctrlId
+            end
+            if rec then
+                local dk = tostring(wk) .. ":" .. tostring(key)
+                if not race.done[dk] then
+                    local okR, done = U.try(TAG, raceOne, lp, rec, race)
+                    if not okR or done then
+                        race.done[dk] = true
+                    else
+                        waiting = waiting + 1
+                        left[#left + 1] = "P" .. tostring(rec.pnum)
+                    end
+                end
+            end
+        end
+    end
+    if waiting == 0 then
+        race.allDone = wk
+    elseif race.tries >= COUCH_TRIES then
+        race.allDone = wk
+        U.warn(TAG, "couch car: %s never had a car in this race world: nothing checked or applied", table.concat(left, " "))
+    end
+end
+
+-- couch-fix29: a node pick / kickoff that writes no couch record drops the previous one (never applied to a later race)
+function M.couchForget(why)
+    local race = S().race
+    if type(race) == "table" and race.couch then
+        S().race = nil
+        U.dbg(TAG, "couch record dropped (%s)", tostring(why))
+    end
 end
 
 ---------------------------------------------------------------------------------------------------- hot reload

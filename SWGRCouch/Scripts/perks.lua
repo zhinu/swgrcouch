@@ -347,7 +347,7 @@ end
 ---------------------------------------------------------------------------------------------------- validate
 -- -> a new valid loadout, notes (list of toast-ready strings, possibly empty). Never throws: an unusable input
 -- becomes the pilot's style kit, an internal error an empty custom loadout.
-local function validateNow(lo, arch, pilotStyle)
+local function validateNow(lo, arch, pilotStyle, nParts)
     local notes, seenNote = {}, {}
     local function note(s) if s and not seenNote[s] then seenNote[s] = true; notes[#notes + 1] = s end end
     if type(lo) ~= "table" then
@@ -408,7 +408,8 @@ local function validateNow(lo, arch, pilotStyle)
         if not okC then note(why2note(why, arch)); crash = false end
     end
     -- parts: class, flaws, systems; one per ladder / id (later slots dropped); padded / truncated to PerkPartSlots
-    local nP = M.partSlots()
+    -- couch-fix29: nParts = a couch guest's own part slots (4 + his Gadgeteer, up to 10) instead of PerkPartSlots
+    local nP = (tonumber(nParts) and math.max(1, math.min(10, math.floor(tonumber(nParts))))) or M.partSlots()
     local pSrc = type(lo.parts) == "table" and lo.parts or {}
     local parts = {}
     for i = 1, nP do
@@ -469,9 +470,9 @@ local function validateNow(lo, arch, pilotStyle)
              traits = traits }, notes
 end
 
-function M.validate(lo, arch, pilotStyle)
+function M.validate(lo, arch, pilotStyle, nParts)
     arch = tonumber(arch)
-    local ok, out, notes = pcall(validateNow, lo, arch, pilotStyle)
+    local ok, out, notes = pcall(validateNow, lo, arch, pilotStyle, nParts)
     if ok and type(out) == "table" then return out, notes or {} end
     return blankLo(arch, pilotStyle), { "LOADOUT RESET" }
 end

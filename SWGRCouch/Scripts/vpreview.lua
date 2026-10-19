@@ -141,6 +141,12 @@ local stats = { spawns = 0, rebuilds = 0, ready = 0, failed = 0, captures = 0, g
 local fallen = {}          -- 0.12.0: [rung] = why: a backdrop rung that failed this session (the ladder skips it)
 local cardCol = nil        -- 0.12.0: card colours per rung (backdrop(), brush()), made once
 local capLog, capFirst, capSince = {}, 1, nil   -- capture times of the last CAPS_WINDOW_MS; start of this capture run
+local capEvery = {}        -- 4-way garage: [key] = ms between two captures of a spinning bay (nil = SetupPreviewCaptureMs)
+local outside = {}         -- 4-way garage: [owner] = the phase a host outside the front end allowed bays in (allowOutside)
+local LIVERY_KEYS = { mask = "LiveryMaskTag", palette = "LiveryPaletteTag", patina = "PatinaTag", decal = "IconMaskTag",
+                      decalColour = "IconPaletteTag" }
+local LIVERY_ORDER = { "mask", "palette", "patina", "decal", "decalColour" }
+local UI_SEL = { mask = 8, palette = 7, patina = 11, decal = 10, decalColour = 9 }   -- EVehicleRecipeUISelectionType
 
 local function modeOf(b) return modes[b.i] or "spin" end
 
@@ -174,7 +180,7 @@ end
 -- the game's).
 local function isBayActor(a)
     if not (U.isA(a, VEH_NATIVE) or U.isA(a, CAPTURE) or U.isA(a, LIGHT) or U.isA(a, MESH_ACTOR)) then return false end
-    local okW, w = pcall(function() return a:GetWorld() end)
+    local okW, w = pcall(U.callMethod, a, "GetWorld")
     if not (okW and U.same(w, U.world())) then return false end
     local ok, z = pcall(function() return tonumber(a:K2_GetActorLocation().Z) end)
     return ok and z ~= nil and z > num("SetupPreviewZ", 60000) - 30000
@@ -728,11 +734,11 @@ end
 
 -- true when veh.preset reads back cls (a ClassProperty write needs a UClass and silently ignores nil), else false, name.
 local function presetIs(veh, cls)
-    local ok, got = pcall(function() return veh.preset end)
+    local ok, got = pcall(U.getField, veh, "preset")
     if not ok then return false, "unreadable" end
     if U.same(got, cls) then return true end
     local n = "None"
-    pcall(function() n = got:GetFName():ToString() end)
+    if U.ok(got) then pcall(function() n = got:GetFName():ToString() end) end   -- an unset preset reads a NULL wrapper
     return false, n
 end
 
@@ -780,6 +786,7 @@ local function apply(b, w, now)
     pcall(function() b.veh:K2_TeleportTo(b.O, ZERO_ROT) end)
     b.applied, b.state, b.since, b.sample, b.nextSample = w.id, "building", now, nil, 0
     b.fresh, b.burst, b.lateBurst, b.modeChanged = false, 0, false, false
+    b.lsig = ""                                            -- 4-way garage: a (re)built model wears its preset's livery
     verbose = verbose + 1
     say("bay %d: %s %s (%s, archetype %d, %s, %s) (V-VP-%s, V-RC-17)", b.i, w.id, how, tostring(w.p.name), w.arch,
         modeOf(b), gap and string.format("%d ms after the previous build", gap) or "first build", update and "02" or "01")
@@ -926,6 +933,59 @@ local function arm(b, why)
     U.dbg(TAG, "bay %d: still burst of %d capture(s) (%s)", b.i, b.burst, tostring(why))
 end
 
+-- 4-way garage: the bay's wanted livery differs from the one on its ready model (want.lsig: "" = no livery control)
+local function liveryPending(b)
+    local w = b.want
+    if not (w and w.id == b.applied and w.lsig and w.lsig ~= "") then return false end
+    return w.lsig ~= b.lsig
+end
+
+-- The wanted tags onto the model (cfg.Garage4BayLivery), then the bay waits for the model again (same readiness test:
+-- the next capture shows the livery). A refusal is logged once per bay and pick and never retried for that livery.
+local function applyLivery(b, now)
+    local w = b.want
+    b.lsig = w.lsig
+    local mode = opt("Garage4BayLivery", "refresh")
+    if mode == "off" then return false end
+    local comp = nil
+    pcall(function() comp = b.veh.CustomisationComponent end)
+    if not U.ok(comp) then
+        U.logOnce("vpreview.livery.comp." .. b.i, TAG, "bay %d: no CustomisationComponent: livery not shown", b.i)
+        return false
+    end
+    local ok, err
+    if mode == "ui" then
+        ok, err = pcall(function()
+            for _, k in ipairs(LIVERY_ORDER) do
+                local tag = w.livery[k]
+                if tag then comp:UpdateUISelection(UI_SEL[k], tag, -1) end
+            end
+        end)
+    else
+        ok, err = pcall(function()
+            local rec = comp.ActiveRecipe
+            if not U.ok(rec) then error("no ActiveRecipe") end
+            local n = U.objName(rec) or ""
+            if n:find("^Default__") then error("ActiveRecipe is a class default object") end
+            for _, k in ipairs(LIVERY_ORDER) do
+                local tag = w.livery[k]
+                if tag then rec[LIVERY_KEYS[k]] = { TagName = U.fname(tag) } end
+            end
+            comp:RefreshRecipe()
+        end)
+    end
+    if not ok then
+        U.logOnce("vpreview.livery." .. b.i .. "." .. tostring(w.lsig), TAG, "bay %d: livery not shown (%s): %s", b.i,
+            mode, tostring(err))
+        return false
+    end
+    b.state, b.since, b.sample, b.nextSample = "building", now, nil, 0
+    b.fresh, b.burst, b.lateBurst = false, 0, false
+    stats.liveries = (stats.liveries or 0) + 1
+    say("bay %d: livery %s on %s (%s) (G4-02)", b.i, w.lsig, tostring(b.applied), mode)
+    return true
+end
+
 local function becomeReady(b, box, now, how)
     b.box = box
     b.pivot = vec(function() return b.veh:K2_GetActorLocation() end) or { X = b.O.X, Y = b.O.Y, Z = b.O.Z }
@@ -945,6 +1005,8 @@ local function becomeReady(b, box, now, how)
     say("bay %d ready: %s, %s unit(s), %s bounds %.0fx%.0fx%.0f (r %.0f), camera %.0f uu, %d ms, %s, %s (V-VP-01)",
         b.i, tostring(b.applied), tostring(box.count), tostring(box.kind), 2 * E.X, 2 * E.Y, 2 * E.Z, box.r,
         b.dist or 0, math.floor(now - b.since), how, modeOf(b))
+    -- 4-way garage: the livery first (no capture of the preset's own look; the bay waits for the model again)
+    if liveryPending(b) and applyLivery(b, now) then b.due = false end
 end
 
 local function checkBuild(b, now)
@@ -1002,6 +1064,7 @@ end
 -- capture itself is M.tick's, within SetupPreviewCaptureBudget).
 local function runReady(b, now, dt)
     if not (U.ok(b.veh) and U.ok(b.comp)) then return failBay(b, b.applied, "a bay actor vanished") end
+    if liveryPending(b) and applyLivery(b, now) then return end          -- 4-way garage: a new livery, no respawn
     local age = now - b.readyAt
     if age <= LATE_MS and now >= (b.nextLate or 0) then
         b.nextLate = now + 500
@@ -1037,7 +1100,7 @@ local function runReady(b, now, dt)
     if dps ~= 0 then
         b.yaw = (b.yaw + dps * dt / 1000) % 360
         spinTo(b, b.yaw)
-        local every = num("SetupPreviewCaptureMs", 66)
+        local every = capEvery[b.i] or num("SetupPreviewCaptureMs", 66)
         b.due = every <= 0 or now - (b.lastCap or 0) >= every - CAPTURE_SLACK_MS
     else
         local at = STATIC_CAPS[(b.capN or 0) + 1]
@@ -1072,7 +1135,8 @@ end
 
 -- What a card shows of bay b (render or 2D card, dimmed or not): a change re-renders the card.
 local function sig(b)
-    return b.state .. "|" .. tostring(b.shown) .. "|" .. tostring(b.fresh) .. "|" .. tostring(b.applied)
+    return b.state .. "|" .. tostring(b.shown) .. "|" .. tostring(b.fresh) .. "|" .. tostring(b.applied) .. "|"
+        .. tostring(b.lsig)
 end
 
 local function allKeys()
@@ -1086,8 +1150,24 @@ end
 function M.enabled()
     if opt("SetupPreview3D", true) == false then return false, "SetupPreview3D = false" end
     if broken then return false, broken end
-    if St.phase ~= "FRONTEND" then return false, "phase " .. tostring(St.phase) end
+    if St.phase ~= "FRONTEND" then
+        for _, ph in pairs(outside) do
+            if ph == St.phase then return true end         -- 4-way garage in the paddock (allowOutside)
+        end
+        return false, "phase " .. tostring(St.phase)
+    end
     return true
+end
+
+-- 4-way garage (couch campaign): owner's bays may live outside the front end, in the CURRENT phase only (a phase change
+-- drops the grant and releases every bay). on = false: the grant goes (the caller releases its bays).
+function M.allowOutside(owner, on)
+    outside[tostring(owner)] = on and St.phase or nil
+end
+
+-- 4-way garage: ms between two captures of key i's bay while it spins (nil = SetupPreviewCaptureMs). Pure Lua.
+function M.setCaptureMs(i, ms)
+    capEvery[i] = (tonumber(ms) and ms > 0) and ms or nil
 end
 
 function M.aspect() return num("SetupPreviewW", 960) / num("SetupPreviewH", 540) end
@@ -1095,7 +1175,7 @@ function M.aspect() return num("SetupPreviewW", 960) / num("SetupPreviewH", 540)
 -- Key i (classic: the column; RACERS: ControllerId + 1) shows preset entry p (vehicles.presets) of class entry cls.
 -- Idempotent: the build starts in tick() once the pick has not changed for SetupPreviewDebounceMs (and at most one
 -- build per SetupPreviewSpawnGapMs over all bays).
-function M.want(i, p, cls)
+function M.want(i, p, cls, livery)
     if not M.enabled() or type(p) ~= "table" or type(p.id) ~= "string" or type(cls) ~= "table" then return end
     local b = bays[i]
     if b and b.gen ~= St.worldGen then bays[i], b = nil, nil end
@@ -1103,8 +1183,26 @@ function M.want(i, p, cls)
         b = newBay(i)
         bays[i] = b
     end
-    if b.want and b.want.id == p.id then return end
-    b.want = { id = p.id, p = p, arch = math.floor(tonumber(cls.arch) or 0), at = St.nowMs() }
+    -- 4-way garage: the livery's signature ("" = none asked: the bay keeps whatever its model wears)
+    local lsig = ""
+    if type(livery) == "table" then
+        local parts = {}
+        for _, k in ipairs(LIVERY_ORDER) do parts[#parts + 1] = tostring(livery[k] or "-") end
+        lsig = table.concat(parts, "|")
+    end
+    if b.want and b.want.id == p.id then
+        if lsig ~= "" and b.want.lsig ~= lsig then b.want.livery, b.want.lsig = livery, lsig end
+        return
+    end
+    b.want = { id = p.id, p = p, arch = math.floor(tonumber(cls.arch) or 0), at = St.nowMs(),
+               livery = (lsig ~= "") and livery or nil, lsig = lsig }
+end
+
+-- 4-way garage: key i's bay shows its applied pick WITH the wanted livery (the area's image is current).
+function M.liveryShown(i)
+    local b = bays[i]
+    if not (b and b.want) then return false end
+    return b.state == "ready" and b.fresh and b.want.id == b.applied and (b.want.lsig == "" or b.want.lsig == b.lsig)
 end
 
 -- Mode of key i's bay: "spin" (turntable, a capture every SetupPreviewCaptureMs) | "still" (SetupPreviewYaw, bursts
@@ -1154,6 +1252,7 @@ function M.brush(i)
     local b = bays[i]
     if not (b and b.shown and U.ok(b.rt)) then return nil end
     local fresh = b.state == "ready" and b.fresh and b.want ~= nil and b.want.id == b.applied
+        and (b.want.lsig == nil or b.want.lsig == "" or b.want.lsig == b.lsig)
     local base = opt("SetupPreviewBrush", "material") == "texture" and "texture" or "material"
     local wash = (not fresh and b.rung ~= nil and b.rung ~= "cutout") and cardColours()[b.rung].wash or nil
     local kind, dim = base, fresh and 1.0 or DIM
@@ -1296,7 +1395,7 @@ end
 
 -- Key i's bay goes (its player left). freeTarget: the caller took the render off its image first.
 function M.release(i, why, freeTarget)
-    modes[i] = nil
+    modes[i], capEvery[i] = nil, nil
     local b = bays[i]
     if not b then return end
     bays[i] = nil
@@ -1317,7 +1416,7 @@ function M.releaseAll(why, freeTargets)
         if freeTargets and U.ok(b.rt) then pcall(function() U.cdo(KRL):ReleaseRenderTarget2D(b.rt) end) end
         b.rt, b.mid = nil, nil
     end
-    bays, lastTick, modes = {}, nil, {}
+    bays, lastTick, modes, capEvery = {}, nil, {}, {}
     record()
     if nb > 0 then
         U.log(TAG, "released (%s): %d bay(s), %d actor(s) destroyed; session %d spawn(s), %d rebuild(s), %d ready, "
@@ -1354,7 +1453,7 @@ function M.stats()
     local s = { captures = stats.captures, capturesPerSec = n * 1000 / span, spawns = stats.spawns,
                 rebuilds = stats.rebuilds, ready = stats.ready, failed = stats.failed, gapWaits = stats.gapWaits,
                 bursts = stats.bursts, bays = 0, spin = 0, still = 0, backdrop = rungNow(), planes = stats.planes,
-                calibrations = stats.calibrations }
+                calibrations = stats.calibrations, liveries = stats.liveries or 0 }
     for _, b in pairs(bays) do
         local m = modeOf(b)
         s.bays, s[m] = s.bays + 1, s[m] + 1
@@ -1389,6 +1488,7 @@ end)
 
 -- Safety net (lobby.lua closes the setup on a phase change, which releases): never a bay outside the front end.
 St.on("phase", TAG, function(new)
+    outside = {}                                           -- 4-way garage: a grant holds for one phase only
     if new ~= "FRONTEND" and next(bays) ~= nil then
         if St.launchHold() then M.dropAll("phase " .. tostring(new)) else M.releaseAll("phase " .. tostring(new)) end
     end

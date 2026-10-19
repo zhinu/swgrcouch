@@ -123,6 +123,7 @@ local function assistMode()
 end
 
 local function objName(o)
+    if not U.ok(o) then return "?" end        -- GetFName on a null wrapper is a native AV
     local ok, s = pcall(function() return o:GetFName():ToString() end)
     if ok and type(s) == "string" then return s end
     return "?"
@@ -266,7 +267,7 @@ local function keyDown(pc, name)
     name = DIGITAL[name] or name
     local k = fkeys[name]
     if not k then k = { KeyName = U.fname(name) }; fkeys[name] = k end
-    local ok, v = pcall(function() return pc:IsInputKeyDown(k) end)   -- per-PC PlayerInput (pause.lua relies on it)
+    local ok, v = pcall(U.callMethod, pc, "IsInputKeyDown", k)   -- per-PC PlayerInput (pause.lua relies on it)
     return ok and v == true
 end
 
@@ -662,31 +663,44 @@ end
 -- Vehicle.Condition.CriticalMalfunction calls P1's own PC event (the call ignpad makes for guests' checks).
 local RC = { prevB = {}, n = 0 }
 local CRIT_TAG = "Vehicle.Condition.CriticalMalfunction"
+
+-- true while this car carries the critical-malfunction condition tag (the RECOVER prompt is up)
+function M.carInCrit(car)
+    if not (U.ok(car) and U.isVehicle(car)) then return false end
+    local crit = false
+    pcall(function() crit = car.VehicleState:IsConditionTagActive({ TagName = U.fname(CRIT_TAG) }) == true end)
+    return crit
+end
+
+-- The B action of a critical malfunction for this PC: its own IA_Veh_CriticalMalfunction PC event (what a real B press
+-- runs; V-PRE-CRIT). Returns ok, err.
+function M.critRecoverPress(pc)
+    if not U.ok(pc) then return false, "no PC" end
+    local ia = iaObject(S(), "IA_Veh_CriticalMalfunction")
+    if not ia then return false, "no IA object" end
+    local fn = EVENT_FN.IA_Veh_CriticalMalfunction
+    return pcall(function() pc[fn](pc, {}, 0.0, 0.0, ia) end)
+end
+
+local KEY_B = nil
 function M.raceTick()
     if St.phase ~= "RACING" or S().active or opt("RaceCritAssist", "p1") == "off" then return end
     local lps = U.localPlayers()
     if #lps < 2 then return end
     local who = opt("RaceCritAssist", "p1")
-    local fn = EVENT_FN.IA_Veh_CriticalMalfunction
     for i, e in ipairs(lps) do
         if (who == "all" or i == 1) and U.ok(e.pc) then
             local k = U.key(e.pc)
-            local down = false
-            pcall(function() down = e.pc:IsInputKeyDown({ KeyName = U.fname("Gamepad_FaceButton_Right") }) == true end)
+            -- couch-fix33 (racegc): cached UFunction + one reused key table (was a closure + a key table per tick)
+            KEY_B = KEY_B or { KeyName = U.fname("Gamepad_FaceButton_Right") }
+            local down = U.keyDown(e.pc, KEY_B)
             local edge = down and not RC.prevB[k]
             RC.prevB[k] = down
             if edge then
-                local car = e.pc.Pawn
-                local crit = false
-                if U.ok(car) and U.isVehicle(car) then
-                    pcall(function()
-                        crit = car.VehicleState:IsConditionTagActive({ TagName = U.fname(CRIT_TAG) }) == true
-                    end)
-                end
-                if crit then
-                    local ia = iaObject(S(), "IA_Veh_CriticalMalfunction")
-                    local ok, err = false, "no IA object"
-                    if ia then ok, err = pcall(function() e.pc[fn](e.pc, {}, 0.0, 0.0, ia) end) end
+                local car = nil
+                pcall(function() car = e.pc.Pawn end)
+                if M.carInCrit(car) then
+                    local ok, err = M.critRecoverPress(e.pc)
                     RC.n = RC.n + 1
                     U.log(TAG, "P%d B during a critical malfunction -> its PC event %s (#%d%s) (V-PRE-CRIT)", i,
                         ok and "called" or "FAILED", RC.n, ok and "" or (": " .. tostring(err)))

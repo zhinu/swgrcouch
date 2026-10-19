@@ -1,6 +1,6 @@
 # Live facts, RACERS runs (2026-10-10 02:13-02:47 local), SWGRCouch 0.10.0, hotfix build CL382493
 
-Setup: the hotfix game copy (`~/Games/StarWarsGalacticRacer-SWGRCouch-hotfix`, CL382493), UE4SS Galactic Racer Edition,
+Setup: the hotfix game copy (`<hotfix game copy>`, CL382493), UE4SS Galactic Racer Edition,
 window 1280x720, 4 virtual pads (`tools/vpad.py`; ADD PLAYERS made a dormant guest for pads 2-4, pad 2 joined). The test
 copy's `config_user.lua` had `TestCommands = true` and 640x360 preview targets (every bay logs `target 640x360`; the
 960x540 default was not run live). Steps were driven through `test.cmd` (`setup.debugJump`, `racers.event`,

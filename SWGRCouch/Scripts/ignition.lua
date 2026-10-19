@@ -74,13 +74,14 @@ local function P()
     return St.present.ign
 end
 
+-- U.findLoaded (cached; a miss retried after 1 s or on a phase / world change): the raw StaticFindObject (~2.5 ms in a
+-- race world) ran on every MAIN tick of the ignition sequence (race smoothness 2026-10-15, present.tick spikes)
 local function loadedClass(path)
-    local ok, c = pcall(StaticFindObject, path)
-    if ok and U.ok(c) then return c end
-    return nil
+    return U.findLoaded(path, 1000)
 end
 
 local function objName(o)
+    if not U.ok(o) then return "?" end        -- GetFName on a null wrapper is a native AV
     local ok, s = pcall(function() return o:GetFName():ToString() end)
     if ok and type(s) == "string" then return s end
     return "?"
@@ -99,7 +100,7 @@ local function findGameScreen(ign, cls)
     if not cls then return nil end
     local mgr = U.giSubsystem("UIManager")
     if U.ok(mgr) then
-        local ok, w = pcall(function() return mgr:GetWidgetInLayer(cls, HUD_LAYER) end)
+        local ok, w = pcall(U.callMethod, mgr, "GetWidgetInLayer", cls, HUD_LAYER)
         if ok and U.ok(w) and not isOurs(ign, w) then ign.game = w; return w end
     end
     local now = St.nowMs()
@@ -134,7 +135,9 @@ local function photoModeActive(lps)
     end
     for _, lp in ipairs(lps) do
         local cn = nil
-        pcall(function() cn = lp.pc.Pawn:GetClass():GetFName():ToString() end)
+        -- U.ok FIRST: GetClass on a null wrapper is a native AV (UE4SS.dll+0x2ace67 null+0x10) that pcall cannot catch: at the ignition the
+        -- pawn can still be null (a CONTINUEd run straight into its race crashed here every time, live 2026-10-14)
+        pcall(function() local pawn = lp.pc.Pawn; if U.ok(pawn) then cn = U.className(pawn) end end)
         if type(cn) == "string" and cn:find("PhotoModePawn", 1, true) then return true end
     end
     return false
@@ -230,12 +233,12 @@ local function autoComplete(e, comp, pnum)
     local count, called, err = 0, false, nil
     local okM = pcall(function()
         local want = nil
-        comp.PreFlightChecksByAction:ForEach(function() count = count + 1 end)
+        comp.PreFlightChecksByAction:ForEach(function() count = count + 1 end) -- uobj: opt-in IgnitionSoftComplete only (0.5.1)
         if e.autoPrevCount and count < e.autoPrevCount then e.autoShrinks = true end
         want = e.autoShrinks and 1 or ((e.autoMapDone or 0) + 1)
         if want > count then return end
         local i = 0
-        comp.PreFlightChecksByAction:ForEach(function(_, v) -- TMap:ForEach(key, value) [UE4SS tmap.md]
+        comp.PreFlightChecksByAction:ForEach(function(_, v) -- uobj: opt-in IgnitionSoftComplete only; TMap:ForEach(key, value)
             i = i + 1
             if i ~= want or called then return end
             local st = U.unwrap(v)
@@ -361,12 +364,15 @@ local function syncScreen(e, comp)
             U.try(TAG, function() w:SetupIgnitionBindings() end)
         end
     end
+    U.trace("ign", "P" .. e.pnum .. " sync: detach")
     detachFromP1(e)
+    U.trace("ign", "P" .. e.pnum .. " sync: list")
     if comp and not e.listDone and comp.bAreChecksUnderway == true then
         e.listDone = true
         -- the list is built by the component's OnPreFlightChecksActivate; a screen made after it fired has none
         if U.arrayCount(w.PreFlightCheckLists) == 0 then U.try(TAG, function() w:AddPreflightChecksToList() end) end
     end
+    U.trace("ign", "P" .. e.pnum .. " sync: state")
     local vs = pawn.VehicleState
     if not U.ok(vs) then return end
     local ph, shown = vs.IgnitionPhase, w.IgnitionPhase
@@ -493,9 +499,12 @@ function M.tick(lps)
             local k = U.key(lp.pc)
             local s = ign.state[k] or {}
             ign.state[k] = s
+            U.trace("ign", "P" .. lp.index .. " pfcOf")
             local comp = pfcOf(lp.pc)
             if comp then
+                U.trace("ign", "P" .. lp.index .. " traceChecks")
                 traceChecks(s, comp, lp.index)
+                U.trace("ign", "P" .. lp.index .. " traceIgnition")
                 traceIgnition(s, lp.pc, lp.index)
                 if simple and comp.bUseSimplePreflights ~= true then
                     -- VERIFY(V-PRE-05): writing the Bool directly simplifies the sequences like the settings toggle
@@ -513,8 +522,10 @@ function M.tick(lps)
             end
             local e = nil
             if perView and cls then
+                U.trace("ign", "P" .. lp.index .. " ensureScreen")
                 e = ensureScreen(ign, cls, lp)
                 if e then
+                    U.trace("ign", "P" .. lp.index .. " syncScreen")
                     syncScreen(e, comp)
                     if e.detachFailed then ign.anyDetachFailed = true end
                     if s.simpleChanged then
@@ -525,6 +536,7 @@ function M.tick(lps)
             end
             if comp and s.underway and not s.probed then
                 s.probed = true
+                U.trace("ign", "P" .. lp.index .. " probe")
                 U.try(TAG, probe, lp, comp, e)
             end
             local screen = e and e.widget or nil

@@ -80,6 +80,27 @@ local function setupM() return U.mod("setup") end
 local function TH() return U.mod("theme") end              -- 0.12.0 v2 only: P1's input mode (theme.inputMode)
 local function Q() return U.mod("quick") end                -- 0.13.0 QUICK RACE (settings PlayMode)
 
+-- 4-WAY GARAGE (garage4.lua, cfg.Garage4Way; docs/dev/guest-garage.md section 8): A on a card's VEHICLE stage opens
+-- every player's garage area at once; while it is open every event of every player (dispatch) goes to HIS area only,
+-- the cards wait (no renders) and the bays show each area's car with its livery. DONE / B closes an area; when every
+-- area is done the garage closes and each card that was on VEHICLE goes on (PERKS / READY), the others stay where they
+-- were. The model picked there is the card's preset; the livery goes with the pick (choicePlayers pick.livery).
+local function G4()
+    local ok, g = pcall(U.mod, "garage4")
+    return (ok and type(g) == "table") and g or nil
+end
+local function g4Open()
+    local g = G4()
+    local ok, on = pcall(function() return g and g.isOpen() end)
+    return ok and on == true
+end
+local function g4Wanted()
+    if opt("Garage4Way", false) ~= true then return false end
+    local g = G4()
+    local ok, on = pcall(function() return g and g.wanted() end)
+    return ok and on == true
+end
+
 -- vpreview stays optional as in setup.lua: a load error leaves every card on its 2D art.
 local vpMod = nil
 local function VP()
@@ -161,7 +182,7 @@ local PILL_JOIN, PILL_READY = "racers.join", "racers.ready"
 --   0.12.0: renderer = "cards" | "cards2" and style = "classic" | "v2" (this page's, M.build); mode = P1's input mode
 --   ("pad" | "mouse", the last poll's); cmdFocus = what setup.commandFocus was last told; pillJoin / pillReady = the
 --   status-pill entries posted (text / signature); readySig = the READY flags the READY cards' pips show; namesFor /
---   namesWait = the class whose model-name read finished / a read this module waited for (namesTick)
+--   namesWait = {[class key] = true}: the classes whose model-name read finished / reads this module waited for
 local function S()
     local s = St.racers
     if type(s) ~= "table" then
@@ -170,7 +191,7 @@ local function S()
               inPoll = false, allReady = nil, soundAt = -1e9, statusText = nil, statusAt = 0, statusHoldUntil = 0,
               dormant = nil, dormantV2 = nil, dormantAt = -1e9, reconcileAt = -1e9,
               renderer = nil, style = nil, mode = nil, cmdFocus = nil, pillJoin = nil, pillReady = nil, readySig = nil,
-              namesFor = nil, namesWait = nil,
+              namesFor = {}, namesWait = {},
               p1 = { acceptAt = nil, lastKbMs = -1e9, kbAcceptMs = -1e9, lastDir = nil, lastDirMs = -1e9,
                      lastKey = nil, lastKeyMs = -1e9, sawB = false, sinkEvents = 0, clicked = false, drops = 0,
                      leaks = 0, leaking = false, held = false, override = nil, ringAt = nil, keepNext = 0 } }
@@ -254,12 +275,24 @@ local function p1Gamepad()
     return true
 end
 
-local function pilotStyle(pl) return P().styleKey(pl.pilotId, S().arch) end
+-- The class a card shows and races (pl.arch / pl.cls, set by restart): the page's class, except a GALACTIC GRAND PRIX
+-- player's own speeder class (wantClass below). Every per-card read goes through these, never s.arch / s.cls: the
+-- live2 bug was P2's card built from the page's (P1's) class while gp.prelaunch raced him on his own.
+local function archOf(pl)
+    if type(pl) == "table" and pl.arch ~= nil then return pl.arch end
+    return S().arch
+end
+local function clsOf(pl)
+    if type(pl) == "table" and type(pl.cls) == "table" then return pl.cls end
+    return S().cls
+end
+
+local function pilotStyle(pl) return P().styleKey(pl.pilotId, archOf(pl)) end
 
 -- The loadout the card's player races: QUICK RACE the tier kit (quick.loadout), else the card's own.
 local function raceLo(pl)
     if quickRace() then
-        local ok, lo = pcall(function() return Q().loadout(S().arch, pilotStyle(pl)) end)
+        local ok, lo = pcall(function() return Q().loadout(archOf(pl), pilotStyle(pl)) end)
         if ok and type(lo) == "table" then return lo end
     end
     return pl.lo
@@ -274,7 +307,39 @@ local function inRun(pl)
     local r = runM()
     if not (r and r.active and r.active()) then return false end
     local st = r.state()
-    return st ~= nil and st.players[pl.ctrlId] ~= nil and tonumber(st.arch) == tonumber(S().arch)
+    return st ~= nil and st.players[pl.ctrlId] ~= nil and tonumber(st.arch) == tonumber(archOf(pl))
+end
+
+-- 0.16 GALACTIC GRAND PRIX (gp.lua): while a GP is on every card races the GP build: the style's kit, no parts and an
+-- equal budget of stat levels (gp.cardLoadout / cardRaise); only levels and the racer style can be edited.
+local function gpM()
+    local ok, g = pcall(U.mod, "gp")
+    return ok and type(g) == "table" and g or nil
+end
+local function inGP()
+    local g = gpM()
+    local ok, on = pcall(function() return g and g.owns() end)
+    return ok and on == true
+end
+local function gpLoadout(pl, style, prev)
+    local g = gpM()
+    local ok, lo = pcall(g.cardLoadout, pl.ctrlId, pl.pnum, archOf(pl), style, prev)
+    if ok and type(lo) == "table" then return lo end
+    return nil
+end
+
+-- The class a player's card must show: a GALACTIC GRAND PRIX speeder race with per-player classes (gp.cardClass: the
+-- class the GP races him in, "each" rule) gives each player his own speeder class, else the page's. -> arch, cls
+local function wantClass(pl)
+    local s = S()
+    if s.arch ~= nil and tonumber(s.arch) ~= 1 and type(pl) == "table" and inGP() then
+        local ok, key = pcall(function() return gpM().cardClass(pl.ctrlId) end)
+        if ok and type(key) == "string" then
+            local cls = V.classByKey(key)
+            if type(cls) == "table" and tonumber(cls.arch) ~= 1 then return cls.arch, cls end
+        end
+    end
+    return s.arch, s.cls
 end
 
 -- Width class of the card row ("W" 1-2 players, "M" 3, "N" 4) for the pilot crops and the roster tiles.
@@ -317,12 +382,13 @@ end
 
 -- Every pick change: the session memory (pilot and preset per class; one loadout, validated per class on use, §2.4).
 local function remember(pl)
-    local arch = S().arch
+    local arch = archOf(pl)
     if arch == nil then return end
     local m = memOf(pl.ctrlId)
     m.pilot[arch], m.preset[arch] = pl.pilotId, pl.presetId
     m.last = pl.pilotId or m.last                -- 0.12.0: the lobby strip's head shot (M.lastPilotThumb)
-    if not inRun(pl) then m.lo = K().copy(pl.lo) end   -- 0.13.0: a run build never replaces the player's own build
+    -- 0.13.0: a run build never replaces the player's own build (0.16: nor a GALACTIC GRAND PRIX build)
+    if not inRun(pl) and not inGP() then m.lo = K().copy(pl.lo) end
 end
 
 -- settings LastRaceRacers "<ctrlId>=<pilot>@<preset>@<loadout code>;..." (§7.1) -> {[ctrlId] = {pilot, preset, code}}.
@@ -364,17 +430,18 @@ end
 -- The first model no other player drives (its standard livery), else vehicles.defaultPresetIndex (§2.4).
 local function freePreset(pl)
     local s = S()
+    local arch = archOf(pl)
     local used = {}
     for c, o in pairs(s.players) do
-        if c ~= pl.ctrlId and o.presetId then
-            local _, _, m = V.modelOf(s.arch, o.presetId)
+        if c ~= pl.ctrlId and o.presetId and archOf(o) == arch then
+            local _, _, m = V.modelOf(arch, o.presetId)
             if m then used[m.base] = true end
         end
     end
-    for _, m in ipairs(V.models(s.arch)) do
+    for _, m in ipairs(V.models(arch)) do
         if not used[m.base] and m.presets[1] then return m.presets[1].id end
     end
-    local p = V.presets(s.arch)[V.defaultPresetIndex(s.arch, pl.pnum)]
+    local p = V.presets(arch)[V.defaultPresetIndex(arch, pl.pnum)]
     return p and p.id or nil
 end
 
@@ -401,8 +468,7 @@ end
 --   loadout memory -> persisted -> the pilot's style kit (each validated for the class).
 -- how = "new" (joined) | "visit" (a new visit) | "class" (class change); old = the pilot before.
 local function defaultPicks(pl, how, old)
-    local s = S()
-    local arch, Pm, Km = s.arch, P(), K()
+    local arch, Pm, Km = archOf(pl), P(), K()
     local mem, per = memOf(pl.ctrlId), persisted(pl.ctrlId) or {}
     local remembered = {}
     local function add(id) if type(id) == "string" then remembered[#remembered + 1] = id end end
@@ -424,12 +490,13 @@ local function defaultPicks(pl, how, old)
         local okB, rb = pcall(r.buildFor, pl.ctrlId, arch, style)
         if okB and type(rb) == "table" then pl.lo = rb end
     end
+    if inGP() then pl.lo = gpLoadout(pl, style, nil) or pl.lo end      -- 0.16 GALACTIC GRAND PRIX
 end
 
 local function freshRows() return { pilot = 1, vehicle = 1, perks = 1, ready = 1 } end
 
 local function newPlayer(e)
-    return { ctrlId = e.ctrlId, pnum = e.pnum, pc = e.pc, isP1 = e.pnum == 1, arch = nil, stage = nil,
+    return { ctrlId = e.ctrlId, pnum = e.pnum, pc = e.pc, isP1 = e.pnum == 1, arch = nil, cls = nil, stage = nil,
              row = freshRows(), last = freshRows(), picker = nil, pilotId = nil, presetId = nil, lo = nil,
              follow = { vehicle = true, perks = true }, nav = { primed = false, prev = {}, dirMs = {} },
              presses = 0, toast = nil, toastUntil = 0, backArmUntil = 0, dirty = true, dirtyAt = 0, pilotAt = 0,
@@ -439,7 +506,10 @@ end
 -- A card (re)starts at the first stage with fresh rows and its default picks (a join, a new visit, a class change).
 local function restart(pl, how, now, old)
     local s = S()
-    pl.arch, pl.stage = s.arch, stageList()[1]
+    pl.arch, pl.cls = wantClass(pl)
+    pl.stage = stageList()[1]
+    -- RC-2: a card in another class than the page (GALACTIC GRAND PRIX) gets its class's system flags first
+    if pl.arch ~= s.arch then U.try(TAG, function() PA().systems(pl.arch) end) end
     pl.row, pl.last, pl.picker = freshRows(), freshRows(), nil
     pl.toast, pl.toastUntil, pl.backArmUntil, pl.presses = nil, 0, 0, 0
     pl.follow.vehicle = true                 -- "the player has not changed MODEL / LIVERY in this setup"
@@ -461,10 +531,14 @@ local function restart(pl, how, now, old)
         end
     else
         local r = runM()
-        local okA, on = pcall(function() return r and r.active() and tonumber(r.state().arch) == tonumber(S().arch) end)
+        local okA, on = pcall(function() return r and r.active() and tonumber(r.state().arch) == tonumber(archOf(pl)) end)
         if okA and on then   -- a late joiner: in the run from the next launch, on a starter build + one free pick
             pl.toast, pl.toastUntil = "JOINS THE GALAXY RUN ON A STARTER BUILD", now + 4000
         end
+    end
+    if inGP() then
+        local okG, line = pcall(function() return gpM().cardLine(pl.pnum) end)
+        if okG and line then pl.toast, pl.toastUntil = line, now + 4000 end
     end
     remember(pl)
     markDirty(pl, now)
@@ -516,7 +590,7 @@ local function reconcile(why, restartAll, now)
     for i, e in ipairs(list) do
         ids[i] = tostring(e.ctrlId)
         local pl = s.players[e.ctrlId]
-        if pl and pl.arch ~= s.arch then stale = true end
+        if pl and pl.arch ~= (wantClass(pl)) then stale = true end
     end
     local sig = table.concat(ids, ",")
     if not restartAll and not stale and sig == s.orderSig then
@@ -527,6 +601,7 @@ local function reconcile(why, restartAll, now)
         return false
     end
     s.orderSig = sig
+    if g4Open() then U.try(TAG, G4().close, "players changed: the cards first") end
     local seen = {}
     for _, e in ipairs(list) do seen[e.ctrlId] = true end
     local gone = {}
@@ -554,7 +629,7 @@ local function reconcile(why, restartAll, now)
             how = "new"
         elseif restartAll then
             how = "visit"                        -- a new visit replays the remembered picks, whatever class came before
-        elseif pl.arch ~= s.arch then
+        elseif pl.arch ~= (wantClass(pl)) then
             how = "class"
         end
         pl.pnum, pl.pc, pl.isP1 = i, e.pc, i == 1
@@ -680,7 +755,7 @@ end
 -- loadout is kept (toast LOADOUT KEPT). The other PILOT cards re-render: their rosters tag who holds what.
 local function setPilot(pl, id, now)
     local s = S()
-    local Pm, arch = P(), s.arch
+    local Pm, arch = P(), archOf(pl)
     local oldId = pl.pilotId
     local oldSig = Pm.signature(oldId, arch)
     pl.pilotId, pl.pilotAt = id, now
@@ -701,8 +776,10 @@ local function setPilot(pl, id, now)
                 pl.lo.from = "pilot"
             end
         end
-        if not quickRace() then toast(pl, "LOADOUT KEPT", now) end   -- QUICK RACE: nobody's build is shown
+        if not quickRace() and not inGP() then toast(pl, "LOADOUT KEPT", now) end   -- QUICK RACE: nobody's build is shown
     end
+    -- 0.16 GALACTIC GRAND PRIX: the new pilot's style kit (a pod: the new pod's own build), the same levels
+    if inGP() then pl.lo = gpLoadout(pl, style, pl.lo) or pl.lo end
     pl.follow.perks = isPilotKit(pl.lo)
     remember(pl)
     for _, o in pairs(s.players) do
@@ -712,7 +789,7 @@ end
 
 -- PILOT row: the previous / next pilot nobody else holds (§2.8, V-RC-09).
 local function stepPilot(pl, d, now)
-    local e = P().step(S().arch, pl.pilotId, d, takenMap(), pl.ctrlId)
+    local e = P().step(archOf(pl), pl.pilotId, d, takenMap(), pl.ctrlId)
     if not e then
         toast(pl, "NO OTHER PILOT IS FREE", now)
         return "quiet"
@@ -723,12 +800,12 @@ end
 
 -- MODEL row: the next base model, on the pilot's signature livery when it has one, else its standard livery (§4.2).
 local function stepModel(pl, d)
-    local s = S()
-    local models = V.models(s.arch)
+    local arch = archOf(pl)
+    local models = V.models(arch)
     if #models < 2 then return nil end
-    local mi = V.modelOf(s.arch, pl.presetId) or 1
+    local mi = V.modelOf(arch, pl.presetId) or 1
     mi = ((mi - 1 + d) % #models) + 1
-    local p = V.modelPreset(s.arch, mi, P().signature(pl.pilotId, s.arch))
+    local p = V.modelPreset(arch, mi, P().signature(pl.pilotId, arch))
     if not p then return nil end
     pl.presetId, pl.follow.vehicle = p.id, false
     remember(pl)
@@ -737,8 +814,7 @@ end
 
 -- LIVERY row: the model's presets (standard first, then the owner liveries).
 local function stepLivery(pl, d)
-    local s = S()
-    local _, li, m = V.modelOf(s.arch, pl.presetId)
+    local _, li, m = V.modelOf(archOf(pl), pl.presetId)
     if not m or #m.presets < 2 then return nil end
     li = ((li - 1 + d) % #m.presets) + 1
     pl.presetId, pl.follow.vehicle = m.presets[li].id, false
@@ -768,8 +844,21 @@ local function cycleSlot(pl, slot, d, now)
             return "nav"
         end
     end
-    local _, changed, toastText = K().cycle(pl.lo, slot, d, S().arch, pilotStyle(pl))
+    if inGP() then                                       -- 0.16 GALACTIC GRAND PRIX: levels (budget) and style only
+        if kindR ~= "tune" and kindR ~= "style" then
+            toast(pl, "GRAND PRIX: LEVELS AND STYLE ONLY", now)
+            return "nav"
+        end
+        if kindR == "tune" and d > 0 then
+            local okR, can, why = pcall(function() return gpM().cardRaise(pl.lo, nR, pl.pnum) end)
+            if okR and can == false then toast(pl, why or "GRAND PRIX", now); return "nav" end
+        end
+    end
+    local _, changed, toastText = K().cycle(pl.lo, slot, d, archOf(pl), pilotStyle(pl))
     if not changed then return nil end
+    if inGP() and kindR == "style" then                    -- the new style's kit, the same levels
+        pl.lo = gpLoadout(pl, pl.lo.style, pl.lo) or pl.lo
+    end
     afterEdit(pl, toastText, now)
     return "nav"
 end
@@ -785,7 +874,11 @@ local function withRunFilter(pl, fn, ...)
 end
 
 local function openPicker(pl, slot)
-    local pk = withRunFilter(pl, K().picker, pl.lo, slot, S().arch)
+    if inGP() and K().slotKind(slot) ~= "style" then         -- 0.16: no parts / abilities to pick in a Grand Prix
+        toast(pl, "GRAND PRIX: LEFT / RIGHT SETS THE LEVELS", nowMs())
+        return "nav"
+    end
+    local pk = withRunFilter(pl, K().picker, pl.lo, slot, archOf(pl))
     if not pk or #pk.items == 0 then return nil end
     pl.picker = { slot = slot, kind = pk.kind, cats = pk.cats, cat = pk.cat, items = pk.items, sel = pk.sel }
     return "accept"
@@ -794,7 +887,8 @@ end
 -- Picker A on an item: equip (a family / ladder / trait held by another slot is swapped) and close.
 local function equip(pl, slot, id, now)
     if id == nil then id = false end
-    local _, toastText, changed = K().equip(pl.lo, slot, id, S().arch, pilotStyle(pl))
+    local _, toastText, changed = K().equip(pl.lo, slot, id, archOf(pl), pilotStyle(pl))
+    if changed and inGP() then pl.lo = gpLoadout(pl, pl.lo.style, pl.lo) or pl.lo end   -- 0.16: a style pick
     pl.picker = nil
     if changed then afterEdit(pl, toastText, now) elseif toastText then toast(pl, toastText, now) end
     return "accept"
@@ -830,6 +924,8 @@ HANDLERS.pilot = function(pl, ev, rep, now, r)
     return nil
 end
 
+local openGarage                                -- 4-way garage (defined after dispatch's helpers)
+
 HANDLERS.vehicle = function(pl, ev, rep, now, r)
     if ev == "up" then setRow(pl, r - 1); return "nav" end
     if ev == "down" then
@@ -841,7 +937,13 @@ HANDLERS.vehicle = function(pl, ev, rep, now, r)
         if r == 1 then return stepModel(pl, d) end
         return stepLivery(pl, d)
     end
-    if ev == "accept" then return forward(pl, now) end
+    if ev == "accept" then
+        if g4Wanted() then
+            local what = openGarage(pl, now)
+            if what then return what end
+        end
+        return forward(pl, now)
+    end
     if ev == "back" then return backward(pl, now) end
     return nil
 end
@@ -849,7 +951,7 @@ end
 -- PERKS board (K.slots order): A on KIT = READY, on an upgrade = the next row, anywhere else = the picker; down wraps.
 HANDLERS.perks = function(pl, ev, rep, now, r)
     local Km = K()
-    local slots = Km.slots(S().arch)
+    local slots = Km.slots(archOf(pl))
     local n = #slots
     if r > n then r = n; setRow(pl, r) end
     local slot = slots[r]
@@ -897,7 +999,7 @@ local function onReward(pl, ev, now)
     if ev == "accept" then
         local it = pk.items[pk.sel]
         if not it then return nil end
-        local okC, lo, toastText = pcall(runM().claim, pl.ctrlId, it, S().arch, pilotStyle(pl))
+        local okC, lo, toastText = pcall(runM().claim, pl.ctrlId, it, archOf(pl), pilotStyle(pl))
         pl.picker = nil
         if okC and type(lo) == "table" then
             pl.lo = lo
@@ -924,14 +1026,14 @@ local function onShop(pl, ev, now)
         return "nav"
     end
     if ev == "back" then
-        pcall(runM().buy, pl.ctrlId, { rkind = "leave" }, S().arch, pilotStyle(pl))
+        pcall(runM().buy, pl.ctrlId, { rkind = "leave" }, archOf(pl), pilotStyle(pl))
         pl.picker = nil
         return "nav"
     end
     if ev == "accept" then
         local it = pk.items[pk.sel]
         if not it then return nil end
-        local okB, lo, toastText, nextPk = pcall(runM().buy, pl.ctrlId, it, S().arch, pilotStyle(pl))
+        local okB, lo, toastText, nextPk = pcall(runM().buy, pl.ctrlId, it, archOf(pl), pilotStyle(pl))
         if not okB then pl.picker = nil; return "nav" end
         if type(lo) == "table" then pl.lo = lo; afterEdit(pl, nil, now) end
         if toastText then toast(pl, toastText, now) end
@@ -965,7 +1067,7 @@ local function onPicker(pl, ev, rep, now)
     if ev == "left" or ev == "right" then
         if #pk.cats < 2 then return nil end
         local ci = ((pk.cat - 1 + ((ev == "right") and 1 or -1)) % #pk.cats) + 1
-        local items, sel = withRunFilter(pl, K().pickerCat, pl.lo, pk.slot, S().arch, ci)
+        local items, sel = withRunFilter(pl, K().pickerCat, pl.lo, pk.slot, archOf(pl), ci)
         pk.cat, pk.items, pk.sel = ci, items, sel
         return "nav"
     end
@@ -994,8 +1096,9 @@ local seeded = false
 easyBuild = function(pl, ev, now)
     if opt("CardEasyBuilds", true) == false then return nil end
     if inRun(pl) then toast(pl, "NOT IN A GALAXY RUN", now); return "nav" end
+    if inGP() then toast(pl, "NOT IN A GRAND PRIX", now); return "nav" end
     local s = S()
-    local Km, Pm, arch = K(), P(), s.arch
+    local Km, Pm, arch = K(), P(), archOf(pl)
     if not seeded then seeded = true; math.randomseed(os.time() + math.floor(now or 0)) end
     pl.picker = nil
     local quick = quickRace()            -- QUICK RACE: one build for all, so no COPY and SURPRISE keeps the build
@@ -1046,6 +1149,15 @@ local function dispatch(pl, ev, rep, src, now)
     now = now or nowMs()
     pl.presses = pl.presses + 1
     pl.backHit = false
+    -- 4-way garage open: the event is HIS area's (no card, no easy build, no P1 back rule)
+    if g4Open() then
+        if ev == "surprise" or ev == "copy" then return false end
+        local okE, w = pcall(G4().event, pl.ctrlId, ev, rep, now)
+        if not okE then U.logEvery("racers.g4event", 5000, TAG, "garage event failed: %s", tostring(w)); return false end
+        if not w then return false end
+        sound(pl, w, src, now)
+        return true
+    end
     local what
     local r = pl.row[pl.stage] or 1
     if ev == "surprise" or ev == "copy" then
@@ -1076,6 +1188,55 @@ local function flushAction()
     if a == "back" then U.try(TAG, function() setupM().back() end)
     elseif a == "start" then U.try(TAG, function() setupM().finish(true) end)
     elseif a == "save" then U.try(TAG, function() setupM().finish(false) end) end
+end
+
+-- 4-way garage: A on a VEHICLE card opens every card's area (view order). Each card's stage is noted: at the close a
+-- card that was on VEHICLE with its area DONE goes forward, the others stay. -> "accept" | nil (not opened: the card's
+-- A goes forward as before)
+openGarage = function(pl, now)
+    local s = S()
+    local list = {}
+    for _, c in ipairs(s.order) do
+        local o = s.players[c]
+        if o and o.presetId then
+            list[#list + 1] = { ctrlId = c, pnum = o.pnum, isP1 = o.isP1, arch = archOf(o), cls = clsOf(o),
+                                presetId = o.presetId }
+            o.g4stage = o.stage
+        end
+    end
+    local okO, opened, why = pcall(G4().open, list, {
+        by = pl.ctrlId,
+        onChange = function(A, what)
+            local o = s.players[A.ctrlId]
+            if not o then return end
+            if what == "model" and A.preset and V.presetById(archOf(o), A.preset) then
+                o.presetId, o.follow.vehicle = A.preset, false
+                remember(o)
+            end
+            markDirty(o, nowMs())
+        end,
+        onClose = function(whyC, areas)
+            local t = nowMs()
+            for c, A in pairs(areas or {}) do
+                local o = s.players[c]
+                if o then
+                    if A.done and o.g4stage == "vehicle" and o.stage == "vehicle" and s.active then forward(o, t) end
+                    o.g4stage = nil
+                    o.nav.primed = false             -- the press that closed it is no card input
+                    markDirty(o, t)
+                end
+            end
+            U.dbg(TAG, "cards back after the 4-way garage (%s)", tostring(whyC))
+        end,
+    })
+    if okO and opened then
+        U.log(TAG, "%s opened the 4-way garage for %d card(s) (G4-01)", nameOf(pl), #list)
+        return "accept"
+    end
+    for _, c in ipairs(s.order) do local o = s.players[c]; if o then o.g4stage = nil end end
+    U.logOnce("racers.g4fail", TAG, "4-way garage not opened (%s): A on VEHICLE goes on as before",
+        tostring(okO and why or opened))
+    return nil
 end
 
 ---------------------------------------------------------------------------------------------------- guests' pads
@@ -1154,7 +1315,7 @@ end
 -- P1's focus: HasUserFocusedDescendants(P1) is the check that matched live (ui.lua V-LOB-08); ui.hasFocus when it errors.
 local function holds(w, p1)
     if not U.ok(w) then return false end
-    local ok, v = pcall(function() return w:HasUserFocusedDescendants(p1) end)
+    local ok, v = pcall(U.callMethod, w, "HasUserFocusedDescendants", p1)
     if ok then return v == true end
     return ui().hasFocus(w, p1)
 end
@@ -1366,37 +1527,37 @@ end
 ---------------------------------------------------------------------------------------------------- view model (§5.6)
 local function tex(rel) return K().tex(rel) end
 
-local function classArt()
-    local s = S()
-    if not s.cls then return nil end
-    return (V.classImage and V.classImage(s.cls, s.planet and s.planet.art)) or s.cls.image
+local function classArt(pl)
+    local s, cls = S(), clsOf(pl)
+    if not cls then return nil end
+    return (V.classImage and V.classImage(cls, s.planet and s.planet.art)) or cls.image
 end
 
 -- §3.3 backdrop (CardBackdrop): the style's own art, a real path from perkdata (RC-8: never derived from the key);
 -- pod styles have none: the planet's Arcade pod art (setup.arcadeBg); nil = the dark backdrop.
-local function backdropOf(style)
-    local s = S()
+local function backdropOf(style, pl)
+    local s, cls = S(), clsOf(pl)
     local st = D.STYLES[style]
     if st and st.bg then return tex(st.bg) end
-    if s.arch == 1 and s.planet and s.cls then
-        local ok, path = pcall(function() return setupM().arcadeBg(s.planet, s.cls) end)
+    if archOf(pl) == 1 and s.planet and cls then
+        local ok, path = pcall(function() return setupM().arcadeBg(s.planet, cls) end)
         if ok and type(path) == "string" then return path end
     end
     return nil
 end
 
 -- The class traits' names from the VehicleArchetype (vehicles.classInfo: FText reads), once per class and visit.
-local function classTraits()
-    local s = S()
-    local c = s.classInfo[s.arch]
+local function classTraits(pl)
+    local s, arch, cls = S(), archOf(pl), clsOf(pl)
+    local c = s.classInfo[arch]
     if c == nil then
         c = ""
         U.try(TAG, function()
             local names = {}
-            for _, t in ipairs(V.classInfo(s.cls).traits or {}) do names[#names + 1] = t:match("^([^:]+)") or t end
+            for _, t in ipairs(V.classInfo(cls).traits or {}) do names[#names + 1] = t:match("^([^:]+)") or t end
             c = table.concat(names, " · ")
         end)
-        s.classInfo[s.arch] = c
+        s.classInfo[arch] = c
     end
     return c
 end
@@ -1417,7 +1578,7 @@ local function classicModel(m) return m and (m.codename or m.name) or "?" end
 
 -- §3.4 info line: the maker (badge code) or the pod's name, then the class traits. 0.12.0 v2: a pod's name is its
 -- model name (vehicles.models, WI-09), shown on the card already: it is not repeated there; classic as 0.11.0.
-local function infoLine(m, v2)
+local function infoLine(m, v2, pl)
     local parts = {}
     local who
     if v2 then
@@ -1426,7 +1587,7 @@ local function infoLine(m, v2)
         who = m and (m.maker or m.podName)
     end
     if who then parts[#parts + 1] = who end
-    local t = classTraits()
+    local t = classTraits(pl)
     if t ~= "" then parts[#parts + 1] = t end
     return table.concat(parts, " · ")
 end
@@ -1480,10 +1641,10 @@ local function hintsFor(pl)
     if pl.stage == "pilot" then
         return { hint(G_LR, "PILOT"), hint(G_A, "CONFIRM"), pl.isP1 and back("BACK") or leave }
     elseif pl.stage == "vehicle" then
-        return { hint(G_LR, "CHANGE"), hint(G_UD, "ROW"), hint(G_A, "CONFIRM"), back("BACK") }
+        return { hint(G_LR, "CHANGE"), hint(G_UD, "ROW"), hint(G_A, g4Wanted() and "GARAGE" or "CONFIRM"), back("BACK") }
     elseif pl.stage == "perks" then
         local Km = K()
-        local slot = Km.slots(s.arch)[r]
+        local slot = Km.slots(archOf(pl))[r]
         local kind = Km.slotKind(slot)
         if kind == "kit" then return { hint(G_LR, "KIT"), hint(G_A, "READY"), hint(G_UD, "SLOT"), back("BACK") } end
         if kind == "tune" then return { hint(G_LR, "LEVEL"), hint(G_A, "NEXT"), hint(G_UD, "SLOT"), back("BACK") } end
@@ -1504,7 +1665,7 @@ end
 local function rosterVm(pl)
     local s = S()
     local Pm = P()
-    local list = Pm.list(s.arch)
+    local list = Pm.list(archOf(pl))
     local n = #list
     if n == 0 then return {} end
     local tiles = 7
@@ -1537,16 +1698,16 @@ local function pilotVm(pl, e, style)
         local t = st.traits and D.TRAITS[st.traits[k]]
         if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc } end
     end
-    local label = s.cls and s.cls.label or ""
+    local label = clsOf(pl) and clsOf(pl).label or ""
     local sigText = "ANY " .. label
-    local sig = Pm.signature(e, s.arch)
+    local sig = Pm.signature(e, archOf(pl))
     if sig then
-        local _, _, m = V.modelOf(s.arch, sig)
+        local _, _, m = V.modelOf(archOf(pl), sig)
         if m then sigText = "SIGNATURE " .. label .. " · " .. (m.podName or classicModel(m)) end
     end
-    local i, n = Pm.indexOf(s.arch, pl.pilotId)
+    local i, n = Pm.indexOf(archOf(pl), pl.pilotId)
     return {
-        backdrop = backdropOf(style), full = e.full, crop = Pm.crop(e, widthClass()), styleIcon = tex(st.icon),
+        backdrop = backdropOf(style, pl), full = e.full, crop = Pm.crop(e, widthClass()), styleIcon = tex(st.icon),
         styleName = st.name or "", styleLine = "PILOT'S OWN STYLE · 3 TRAITS", styleDesc = st.short or st.desc or "",
         traits = traits, signature = sigText, name = e.name or "",
         counter = string.format("%s / %d", i and tostring(i) or "-", n or 0),
@@ -1556,17 +1717,17 @@ end
 
 local function vehicleVm(pl, e, live)
     local s = S()
-    local models = V.models(s.arch)
-    local mi, _, m = V.modelOf(s.arch, pl.presetId)
-    local pr = V.presetById(s.arch, pl.presetId)
+    local models = V.models(archOf(pl))
+    local mi, _, m = V.modelOf(archOf(pl), pl.presetId)
+    local pr = V.presetById(archOf(pl), pl.presetId)
     local model = classicModel(m)                -- 0.11.0 words (the v2 card shows the game's name)
     local v = {
-        fallback = classArt(), badge = m and m.badge or nil, code = m and m.code or nil,
+        fallback = classArt(pl), badge = m and m.badge or nil, code = m and m.code or nil,
         driver = { thumb = e.thumb, name = e.name },
-        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, s.arch),
+        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, archOf(pl)),
         model = model, counter = string.format("%d / %d", mi or 0, #models),
         modelRow = "MODEL: " .. model, liveryRow = "LIVERY: " .. (pr and pr.livery or "STANDARD"),
-        info = infoLine(m, false), cursor = pl.row.vehicle or 0,
+        info = infoLine(m, false, pl), cursor = pl.row.vehicle or 0,
     }
     if live then v.brush, v.brushKind, v.dim = brushOf(pl) end
     return v
@@ -1585,15 +1746,15 @@ local function perksVm(pl, style, e)
     local s = S()
     local Km = K()
     local v2 = s.style == "v2"
-    local board = Km.board(pl.lo, s.arch, style)
-    local slots = Km.slots(s.arch)
+    local board = Km.board(pl.lo, archOf(pl), style)
+    local slots = Km.slots(archOf(pl))
     local r = pl.row.perks or 0
     local pk = pl.picker
     local cursor = pk and pk.slot or ((r >= 1) and slots[r] or nil)
     -- the detail panel follows the slot (or the picker row) under the cursor; on the strip, the stage's last row
     local itemId = nil
     if pk and pk.sel >= 1 and pk.items[pk.sel] then itemId = pk.items[pk.sel].id end
-    local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, s.arch, itemId, style,
+    local d = Km.detail(cursor or slots[pl.last.perks or 1] or "kit", pl.lo, archOf(pl), itemId, style,
         v2 and "v2" or "classic")
     -- 0.13.0 GALAXY RUN: the two rewards that are no perk get their own text (not the upgrade slot's)
     local rit = pk and (pk.kind == "reward" or pk.kind == "shop") and pk.items[pk.sel] or nil
@@ -1632,7 +1793,7 @@ local function perksVm(pl, style, e)
         local cat = pk.cats[pk.cat] or {}
         board.picker = { catName = cat.name, catIcon = cat.icon,
                          counter = string.format("%d / %d", math.max(1, pk.sel), #pk.items), rows = pk.items,
-                         cursor = pk.sel }
+                         cursor = pk.sel, kind = pk.kind }
     end
     return board
 end
@@ -1641,9 +1802,9 @@ local function readyVm(pl, e, style, live)
     local s = S()
     local Km = K()
     local lo = raceLo(pl)
-    local board = Km.board(lo, s.arch, style)
-    local sum = Km.summary(lo, s.arch)
-    local _, _, m = V.modelOf(s.arch, pl.presetId)
+    local board = Km.board(lo, archOf(pl), style)
+    local sum = Km.summary(lo, archOf(pl))
+    local _, _, m = V.modelOf(archOf(pl), pl.presetId)
     local rows
     if pl.isP1 then
         rows = { s.allReady and "START RACE · ALL READY" or "START RACE", "SAVE AND RETURN" }
@@ -1651,8 +1812,8 @@ local function readyVm(pl, e, style, live)
         rows = { "READY · WAITING FOR P1" }
     end
     local rp = {
-        fallback = classArt(),
-        figure = { full = e.full, crop = P().crop(e, widthClass()), backdrop = backdropOf(style) },
+        fallback = classArt(pl),
+        figure = { full = e.full, crop = P().crop(e, widthClass()), backdrop = backdropOf(style, pl) },
         line = (e.name or "?") .. " · " .. classicModel(m), styleName = board.style and board.style.name or "",
         strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, style = board.style and board.style.icon,
                   traits = board.traits },
@@ -1706,10 +1867,10 @@ local function hintsV2(pl)
             out = { hint(G_LR, "Pilot"), hint(G_A, "Confirm"), pl.isP1 and back("Back") or leave }
         end
     elseif pl.stage == "vehicle" then
-        out = { hint(G_LR, (r == 2) and "Livery" or "Model"), hint(G_UD, "Row"), hint(G_A, "Confirm") }
+        out = { hint(G_LR, (r == 2) and "Livery" or "Model"), hint(G_UD, "Row"), hint(G_A, g4Wanted() and "Garage" or "Confirm") }
     elseif pl.stage == "perks" then
         local Km = K()
-        local slot = Km.slots(s.arch)[r]
+        local slot = Km.slots(archOf(pl))[r]
         local kind = Km.slotKind(slot)
         if kind == "kit" and inRun(pl) then
             out = { hint(G_A, "Ready"), back("Back") }                -- 0.13.0: the run build has no KIT choice
@@ -1785,16 +1946,16 @@ local function pilotVmV2(pl, e, style)
         if t then traits[k] = { icon = tex(t.icon), name = t.name, desc = t.desc, rich = t.rich } end
     end
     local sigModel = nil
-    local sig = Pm.signature(e, s.arch)
+    local sig = Pm.signature(e, archOf(pl))
     if sig then
-        local _, _, m = V.modelOf(s.arch, sig)
+        local _, _, m = V.modelOf(archOf(pl), sig)
         if m then sigModel = modelName(m) end
     end
-    local i, n = Pm.indexOf(s.arch, pl.pilotId)
+    local i, n = Pm.indexOf(archOf(pl), pl.pilotId)
     return {
         tile = e.tile, figure = figureOf(e), styleIcon = styleIconOf(st), styleName = st.name or "",
         styleLine = "PILOT'S OWN STYLE", styleDesc = st.short or st.desc or "", traits = traits,
-        signature = sigModel and ("SIGNATURE · " .. sigModel) or ("ANY " .. (s.cls and s.cls.label or "")),
+        signature = sigModel and ("SIGNATURE · " .. sigModel) or ("ANY " .. (clsOf(pl) and clsOf(pl).label or "")),
         signatureModel = sigModel, name = e.baseName or e.name or "",
         counter = string.format("%s / %d", i and tostring(i) or "-", n or 0),
         roster = rosterVm(pl), cursor = (pl.row.pilot or 0) >= 1,
@@ -1805,15 +1966,15 @@ end
 -- the pilot's name, AGED, MYTH P1-P3), DRIVEN BY, the signature chip, the info line, the photo brush.
 local function vehicleVmV2(pl, e, live)
     local s = S()
-    local models = V.models(s.arch)
-    local mi, _, m = V.modelOf(s.arch, pl.presetId)
-    local pr = V.presetById(s.arch, pl.presetId)
+    local models = V.models(archOf(pl))
+    local mi, _, m = V.modelOf(archOf(pl), pl.presetId)
+    local pr = V.presetById(archOf(pl), pl.presetId)
     local v = {
-        fallback = classArt(), badge = m and m.badge or nil, code = m and m.code or nil,
+        fallback = classArt(pl), badge = m and m.badge or nil, code = m and m.code or nil,
         driver = { thumb = e.thumb, name = e.baseName or e.name },
-        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, s.arch),
+        signature = pl.presetId ~= nil and pl.presetId == P().signature(e, archOf(pl)),
         model = modelName(m), counter = string.format("%d / %d", mi or 0, #models), models = modelsWindow(models, mi),
-        livery = pr and pr.livery or "STANDARD", info = infoLine(m, true), cursor = pl.row.vehicle or 0,
+        livery = pr and pr.livery or "STANDARD", info = infoLine(m, true, pl), cursor = pl.row.vehicle or 0,
     }
     if live then v.brush, v.brushKind, v.dim, v.backdrop = brushOf(pl) end
     return v
@@ -1827,14 +1988,14 @@ local function readyVmV2(pl, e, style, live)
     local s = S()
     local Km = K()
     local lo = raceLo(pl)
-    local board = Km.board(lo, s.arch, style)
-    local sum = Km.summary(lo, s.arch)
-    local _, _, m = V.modelOf(s.arch, pl.presetId)
+    local board = Km.board(lo, archOf(pl), style)
+    local sum = Km.summary(lo, archOf(pl))
+    local _, _, m = V.modelOf(archOf(pl), pl.presetId)
     local st = D.STYLES[lo and lo.style]
     local name, model = e.baseName or e.name or "?", modelName(m)
     local pad = modeOf(pl) == "pad"
     local rp = {
-        fallback = classArt(), tile = e.tile, figure = figureOf(e), name = name, model = model,
+        fallback = classArt(pl), tile = e.tile, figure = figureOf(e), name = name, model = model,
         line = name .. " · " .. model, styleName = board.style and board.style.name or "",
         strip = { ab = board.ab, crash = board.ab.crash, parts = board.parts, traits = board.traits,
                   style = (st and st.pod) and tex(POD_STYLE_ICON) or (board.style and board.style.icon) },
@@ -1966,21 +2127,36 @@ local function previews(now)
     local s = S()
     local vp = VP()
     if not vp then return end
-    local prebuild = num("SetupPreviewPrebuildMs", 600)
-    for _, c in ipairs(s.order) do
-        local pl = s.players[c]
-        if pl then
-            U.tryEvery("racers.preview", nil, TAG, function()
-                if pl.stage == "pilot" and not (prebuild > 0 and now - pl.pilotAt >= prebuild) then return end
-                local pr = V.presetById(s.arch, pl.presetId)
-                if pr then vp.want(c + 1, pr, s.cls) end
-                vp.setMode(c + 1, vp.stageMode(pl.stage))
-            end)
+    local g4 = g4Open()
+    if g4 then
+        U.tryEvery("racers.g4preview", nil, TAG, G4().previews, now)      -- each area's car + livery, its own modes
+    else
+        local prebuild = num("SetupPreviewPrebuildMs", 600)
+        local G4m = opt("Garage4Way", false) == true and G4() or nil
+        for _, c in ipairs(s.order) do
+            local pl = s.players[c]
+            if pl then
+                U.tryEvery("racers.preview", nil, TAG, function()
+                    if pl.stage == "pilot" and not (prebuild > 0 and now - pl.pilotAt >= prebuild) then return end
+                    local pr = V.presetById(archOf(pl), pl.presetId)
+                    -- 4-way garage on: the card's bay wears the pad's livery too
+                    local liv = nil
+                    if G4m then
+                        local okL, l = pcall(G4m.cardLivery, c, archOf(pl), pl.presetId)
+                        liv = okL and l or nil
+                    end
+                    if pr then vp.want(c + 1, pr, clsOf(pl), liv) end
+                    vp.setMode(c + 1, vp.stageMode(pl.stage))
+                end)
+            end
         end
     end
     local ok, changed, keys = U.tryEvery("racers.vptick", nil, TAG, vp.tick)
     if ok and changed and type(keys) == "table" then
-        for key in pairs(keys) do markDirty(s.players[key - 1], now) end
+        for key in pairs(keys) do
+            markDirty(s.players[key - 1], now)
+            if g4 then pcall(G4().bayChanged, key) end
+        end
     end
 end
 
@@ -1988,33 +2164,51 @@ end
 -- decoded English table meanwhile) only advances when a name is asked for: this asks every poll until
 -- vehicles.nameStatus no longer reports the class pending, then every card showing a model name re-renders once (a
 -- localised game shows its own names without waiting for an input; VERIFY(V-FIN-10) is vehicles.lua's log line).
--- Pods have no theme names (never pending). Once per class and session.
+-- Pods have no theme names (never pending). Once per class and session; every class a card shows (a GALACTIC GRAND PRIX
+-- card can be in another class than the page): namesFor / namesWait are sets by class key.
 local function namesTick(now)
     local s = S()
-    local key = s.cls and tostring(s.cls.key) or nil
-    if not key or s.namesFor == key then return end
-    local ok, st = pcall(V.nameStatus)
-    if ok and type(st) == "string"
-        and (st:find(key .. " pending", 1, true) or st:find(key .. " not read", 1, true)) then
-        local models = V.models(s.arch)
-        if models[1] then pcall(V.modelName, models[1]) end
-        s.namesWait = true
-        return
+    if type(s.namesFor) ~= "table" then s.namesFor = {} end
+    if type(s.namesWait) ~= "table" then s.namesWait = {} end
+    local list, seen = {}, {}
+    local function add(cls)
+        local key = type(cls) == "table" and tostring(cls.key) or nil
+        if key and not seen[key] then seen[key] = true; list[#list + 1] = { key = key, cls = cls } end
     end
-    s.namesFor = key
-    if not s.namesWait then return end
-    s.namesWait = nil
-    for _, c in ipairs(s.order) do
-        local pl = s.players[c]
-        if pl and pl.stage ~= "perks" then markDirty(pl, now) end
+    add(s.cls)
+    for _, c in ipairs(s.order) do add(clsOf(s.players[c])) end
+    for _, it in ipairs(list) do
+        local key = it.key
+        if not s.namesFor[key] then
+            local ok, st = pcall(V.nameStatus)
+            if ok and type(st) == "string"
+                and (st:find(key .. " pending", 1, true) or st:find(key .. " not read", 1, true)) then
+                local models = V.models(it.cls.arch)
+                if models[1] then pcall(V.modelName, models[1]) end
+                s.namesWait[key] = true
+            else
+                s.namesFor[key] = true
+                if s.namesWait[key] then
+                    s.namesWait[key] = nil
+                    for _, c in ipairs(s.order) do
+                        local pl = s.players[c]
+                        if pl and pl.stage ~= "perks" and tostring((clsOf(pl) or {}).key) == key then markDirty(pl, now) end
+                    end
+                    U.dbg(TAG, "model names of %s read: the cards re-render", key)
+                end
+            end
+        end
     end
-    U.dbg(TAG, "model names of %s read: the cards re-render", key)
 end
 
 -- 7. up to CardRendersPerTick dirty cards, oldest first: view model (with this tick's brush) -> cards.render. A
 -- render that waits for the build budget stays dirty (its next render carries a fresh brush).
 local function renders(now)
     local s = S()
+    if g4Open() then                             -- 4-way garage over the page: its areas render, the cards wait (dirty)
+        G4().poll(now)
+        return
+    end
     local list = {}
     for i, c in ipairs(s.order) do
         local pl = s.players[c]
@@ -2201,13 +2395,26 @@ local function prefetch()
     local cd = CD()
     local v2 = S().style == "v2"
     local empty = false
-    for _, e in ipairs(P().list(S().arch)) do
-        cd.tex(e.thumb)
-        if v2 and e.tile then
-            cd.tex(e.tile)
-        else
-            cd.tex(e.full)
-            empty = v2
+    local s = S()
+    local archs, seen = {}, {}
+    if s.arch ~= nil then seen[s.arch], archs[1] = true, s.arch end
+    for _, c in ipairs(s.order) do                   -- a GALACTIC GRAND PRIX card in another class: its roster too
+        local a = archOf(s.players[c])
+        if a ~= nil and not seen[a] then seen[a] = true; archs[#archs + 1] = a end
+    end
+    local done = {}
+    for _, a in ipairs(archs) do
+        for _, e in ipairs(P().list(a)) do
+            if not done[e.id] then
+                done[e.id] = true
+                cd.tex(e.thumb)
+                if v2 and e.tile then
+                    cd.tex(e.tile)
+                else
+                    cd.tex(e.full)
+                    empty = v2
+                end
+            end
         end
     end
     if empty then pcall(function() cd.tex(P().EMPTY_TILE) end) end
@@ -2315,6 +2522,7 @@ function M.leave(why)
         U.try(TAG, pillClear)
         U.try(TAG, commandFocus)
     end
+    if g4Open() then U.try(TAG, G4().close, "racers: " .. why) end      -- the garage goes before its bays
     pcall(function() CD().releaseRenders(nil) end)
     local vp = VP()
     if vp then U.try(TAG, vp.releaseAll, "racers: " .. why, true) end
@@ -2329,6 +2537,7 @@ function M.forget()
     -- 0.12.0: the pill and the command row died with the page: nothing to clear there, only what this module recorded
     s.mode, s.cmdFocus, s.pillJoin, s.pillReady, s.readySig = nil, nil, nil, nil, nil
     for _, pl in pairs(s.players) do pl.pc = nil end
+    if g4Open() then U.try(TAG, G4().close, "racers: menu replaced") end
     local vp = VP()
     if vp then U.try(TAG, vp.releaseAll, "racers: menu replaced", false) end
     pcall(function() CD().forget() end)
@@ -2559,14 +2768,30 @@ function M.choicePlayers()
     local s = S()
     local out = {}
     if s.arch == nil then return out end
-    local base = nil
-    pcall(function() base = PA().basePath(s.arch) end)
+    local bases = {}
+    local function baseOf(arch)
+        if bases[arch] == nil then
+            bases[arch] = false
+            pcall(function() bases[arch] = PA().basePath(arch) or false end)
+        end
+        return bases[arch] or nil
+    end
     local Km = K()
     for i, c in ipairs(s.order) do
         local pl = s.players[c]
-        if pl and pl.arch == s.arch and pl.lo then
-            out[i] = { ctrlId = c, pilotId = pl.pilotId, presetId = pl.presetId, buildPath = base,
+        -- 0.16 GALACTIC GRAND PRIX: a card in its player's own speeder class hands that class on (pick.arch: launch
+        -- applyRecipe / perkapply race it; gp.prelaunch keeps the card's model)
+        local want = pl and (wantClass(pl)) or nil
+        if pl and want ~= nil and pl.arch == want and pl.lo then
+            out[i] = { ctrlId = c, pilotId = pl.pilotId, presetId = pl.presetId, buildPath = baseOf(pl.arch),
                        loadout = Km.copy(pl.lo), code = Km.encode(pl.lo) }
+            if pl.arch ~= s.arch then out[i].arch = pl.arch end
+            -- 4-way garage: the pad's livery for this class and model (nil = the preset as it is; garage4.raceTick)
+            local g = G4()
+            if g then
+                local okL, liv = pcall(g.pickLivery, c, pl.arch, pl.presetId)
+                if okL and type(liv) == "table" then out[i].livery = liv end
+            end
         end
     end
     -- 0.13.0 review: no QUICK forcing here (it stuck in the stored choice: a later CUSTOM "race again" raced the tier
@@ -2674,7 +2899,9 @@ function M.status()
             local r = pl.row[pl.stage]
             local where = pl.picker and string.format("picker %s %d/%d", pl.picker.slot, pl.picker.sel, #pl.picker.items)
                 or ((r == 0) and "strip" or ("row " .. tostring(r)))
-            parts[#parts + 1] = string.format("%s c%d %s %s %s/%s/kit %s", nameOf(pl), c, STAGE_WORD[pl.stage] or "?",
+            -- a card in another class than the page (GALACTIC GRAND PRIX) names it: "P2 c1 [Bike] PILOT ..."
+            local own = (pl.arch ~= s.arch and clsOf(pl)) and ("[" .. tostring(clsOf(pl).key) .. "] ") or ""
+            parts[#parts + 1] = string.format("%s c%d %s%s %s %s/%s/kit %s", nameOf(pl), c, own, STAGE_WORD[pl.stage] or "?",
                 where, shortId(pl.pilotId), tostring(pl.presetId), tostring(pl.lo and pl.lo.kit))
         end
     end
@@ -2686,6 +2913,10 @@ function M.status()
     if s.style == "v2" then
         look = look .. string.format(", P1 mode %s, command focus %s, pill %s%s", tostring(s.mode or "?"),
             tostring(s.cmdFocus or "-"), s.pillReady and "ALL READY" or "-", s.pillJoin and " + join hint" or "")
+    end
+    if g4Open() then
+        local okG, gs = pcall(function() return G4().status() end)
+        if okG and gs then cards = cards .. " | " .. tostring(gs) end
     end
     return string.format("racers %s%s: %s | P1 input %s (sink events %d, drops %d, leaks %d, B seen %s) | %s | %s",
         s.active and "on" or "off", s.cls and (" " .. tostring(s.cls.key)) or "",

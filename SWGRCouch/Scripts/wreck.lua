@@ -77,6 +77,12 @@ local C = require("consts")
 local cfg = require("config")
 local St = require("state")
 local U = require("util")
+-- couch-racegc: constant option lists (a literal in the call built a new table every call)
+local OPTS_WreckView = { "car", "carAll", "native" }
+local OPTS_WreckSlowMo = { "off", "last", "game" }
+local OPTS_NoWreckMethod = { "build", "cvar", "topup" }
+local OPTS_WreckSpectateTarget = { "human", "leader", "ai" }
+local OPTS_WreckViewGuard = { "auto", "force", "off" }
 
 local M = {}
 local TAG = "wreck"
@@ -154,8 +160,8 @@ local function numCfg(v, default)
 end
 
 -- Fallback defaults (config.lua may not list the run-E keys yet): view "car", slow-mo "game".
-local function viewMode() return opt(cfg.WreckView, { "car", "carAll", "native" }, "car") end
-local function slowMoMode() return opt(cfg.WreckSlowMo, { "off", "last", "game" }, "game") end
+local function viewMode() return opt(cfg.WreckView, OPTS_WreckView, "car") end
+local function slowMoMode() return opt(cfg.WreckSlowMo, OPTS_WreckSlowMo, "game") end
 local function holdMs() return numCfg(cfg.WreckCrashCamHoldMs, 4000) end
 
 ---------------------------------------------------------------------------------------------------- helpers
@@ -168,14 +174,14 @@ end
 -- o[name], or nil on error (callers test objects with U.ok).
 local function field(o, name)
     if o == nil then return nil end
-    local ok, v = pcall(function() return o[name] end)
+    local ok, v = pcall(U.getField, o, name)
     if ok then return v end
     return nil
 end
 
 local function call0(o, fn)
     if o == nil then return nil end
-    local ok, v = pcall(function() return o[fn](o) end)
+    local ok, v = pcall(U.callMethod, o, fn)
     if ok then return v end
     return nil
 end
@@ -192,19 +198,24 @@ local function racerPS(pc)
         local ok, ps = pcall(tko.racerPSFor, pc)
         if ok and U.ok(ps) then return ps end
     end
-    local ok, ps = pcall(function() return pc.PlayerState end)
+    local ok, ps = pcall(U.getField, pc, "PlayerState")
     if ok and U.ok(ps) then return ps end
     return nil
 end
 
 local function recOf(ps)
     if not U.ok(ps) then return nil end
-    local ok, r = pcall(function() return ps.RaceEventComponent end)
+    local ok, r = pcall(U.getField, ps, "RaceEventComponent")
     if ok and U.ok(r) then return r end
     return nil
 end
 
-local function stillRacing(rec) return rec ~= nil and call0(rec, "IsStillRacing") == true end
+local STILL_RACING = "/Script/Griffin.PlayerRaceEventComponent:IsStillRacing"
+local function stillRacing(rec)
+    if rec == nil then return false end
+    local ok, v = U.pcallFn(rec, STILL_RACING, "IsStillRacing")   -- couch-racegc: cached UFunction, no wrapper
+    return ok and v == true
+end
 local function isBot(ps) return field(ps, "bIsABot") == true end
 
 local function pawnOf(ps)
@@ -217,41 +228,113 @@ local function pawnOf(ps)
 end
 
 -- Every local player with a racer entry: {pc, pnum, ps, rec, key, racing, wrecked}.
+-- couch-racegc: built ONCE per loop run (St.loopSeq, like U.localPlayers): wreck.fastTick, crashcam.fastTick and
+-- pause.lua each rebuilt it every FAST tick (~13 UE4SS wrappers + the entry tables per build). Callers get their own
+-- array; the entries are shared and read-only (nothing in one loop run changes a racer's wreck / racing state).
+local racersRun = { seq = nil, list = nil }
+local localRacersUncached
 local function localRacers()
+    local seq = St.loopSeq
+    if seq ~= nil and racersRun.seq == seq and racersRun.list then
+        local l, out = racersRun.list, {}
+        for i = 1, #l do out[i] = l[i] end
+        return out
+    end
+    local list = localRacersUncached()
+    if seq ~= nil then
+        local keep = {}
+        for i = 1, #list do keep[i] = list[i] end
+        racersRun.seq, racersRun.list = seq, keep
+    else
+        racersRun.seq, racersRun.list = nil, nil
+    end
+    return list
+end
+-- couch-fix40: a player's racer IDENTITY (racer PlayerState, its RaceEventComponent, display number) is kept across
+-- loop runs in RACING for RACER_ID_TTL_MS inside one world (3 UE4SS wrappers per player per FAST tick before: pc.Pawn,
+-- car.PlayerState, RaceEventComponent - and a fresh rec wrapper missed U.pcallFn's kept IsStillRacing). Both objects are
+-- U.ok-checked at every reuse; a takeover record whose AI PlayerState differs, a "players" / "world" / "phase" event
+-- or the TTL read them again. racing / wrecked are read every loop run as before.
+local RACER_ID_TTL_MS = 500
+local racerIds = { gen = nil, byPc = {} }
+local function racerIdsForget() racerIds.gen, racerIds.byPc = nil, {} end
+pcall(function()
+    St.on("players", "wreck.racerIds", racerIdsForget)
+    St.on("world", "wreck.racerIds", racerIdsForget)
+    St.on("phase", "wreck.racerIds", racerIdsForget)
+end)
+local function takeoverPSKey(pc)
+    local tko = lazy("takeover")
+    if not (tko and tko.recordFor) then return 0 end
+    local ok, r = pcall(tko.recordFor, pc)
+    if ok and type(r) == "table" and U.ok(r.aiPS) then return U.key(r.aiPS) end
+    return 0
+end
+local function racerId(lp, join, now)
+    local pc = lp.pc
+    local pk = U.key(pc)
+    if racerIds.gen ~= St.worldGen then racerIds.gen, racerIds.byPc = St.worldGen, {} end
+    local id = racerIds.byPc[pk]
+    if id and St.phase == "RACING" and now - id.at < RACER_ID_TTL_MS and id.index == lp.index and U.ok(id.ps)
+        and U.ok(id.rec) and id.tkoKey == takeoverPSKey(pc) then
+        return id
+    end
+    local ps = racerPS(pc)
+    local rec = recOf(ps)
+    if not rec then racerIds.byPc[pk] = nil; return nil end
+    local pnum = lp.index
+    if join and join.displayNumForPC then
+        local ok, n = pcall(join.displayNumForPC, pc)
+        if ok and type(n) == "number" then pnum = n end
+    end
+    id = { ps = ps, rec = rec, pnum = pnum, at = now, index = lp.index, tkoKey = takeoverPSKey(pc), key = pk }
+    racerIds.byPc[pk] = id
+    return id
+end
+localRacersUncached = function()
     local out = {}
     local join = lazy("join")
-    for _, lp in ipairs(U.localPlayers()) do
+    local now = St.nowMs()
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.ok(lp.pc) then
-            local ps = racerPS(lp.pc)
-            local rec = recOf(ps)
-            if rec then
-                local pnum = lp.index
-                if join and join.displayNumForPC then
-                    local ok, n = pcall(join.displayNumForPC, lp.pc)
-                    if ok and type(n) == "number" then pnum = n end
-                end
-                out[#out + 1] = { pc = lp.pc, pnum = pnum, ps = ps, rec = rec, key = U.key(lp.pc),
-                                  racing = stillRacing(rec), wrecked = field(rec, "bHasVehicleWrecked") == true }
+            local id = racerId(lp, join, now)
+            if id then
+                local rec = id.rec
+                -- couch-fix40: one entry per racer identity, refilled every loop run (a new table per player per
+                -- FAST tick before); the entries stay read-only for the loop run's callers
+                local en = id.entry
+                if not en then en = {}; id.entry = en end
+                en.pc, en.pnum, en.ps, en.rec, en.key = lp.pc, id.pnum, id.ps, rec, id.key
+                en.racing, en.wrecked = stillRacing(rec), field(rec, "bHasVehicleWrecked") == true
+                out[#out + 1] = en
             end
         end
     end
     return out
 end
 M._localRacers = localRacers
+-- couch-fix40: the RaceEventComponent racing for a local PC (takeover-aware: racerPS), from the racer identity kept
+-- above (same TTL / U.ok / takeover rules); nil when it has none. For inputfix.p1UiGuard.
+function M.racerRecFor(pc, index)
+    if not U.ok(pc) then return nil end
+    local id = racerId({ pc = pc, index = index }, lazy("join"), St.nowMs())
+    return id and id.rec or nil
+end
 
 local function eachRacer(gs, fn)
     local arr = field(gs, "Racers")
     local n = U.arrayCount(arr)
     for i = 1, n do
-        local ok, ps = pcall(function() return arr[i] end)
+        local ok, ps = pcall(U.getField, arr, i)
         if ok and U.ok(ps) and fn(ps) == true then return end
     end
 end
 
 -- The filter of ShouldEndRace (0x1402504be): every Racers entry without bIsABot. Returns the number of humans still
 -- racing and whether one REALLY finished (finished, not wrecked, EventFinishTime >= 0).
+-- couch-fieldtest: also the latest real finisher's EventFinishTime (his race time: the race clock's start, couchcouchsolo.lua).
 local function humanStatus(gs)
-    local racing, realFinish = 0, false
+    local racing, realFinish, lastT = 0, false, nil
     eachRacer(gs, function(ps)
         if isBot(ps) then return end
         local rec = recOf(ps)
@@ -260,10 +343,13 @@ local function humanStatus(gs)
             racing = racing + 1
         elseif field(rec, "bHasVehicleWrecked") ~= true and field(rec, "bHasFinishedEvent") == true then
             local t = field(rec, "EventFinishTime")
-            if not (type(t) == "number" and t < 0) then realFinish = true end
+            if not (type(t) == "number" and t < 0) then
+                realFinish = true
+                if type(t) == "number" and (lastT == nil or t > lastT) then lastT = t end
+            end
         end
     end)
-    return racing, realFinish
+    return racing, realFinish, lastT
 end
 
 ------------------------------------------------------------------------------------------------ view helpers (run E)
@@ -299,7 +385,7 @@ function M.photoMode()
         active, why = true, "PhotoModeManager.bPhotoModeActive"
     end
     if not active then
-        for _, lp in ipairs(U.localPlayers()) do
+        for _, lp in ipairs(U.localPlayersRO()) do
             local p = U.ok(lp.pc) and call0(lp.pc, "K2_GetPawn") or nil
             if U.ok(p) and clsName(p):find("PhotoMode", 1, true) then
                 active, why = true, string.format("local player %d possesses %s", lp.index, clsName(p))
@@ -404,7 +490,7 @@ local function crashCamOf(pawn)
     if not U.ok(pawn) then return nil end
     local cls = U.class("/Script/Griffin.VehicleCrashCamComponent")
     if not U.ok(cls) then return nil end
-    local ok, comp = pcall(function() return pawn:GetComponentByClass(cls) end)
+    local ok, comp = pcall(U.callMethod, pawn, "GetComponentByClass", cls)
     if not ok or not U.ok(comp) then return nil end
     local cam = field(comp, "CrashCam")
     if U.ok(cam) then return cam end
@@ -451,10 +537,51 @@ local function untrust(why)
     U.warn(TAG, "timeout byte not trusted (%s): parked-time fallback (V-WD-03)", why)
 end
 
+local soloLimit                                               -- couch-fieldtest (below)
 local function serverNow(gs)
     local v = call0(gs, "GetServerWorldTimeSeconds")
     if type(v) == "number" then return v end
     return nil
+end
+
+-- couch-fieldtest (#34, live round 3 19:44 L_Mastiff_LOOP_A): in a RACE-ALONE event (couchsolo.lua: a test with a target
+-- time) the armed timeout is the end of the remaining players' own tests, not "the first human out ends the race":
+-- it is KEPT (the game's byte stays 1) and moved to the test's own limit (RaceStartTime + target): the others race on
+-- until then, the game's HUD counts it down, and the race ends natively at the limit for whoever is still out. A
+-- limit already over keeps the game's own 2 s. A test without a target time (HotLap / Precision / Ramjet) falls
+-- through to the normal guard (each player races to his own finish). -> true when handled (the guard stops here)
+soloLimit = function(gs, T)
+    local solo = lazy("couchsolo")
+    if not (solo and solo.timeoutDecision) or field(gs, "bIsRaceFinished") == true then return false end
+    local racing, _, lastT = humanStatus(gs)
+    if racing == 0 then return false end
+    local now = serverNow(gs)
+    local ok, plan = pcall(solo.timeoutDecision, gs, now, lastT)
+    if not ok then
+        U.logEvery("wreck.solo", 10000, TAG, "race-alone timeout decision failed: %s", tostring(plan))
+        return false
+    end
+    if type(plan) ~= "table" then return false end                 -- not a race-alone event
+    local w = W()
+    if plan.act == "limit" then
+        local okW = pcall(function() gs.RaceTimeoutTime = plan.T end)
+        if not okW then return false end
+        w.limitSet, w.hideRemaining = true, false
+        w.lastDisarm, w.lastDisarmWhy = "kept", "race-alone limit"
+        U.log(TAG, "race-alone event (%s): the test's own time limit KEPT, not disarmed: the timeout armed at T=%.2f "
+            .. "moves to T=%.2f (race start %.2f from %s + target %.2f s), %d human(s) still racing their own test [%s]",
+            tostring(plan.kind), T, plan.T, plan.start, tostring(plan.how), plan.limit, racing, tostring(plan.raw))
+        return true
+    elseif plan.act == "over" then
+        w.limitSet = true
+        U.log(TAG, "race-alone event (%s): the test's own limit (T=%.2f) is already over: the game's own timeout "
+            .. "(T=%.2f) ends the remaining test(s) (race start %.2f from %s) [%s]", tostring(plan.kind), plan.T, T,
+            tonumber(plan.start) or -1, tostring(plan.how), tostring(plan.raw))
+        return true
+    end
+    U.logOnce("wreck.solo.nolimit." .. tostring(St.worldGen), TAG, "race-alone event (%s): no time limit (%s): the "
+        .. "others race to their own finish", tostring(plan.kind), tostring(plan.why))
+    return false
 end
 
 -- FAST tick (and MAIN as a backup), Standalone only (a hosted network race keeps the game's own network rules: no
@@ -490,6 +617,8 @@ function M.guardTimeout()
     if w.standalone == nil then w.standalone = (U.netMode() == "standalone") end
     if w.standalone ~= true then return end
     if w.graceSet then return end                             -- a FinishGraceSec countdown runs: nothing more to do
+    if w.limitSet then return end                             -- couch-fieldtest: the test's own limit is armed
+    if soloLimit(gs, T) then return end
     local grace = graceSec()
     local parked = T >= PARKED_T * 0.5
     if parked and grace == nil then                           -- parked for good ("all"); also after a hot reload
@@ -602,7 +731,7 @@ end
 
 ---------------------------------------------------------------------------------------------------- 4. slow motion
 local function worldSettings()
-    local ok, ws = pcall(function() return U.world().PersistentLevel.WorldSettings end)
+    local ok, ws = pcall(U.worldSettings)              -- couch-fix40: kept per world (U.ok-checked)
     if ok and U.ok(ws) then return ws end
     return nil
 end
@@ -783,7 +912,7 @@ local function hasAuthority(w)
 end
 
 local function noWreckTick(w, lrs)
-    local m = opt(cfg.NoWreckMethod, { "build", "cvar", "topup" }, "build")
+    local m = opt(cfg.NoWreckMethod, OPTS_NoWreckMethod, "build")
     if m ~= "topup" and not hasAuthority(w) then
         U.logOnce("wreck.noauth", TAG, "NoWreckMethod %s has no effect on a network client: health top-up only", m)
         m = "topup"
@@ -846,7 +975,7 @@ end
 -- camera evaluated by two camera managers; V-WD-07). The native spectate has its own SpectatorCam actor.
 local function pickTarget(gs, selfPS, lrs, prefOverride)
     if not U.ok(gs) then return nil end
-    local pref = prefOverride or opt(cfg.WreckSpectateTarget, { "human", "leader", "ai" }, "human")
+    local pref = prefOverride or opt(cfg.WreckSpectateTarget, OPTS_WreckSpectateTarget, "human")
     local localPS = {}
     for _, e in ipairs(lrs) do localPS[U.key(e.ps)] = true end
     local w = (type(St.wreck) == "table" and type(St.wreck.motion) == "table") and St.wreck or nil
@@ -996,14 +1125,14 @@ end
 
 -- "force": the native spectate is never requested nor retargeted. VERIFY: a native spectate the GAME starts by itself
 -- at the wreck is not stopped; if its camera fights the forced view ("view moved" fallback lines every ~1 s), use "auto".
-local function guardMode() return opt(cfg.WreckViewGuard, { "auto", "force", "off" }, "auto") end
+local function guardMode() return opt(cfg.WreckViewGuard, OPTS_WreckViewGuard, "auto") end
 
 ---------------------------------------------------------------------------------------------------- 2b. car view (run E)
 -- The car a wrecked view watches (WreckView "car"/"carAll"): a MOVING racing car always beats a still one (run E: the
 -- "human" pick was P1's parked car); then cfg.WreckSpectateTarget ("human" = another local human, "ai" = an AI car,
 -- "leader"), then the lowest EventPosition. exclude = a pawn whose camera just proved unusable.
 local function pickCarTarget(w, g, lrs, now, exclude)
-    local pref = opt(cfg.WreckSpectateTarget, { "human", "leader", "ai" }, "human")
+    local pref = opt(cfg.WreckSpectateTarget, OPTS_WreckSpectateTarget, "human")
     local localPS = {}
     for _, e in ipairs(lrs) do localPS[U.key(e.ps)] = true end
     local best
@@ -1104,7 +1233,7 @@ local function carView(w, g, lrs, now, why, exclude)
     U.log(TAG, "P%d view -> %s (%s; pref %s) via %s%s", g.pnum,
         b and string.format("%s's car, %s, %s, pos %d", nameOf(b.ps), b.human and "local human" or
             (isBot(b.ps) and "AI" or "racer"), b.moving and "moving" or "still", b.pos) or "its own wreck (no car racing)",
-        why, b and opt(cfg.WreckSpectateTarget, { "human", "leader", "ai" }, "human") or "-", tostring(how),
+        why, b and opt(cfg.WreckSpectateTarget, OPTS_WreckSpectateTarget, "human") or "-", tostring(how),
         ok and "" or " (call failed)")
     return ok
 end
@@ -1614,18 +1743,115 @@ local function mixTick()
         .. "(%d time(s) this race) (V-WR-MIX)", race:GetFName():ToString(), MIX.fixed)
 end
 
+-- #80 (playtest 2026-10-18 08:38-08:41, Jakku ELIMINATOR, recording session-102349 856 s on): P1 (AI car) was
+-- eliminated while P2 raced on; from that frame to P2's wreck the whole mix was a steady broadband "blowing machine"
+-- (+6 dB in 120-2000 Hz, highs down 7 dB, tonal-flat: a loop, it ran on through the pause). P1's half showed his own
+-- elimination chain: cockpit / close shots of HIS parked car = P1's listener sits inside it. The car's
+-- BP_VehicleAudioGovernor keeps its LOCAL-PLAYER loops running (engine, HighSpeedAirflow, WeatherLoop / WeatherSpeedLoop =
+-- Jakku's wind, SlipStream, VibrationAndRattle, RepulsorSurfaceLoop) at point-blank range. In solo the post-race mix
+-- CBM_PostEvent ducks them; V-WR-MIX (above) puts CBM_Race back for the guest still racing, so they played at full
+-- volume over the remaining racer's mix. Fix: while another local human still races, the audio components of a local
+-- player's car that is OUT of the race (eliminated, wrecked, finished) are silenced (VolumeMultiplier 0, re-scanned:
+-- the governor spawns components later); their own values are put back once nobody races (the native post-race flow,
+-- CBM_PostEvent) or on leaving the race. The racing players' cars are never touched. cfg.OutRacerAudioMute = false: off.
+local OUTA = { world = -1, cars = {}, scanAt = 0, logged = {} }
+local AUDIO_CLS = "/Script/Engine.AudioComponent"
+local OUTA_SCAN_MS = 500
+-- pure: which local racers are silenced now: the ones out while another local racer still races
+function M.outAudioPlan(rs)
+    local racing, out = 0, {}
+    for _, r in ipairs(rs or {}) do if r.racing then racing = racing + 1 end end
+    if racing == 0 then return out end
+    for _, r in ipairs(rs or {}) do if not r.racing then out[#out + 1] = r end end
+    return out
+end
+local function audioComps(car)
+    local cls = U.class(AUDIO_CLS)
+    if not U.ok(cls) then return {} end
+    local ok, arr = pcall(function() return car:K2_GetComponentsByClass(cls) end)
+    if not ok or arr == nil then return {} end
+    local okT, t = pcall(U.arrayToTable, arr)
+    return okT and type(t) == "table" and t or {}
+end
+local function soundName(c)
+    local s = field(c, "Sound")
+    if not U.ok(s) then return "-" end
+    return tostring(U.objName(s))
+end
+-- silence one out car (rec of its components and their own volume in OUTA.cars[key]) -> newly silenced, total
+local function muteCar(r)
+    local car = pawnOf(r.ps)
+    if not U.ok(car) then return 0, 0 end
+    local ck = U.key(car)
+    local e = OUTA.cars[ck]
+    if not e then e = { car = car, pnum = r.pnum, comps = {} }; OUTA.cars[ck] = e end
+    local list, n, playing = audioComps(car), 0, {}
+    for _, c in ipairs(list) do
+        if U.ok(c) then
+            local k = U.key(c)
+            local v = tonumber(field(c, "VolumeMultiplier"))
+            if v ~= 0 then
+                if e.comps[k] == nil then e.comps[k] = { c = c, vol = v or 1.0 } end
+                if pcall(function() c:SetVolumeMultiplier(0.0) end) then
+                    n = n + 1
+                    if #playing < 12 and call0(c, "IsPlaying") == true then
+                        playing[#playing + 1] = string.format("%s(%s)", tostring(U.objName(c)), soundName(c))
+                    end
+                end
+            end
+        end
+    end
+    if n > 0 then
+        U.logEvery("wreck.outaudio" .. tostring(r.pnum), 5000, TAG, "P%s out of the race while another player races: "
+            .. "%d audio component(s) of his car silenced (%d on the car)%s (V-WR-AUDIO)", tostring(r.pnum), n, #list,
+            #playing > 0 and ("; playing: " .. table.concat(playing, ", ")) or "")
+    end
+    return n, #list
+end
+local function restoreOutAudio(why)
+    local n = 0
+    for _, e in pairs(OUTA.cars) do
+        for _, s in pairs(e.comps) do
+            if U.ok(s.c) and pcall(function() s.c:SetVolumeMultiplier(s.vol) end) then n = n + 1 end
+        end
+    end
+    if next(OUTA.cars) ~= nil then
+        U.log(TAG, "out-of-race car audio back to its own volume (%d component(s)): %s (V-WR-AUDIO)", n, tostring(why))
+    end
+    OUTA.cars = {}
+    return n
+end
+M.restoreOutAudio = restoreOutAudio
+function M.outAudioTick(rs, now)
+    if cfg.OutRacerAudioMute == false then return end
+    if OUTA.world ~= St.worldGen then OUTA.world, OUTA.cars, OUTA.scanAt = St.worldGen, {}, 0 end
+    rs = rs or localRacers()
+    if #rs < 2 then return end
+    local plan = M.outAudioPlan(rs)
+    if #plan == 0 then
+        if next(OUTA.cars) ~= nil then restoreOutAudio("nobody races any more (the native post-race flow)") end
+        return
+    end
+    now = now or St.nowMs()
+    if now - (OUTA.scanAt or 0) < OUTA_SCAN_MS then return end
+    OUTA.scanAt = now
+    for _, r in ipairs(plan) do muteCar(r) end
+end
+
 function M.tick()
     local w = W()
     if St.phase ~= "RACING" then return end
     U.tryEvery("wreck.guardTimeout", nil, TAG, M.guardTimeout)
     U.tryEvery("wreck.mixTick", nil, TAG, mixTick)
-    if mode() == "noWreck" and opt(cfg.NoWreckMethod, { "build", "cvar", "topup" }, "build") == "build" then
+    U.tryEvery("wreck.outAudio", nil, TAG, M.outAudioTick)
+    if mode() == "noWreck" and opt(cfg.NoWreckMethod, OPTS_NoWreckMethod, "build") == "build" then
         U.tryEvery("wreck.noWreckRecheck", nil, TAG, noWreckRecheck, w, localRacers())
     end
 end
 
 function M.clear(why)
     U.try(TAG, M.restoreCvars, why)
+    U.try(TAG, restoreOutAudio, why)
     local w = W()
     if w.emu then U.try(TAG, emuStop, w, "stopped: " .. tostring(why), true) end
     w.guard, w.seen, w.build, w.motion, w.badCam = {}, {}, {}, {}, {}
@@ -1674,8 +1900,8 @@ function M.dump()
             tostring(armed), tostring(reg.prop), tostring(reg.how), tostring(reg.sawZero), tostring(reg.verified),
             tostring(reg.err),
             tostring(field(gs, "bIsRaceFinished")))
-        out("  guard: disarms=%d last=%s (%s) graceSet=%s hideRemaining=%s p1Out=%s topups=%d dilationResets=%d",
-            w.disarms, tostring(w.lastDisarm), tostring(w.lastDisarmWhy), tostring(w.graceSet),
+        out("  guard: disarms=%d last=%s (%s) graceSet=%s limitSet=%s hideRemaining=%s p1Out=%s topups=%d dilationResets=%d",
+            w.disarms, tostring(w.lastDisarm), tostring(w.lastDisarmWhy), tostring(w.graceSet), tostring(w.limitSet),
             tostring(w.hideRemaining), tostring(w.p1Out), w.topups, w.dilationResets)
         local rules = U.ok(gm) and field(gm, "ModeRules") or nil
         out("  mode rules: %s (V-WD-10)", clsName(rules))
@@ -1750,6 +1976,7 @@ function M.init()
     St.on("leaving", TAG, function() M.clear("leaving") end)
     St.on("phase", TAG, function(new)
         if new == "FRONTEND" or new == "OTHER" then M.clear("front end") end
+        if new ~= "RACING" then U.try(TAG, restoreOutAudio, "phase " .. tostring(new)) end
     end)
     U.log(TAG, "init: WreckMode=%s FinishGraceSec=%s WreckSlowMo=%s (effective %s, emulate %s) NoWreckMethod=%s "
         .. "WreckViewGuard=%s WreckView=%s (effective %s) hold=%.0f ms WreckCarCam=%s", mode(),

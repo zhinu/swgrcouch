@@ -682,6 +682,47 @@ end
 
 local lastPeriodicMs = 0
 
+-- Tick profiler report (main.lua call() / sched.every spans, while _G.SWGRCouch_prof is set): one line per
+-- "module.fn" / "loop:tag", heaviest first; gc = spikes > 2 ms during which the Lua heap shrank (a GC step ran inside),
+-- alloc = KB the calls allocated. path given: also written there. -> the report text
+function M.profReport(path)
+    local D = _G.SWGRCouch_profData or {}
+    local keys = {}
+    for k in pairs(D) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return (D[a].sum or 0) > (D[b].sum or 0) end)
+    local out = {}
+    for _, k in ipairs(keys) do
+        local e = D[k]
+        local ph = {}
+        for p, n in pairs(e.phase or {}) do ph[#ph + 1] = p .. ":" .. n end
+        table.sort(ph)
+        local line = string.format("%-34s n=%5d sum=%7.1f avg=%.2f max=%6.1f >2ms=%d %s", k, e.n, e.sum,
+            e.sum / math.max(1, e.n), e.max, e.over2, table.concat(ph, ","))
+        if e.rn then line = line .. string.format(" | RACING n=%d avg=%.2f max=%.1f", e.rn, e.rsum / math.max(1, e.rn), e.rmax or 0) end
+        if e.rgap60 then line = line .. string.format(" racegaps>60ms=%d", e.rgap60) end
+        if e.gc then line = line .. string.format(" gc=%d", e.gc) end
+        -- couch-racegc: calls / loop runs during which a collector cycle ran, and the longest such in RACING
+        if e.cyc then line = line .. string.format(" gccycles=%d", e.cyc) end
+        if e.rcycMax then line = line .. string.format(" racingGcSpanMax=%.1f", e.rcycMax) end
+        if e.alloc then line = line .. string.format(" alloc=%.0fKB", e.alloc) end
+        if e.gapN then
+            line = line .. string.format(" gaps n=%d >60ms=%d >100ms=%d max=%.0f", e.gapN, e.gap60, e.gap100, e.gapMax)
+        end
+        out[#out + 1] = line
+    end
+    local okG, gt = pcall(require, "gctune")
+    if okG and type(gt) == "table" and gt.report then
+        local okR, r = pcall(gt.report)
+        if okR then out[#out + 1] = r end
+    end
+    local txt = table.concat(out, "\n")
+    if type(path) == "string" and path ~= "" then
+        local f = io.open(path, "w")
+        if f then f:write(txt, "\n"); f:close() end
+    end
+    return txt
+end
+
 function M.periodic()
   local every = tonumber(cfg.DiagPeriodicMs) or 0
   if every <= 0 then return end

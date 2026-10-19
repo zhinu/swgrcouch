@@ -68,7 +68,7 @@ end
 
 local function call0(o, fn)
     if o == nil then return nil end
-    local ok, v = pcall(function() return o[fn](o) end)
+    local ok, v = pcall(U.callMethod, o, fn)
     if ok then return v end
     return nil
 end
@@ -146,7 +146,7 @@ local function spawnRig(car)
         pcall(function() cc:SetConstrainAspectRatioUsingPostProcess(false) end)
         cc:SetConstraintAspectRatio(false)                    -- a split half is ~3.5:1: no letterbox bars
         cc:SetFieldOfView(num(cfg.WreckRigFov, 85))
-        local okF, pp = pcall(function() return cc:GetConstraintAspectRatioUsingPostProcess() end)
+        local okF, pp = pcall(U.callMethod, cc, "GetConstraintAspectRatioUsingPostProcess")
         U.log(TAG, "rig camera letterbox post-process %s (V-GCB-02)", (okF and pp == false) and "off" or
             ("still on? " .. tostring(pp)))
     end)

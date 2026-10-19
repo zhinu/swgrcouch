@@ -277,8 +277,16 @@ local function refreshPlayers()
     local slots, byPc, byCar, byPs = {}, {}, {}, {}
     local tko
     pcall(function() tko = U.mod("takeover") end)
-    for _, lp in ipairs(U.localPlayers()) do
+    local split = nil
+    pcall(function() split = U.mod("split") end)
+    local vf = nil                                      -- couch-livefix r2: the joined players' view order
+    if type(split) == "table" and type(split.viewFractions) == "function" then pcall(function() vf = split.viewFractions() end) end
+    local vslot = 0
+    for _, lp in ipairs(U.localPlayersRO()) do
         local e = { slot = floor(tonumber(lp.index) or (#slots + 1)), pc = lp.pc, pcKey = U.key(lp.pc) }
+        if type(vf) == "table" then
+            if vf[lp.index] then vslot = vslot + 1; e.slot = vslot else e.pcKey, e.noView = 0, true end   -- dormant: no slot
+        end
         if e.pcKey ~= 0 then
             byPc[e.pcKey] = e.slot
             local car, ps, cps
@@ -296,7 +304,7 @@ local function refreshPlayers()
                 if okR and U.ok(rps) then byPs[U.key(rps)] = e.slot end
             end
         end
-        slots[#slots + 1] = e
+        if not e.noView then slots[#slots + 1] = e end
     end
     L.slots, L.byPc, L.byCar, L.byPs, L.roots = slots, byPc, byCar, byPs, refreshRoots(byPc)
 end
@@ -307,7 +315,8 @@ end
 -- race-flow state action), "widget", "other".
 local KIND = {}
 local function kindOf(o)
-    local okC, cls = pcall(function() return o:GetClass() end)
+    if not U.ok(o) then return "other", "?" end   -- U.ok FIRST: GetClass on a null wrapper is a native AV (UE4SS.dll+0x2ace67 null+0x10) that pcall cannot catch
+    local okC, cls = pcall(U.callMethod, o, "GetClass")
     if not okC or not U.ok(cls) then return "other", "?" end
     local ck = U.key(cls)
     local k = KIND[ck]
@@ -334,7 +343,7 @@ local function slotOfCar(car)
 end
 
 local function locOf(a)
-    local ok, v = pcall(function() return a:K2_GetActorLocation() end)
+    local ok, v = pcall(U.callMethod, a, "K2_GetActorLocation")
     if not ok or v == nil then return nil end
     local x, y, z
     pcall(function() x, y, z = tonumber(v.X), tonumber(v.Y), tonumber(v.Z) end)
@@ -389,7 +398,8 @@ local function resolvePoster(o)
             if k == 0 then break end
             local p = L.roots[k]
             if p then return p, fmt("%s (P%s's HUD)", name, tostring(p)), false end
-            local ok, nx = pcall(function() return x:GetOuter() end)
+            local ok, nx = false, nil
+            if U.ok(x) then ok, nx = pcall(U.callMethod, x, "GetOuter") end   -- null GetOuter = native AV
             if not ok or nx == nil then break end
             x = nx
         end
@@ -560,7 +570,7 @@ local function askConf()
     local uim = G.uim
     if not U.ok(uim) then return nil end
     selfCall = true
-    local ok, c = pcall(function() return uim:GetCurrentSubtitleConfig() end)
+    local ok, c = pcall(U.callMethod, uim, "GetCurrentSubtitleConfig")
     selfCall = false
     return ok and readConf(c) or nil
 end
@@ -635,8 +645,8 @@ end
 local function refreshViewport()
     local wll, world = U.cdo(PATH.WLL), U.world()
     if not (U.ok(wll) and U.ok(world)) then return end
-    local okS, sz = pcall(function() return wll:GetViewportSize(world) end)
-    local okD, dpi = pcall(function() return wll:GetViewportScale(world) end)
+    local okS, sz = pcall(U.callMethod, wll, "GetViewportSize", world)
+    local okD, dpi = pcall(U.callMethod, wll, "GetViewportScale", world)
     local px, py
     if okS and sz ~= nil then pcall(function() px, py = tonumber(sz.X), tonumber(sz.Y) end) end
     if not (px and py and px > 0 and py > 0) then return end
@@ -799,7 +809,7 @@ end
 
 -- The manager sets the game widget's visibility (subtitles on/off, ShowInRaces): the clones follow (FAST).
 local function mirrorVis()
-    if next(clones) == nil then return end
+    if next(clones) == nil or not U.ok(G.w) then return end
     local okV, v = pcall(function() return G.w:GetVisibility() end)
     if not okV or type(v) ~= "number" then return end
     for _, c in pairs(clones) do
@@ -1030,7 +1040,7 @@ end
 
 local function paramNum(p)
     if p == nil then return 0 end
-    local ok, v = pcall(function() return p:get() end)
+    local ok, v = pcall(U.callMethod, p, "get")
     return (ok and type(v) == "number") and v or 0
 end
 
@@ -1132,6 +1142,7 @@ local function wantArmed()
     if ph ~= "PRERACE" and ph ~= "RACING" then return false, "phase " .. tostring(ph) end
     if St.race.singleView == true then return false, "single-view race" end
     local n = #U.localPlayers()
+    pcall(function() n = U.mod("split").viewCount() end)   -- couch-livefix r2: dormant players hold no view
     if n < 2 then return false, fmt("%d local player", n) end
     return true, fmt("phase %s, %d local players", ph, n)
 end
@@ -1224,7 +1235,7 @@ function M.ensureArmed(why)
     if c then G.conf = c end
     local owner, wname = nil, "?"
     pcall(function() owner = L.byPc[U.key(w:GetOwningPlayer())] end)
-    pcall(function() wname = w:GetFName():ToString() end)
+    if U.ok(w) then pcall(function() wname = w:GetFName():ToString() end) end
     S.widget = fmt("%s owner %s z %s", wname, owner and ("P" .. tostring(owner)) or "none", tostring(gameZ()))
     -- VERIFY(V-SUB-05): "widget WBP_Subtitles_C_... owner P1 z <n>; viewport 1920x1080 su (dpi 1.33); config InEvent
     -- pad 450 Center/Bottom; layout top/bottom"

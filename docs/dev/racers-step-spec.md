@@ -754,9 +754,9 @@ P.replacementOrder(arch) -> {id, ...}           -- AI de-duplication: CharacterL
 ### 5.3 `perkdata.lua` and the generator
 
 `tools/gen-perkdata.py <src dir> <png root> <out.lua> <summary.txt>` (`python3 -I`), based on FG
-`~/.claude/jobs/5fb7892b/tmp/design/full-garage/gen_garagedata.py` (working; its sample compiles):
+`<scratch>/design/full-garage/gen_garagedata.py` (working; its sample compiles):
 - inputs: `work/decoded/perks/{affixes.json, abilities.json, styles.json, vbds.json}` (copy them from
-  `~/.claude/jobs/5fb7892b/tmp/perks-loadout/` first; that scratch is not kept) and
+  `<scratch>/perks-loadout/` first; that scratch is not kept) and
   `work/png/perks/Griffin/Content/Griffin/UI/Library/Textures/` (to keep only existing large icons);
 - adds the kit table of §4.4 (CF `validate_presets.py` names) and fails loudly when any kit id is missing;
 - output tables (stable names; paths stored as short names and expanded by `perks.lua` with `D.TEX`):
@@ -1297,7 +1297,7 @@ settings.lua: ORDER += `LastRaceRacers`; COMMENTS `LastRaceRacers = "RACERS step
 
 **Setup** (the user's machine is shared: low resolution, game audio muted by the harness; never `-nosound`, never `rm`):
 ```sh
-G=~/Games/project/galactic-racer; T=$G/tools/gr-session.sh
+G=<project>; T=$G/tools/gr-session.sh
 $T newrun racers-v2-A
 # test copy config_user.lua: TestCommands = true, SetupPreviewW = 640, SetupPreviewH = 360 (layout sessions also
 #   SetupPreviewSpinDps = 0); 4 virtual pads BEFORE launch (guests are created for connected pads only):
@@ -1366,7 +1366,7 @@ claim was checked against the research notes and against the sources themselves:
 - *the current mod code: setup.lua, ui.lua, lobby.lua, join.lua, launch.lua, vpreview.lua, cmap.lua, util.lua,
   settings.lua, main.lua, vehicles.lua, config.lua;*
 - *the old-build JMAP (`scripts/decode/jmapq.py`) and the asset list (`notes/asset-list.txt`);*
-- *decoded BP bytecode and widget trees in `~/.claude/jobs/5fb7892b/tmp/` (`vehicle-step-code-map/`,
+- *decoded BP bytecode and widget trees in `<scratch>/` (`vehicle-step-code-map/`,
   `pilot-select/`, `perks-loadout/`);*
 - *the UE4SS 3f4037d2 source;*
 - *`objdump` of the old exe;*

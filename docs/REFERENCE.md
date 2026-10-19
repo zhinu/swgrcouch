@@ -1,6 +1,6 @@
 # SWGRCouch: FREE MODE (solo or couch split screen) and self-hosted races for STAR WARS: Galactic Racer
 
-UE4SS Lua mod, version 0.12.0 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
+UE4SS Lua mod, version 1.0.0 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
 5.7.4 shipping, Denuvo, project codename Griffin; hotfix build CL 382493), UE4SS Galactic Racer Edition (open beta,
 2026-10-08). The main-menu tab was called SPLIT SCREEN until 0.10.0; it is now **FREE MODE** (the mod is for one
 player too). This file ships twice: as `docs/REFERENCE.md` and as `SWGRCouch/README.md`, which `install.sh` copies into
@@ -800,6 +800,44 @@ touches no front-end page (the "launch hold": the 0.12.0-dev pages crashed the g
   results screen of a split race: every player's A continues it; P1's A goes through menubridge's catcher button
   (V-MB-09, §1.9). The main menu and Settings after the race are P1's again (`feowner.lua`).
 
+### 3.5 Couch campaign (0.15.0)
+The game's own campaign (`CampaignSubsystem` / `CampaignRun`) played by 2-4 local players. Player guide: the README
+section *Couch campaign*. The modules:
+- `couch.lua`: the couch rules are **on** while the world is the campaign's (a `PaddockGameState`, or a race of an
+  active run the mod did not launch) and at least one guest is joined, offline only (`CouchCampaign`). While on: guests
+  are kept when the paddock opens (`menu_tab`), campaign races keep the guests' cars as players (no AI hand-off,
+  split screen, every per-player system), `Campaign.SkipPrologueEvents 1` skips the tryout prologue
+  (`CouchSkipPrologue`). Grid: a post-hook on `CampaignSubsystem:ChooseNextMapNode` points the last AI entries of
+  `RecipeState.Racers` at the guests' PlayerStates (the campaign builds a one-human grid), after a pre-hook emptied the
+  array (the stale post-race grid crashed race -> race travel). Time trials (Field / Podracer Tests) get 1 + guests
+  entries and ghost cars (`CouchTimeTrials`). Shared screens: the game gives every screen to the LAST local player, so
+  while a guest-owned screen is up the pad ids are swapped (`SetPlayerControllerID`) and the screen re-focused: P1's
+  pad alone drives it. A banner (`CouchToastMs`) says when the rules turn on.
+- `couchrun.lua`: each guest's mod-side run (`Mods/SWGRCouch/couch-run.txt`): class + racer style, a perks build from
+  the starter kit, credits from the campaign payout table by finish position, a reward offer mirroring P1's native
+  round, shop stock at P1's shops; written into the guest's PlayerState at every node pick (`perkapply`). The records
+  belong to P1's run id (`runId`): the pre-run screens only put the old run's guests aside (`stash`), the first look
+  at the run in play decides (same id = backed out, guests back; a new run = the screens' picks; another run = fresh,
+  old text kept as `couch-run.bak-*.txt`). P1's run-start credits are noted per run id (`starts`): a guest starting
+  the tour later gets that figure.
+- `couchseat.lua`: the guests' SEATS (P2 = the first guest to join the couch run, P3, P4). Every saved guest record
+  (`couch-run.txt`, its checkpoint journal, `guest-garage.txt`) is keyed by seat, never by the pad's ControllerId: a
+  joining pad takes its old seat, the seat of a joined guest whose pad is disconnected (pad swap), or the lowest free
+  one; leaving frees the seat and keeps its progress. PAD MEMORY (`padSeats` in `couch-run.txt`,
+  `CouchSeatPadMemory`): after a relaunch a pad first takes the seat its ControllerId held last time, and a free seat
+  remembered for another pad that is here is passed over (pads on other slots: join order). Files from before seats are merged once at load (one record per
+  seat: the one changed in the newest checkpoint of the current run; the old files copied as `*.pre-seat-*.txt`).
+- `couchpanel.lua` / `couchprerun.lua` / `couchlayout.lua`: the guests' own screen areas (2 players top / bottom, 3-4
+  quadrants) at rewards and shops (`CouchPanel*`) and on the new-run VEHICLE SELECT / LOADOUT screens
+  (`CouchPreRunSplit`). Guest input reaches invisible plain UMG buttons focused for the guest's user (Slate delivers it
+  while the ids are swapped; PlayerInput key states do not update then).
+- `garage.lua` (+ the generated catalog `custdata.lua`): each guest's car per seat and class
+  (`Mods/SWGRCouch/guest-garage.txt`): his model goes on his grid entry (`couch.guestVehicle`), his livery onto his car
+  in the race through `PlayerVehicleCustomisationComponent:Server_UpdateVehicleRecipe` (the game's own per-player
+  recipe upload). The game's Customize screens are not reused for guests: they edit the one front-end customisation
+  pawn and save into the FIRST local player's `CstSubsystem` (P1's garage). Research: `docs/dev/guest-garage.md`.
+- Saves: the run is P1's real campaign save. The README tells players to copy `SaveGames` first.
+
 ## 4. Network races (listen server, direct IP, WireGuard)
 
 ### 4.1 Once per machine
@@ -945,8 +983,11 @@ There are two files, and neither should be edited in `Scripts/config.lua` itself
 | `OpponentMatch` | `false` | 0.13.0 CUSTOM RACE > Opponents **MATCH THE PLAYERS** (after TIER 6): the AI get the players' average upgrade levels per slot, their most used abilities and crash ability (`perkapply.matchLoadout`) |
 | `RunPick` | `4` | 0.13.0 the GALAXY RUN poster's run length (4 / 6 / 9; Right on the poster) |
 | `RunLength` | `off` | 0.13.0 OPTIONS > *Galaxy run*: `off` \| `4` \| `6` \| `9`; with a number, the next FREE MODE race starts a GALAXY RUN of that many races (the run itself is in `run.txt`) |
+| `CouchMysteryTeam` | `greyed` | couch-fix39 OPTIONS > PLAYERS > *Couch campaign* > **Guests' team mystery choices**: `greyed` (a guest's mystery choice with a TEAM effect - a League token, a sabotage / debuff / difficulty / Hibi's-prices favour - is greyed) \| `allowed` (he may take it: the team effect goes onto the shared run - CampaignRun.favours / the token path - counted once per encounter when P1 or another guest took the same; his credits / parts stay his). Bookend deals stay greyed for guests either way |
 | `RunRepairChance` (config.lua) | `0.15` | GALAXY RUN: chance of a TEAM REPAIR reward while the hull is damaged |
 | `TestBots` (config.lua) | `false` | with `TestCommands`: the game's AI drives every local car from 2.5 s after RACING (unattended tests) |
+| `TestBotsCrit` (config.lua) | `resolve` | couch-fix50/55 (AUTO-129), with `TestBots`: a bot car's CRITICAL MALFUNCTION outcome. `resolve` = `Server_ResolveCriticalMalfunction` 4 s in (the game queues no fault). The other modes drive the game's own check with a B press injected per frame through Enhanced Input (`InjectInputVectorForAction(cfg.Action)`; the PC's BP event never reaches the check): `timeout` = hold, release, no press (TimedOut: a fault); `pass` = one press in the success window (Passed: a fault); `fail` = an early press (no fault, a control); `crash` = the crash handler during the check (a fault while the car carries the condition tag); `crashpre` = no press, the crash handler `TestBotsCritCrashMs` in (a fault, same tag rule). Not `resolve`: resolved anyway after `TestBotsCritGiveUpMs` (30 s). Run time: testcmd `botcrit <mode>`; `malf <p> [basic\|triggered\|both\|direct] [hits]` starts a critical malfunction on p's car (basic = BASIC `Vehicle.Condition.Malfunction` hits until the buildup fills, the game's path; direct = the component's client start, no condition tag); outcome + the component's config in test.out |
+| `Gauntlet` (config.lua) | `false` | with `TestCommands`: couch-gauntlet starts at boot (test tool: each node pick of a couch run takes the next race type; `docs/dev/gauntlet.md`) |
 
 ### 7.2 `config.lua` keys
 The VERIFY column names the check (§9) whose failure the switch answers.
@@ -1043,7 +1084,7 @@ older keys: `CardW`, `CardGap`, `CardH`, `CardRowW` (RACERS) and `SetupCMapVideo
 | `JoinPollMs` | `33` | documentation of the FAST period used by the join poll | — |
 | `JoinArmMs` | `300` | ignore presses this soon after a guest slot was created | — |
 | `JoinWithStart` | `true` | Start also joins (besides A) | V-JOIN-06 |
-| `GuestCreate` | `"connected"` | guest slots only for plugged-in pads \| `"all"` (always 3, the old behaviour) | V-JOIN-11 |
+| `GuestCreate` | `"join"` | couch-livefix: a pad gets its LocalPlayer only when it presses A / START (lazy join through `swgr_inputfilter.dll`'s pad watch: no dormant guest for pads that never join; falls back to `"connected"` without the pad watch) \| `"connected"` = dormant guest slots for every plugged-in pad \| `"all"` (always 3, the old behaviour) | V-JOIN-11, V-JOIN-13 |
 | `GuestOptIn` | `true` | guests only after ADD PLAYERS / F6 (twice); `false` = created when the tab opens (old behaviour) | V-JOIN-01 |
 | `GuestRemoval` | `"never"` | `"never"` (guests kept until the game exits). `"launch"` / `"always"` are **crash reproducers**: every RemovePlayer crashes at the next control-mapping rebuild; they are ignored (ERROR in the log) unless `GuestRemovalUnsafe = true` | V-JOIN-11, V-JOIN-12 |
 | `GuestRemovalUnsafe` | `false` | `true` = really remove guests with `GuestRemoval = "launch"` / `"always"` (expect the crash) | V-JOIN-12 |
@@ -1454,6 +1495,31 @@ The race results screens are not covered (menu bridge above).
 | `ClientMenuFallback` | `"csm"` | connected client without a main menu after 5 s: cosmetic `ChangeStateTo(PrimaryModeSelect)` \| `"off"` | V-NET-17 |
 | `LoginLogEveryMs` | `5000` | host logs `IsAnyLoginPending` at this period | V-NET-11 |
 
+**Couch campaign (`couch*.lua`, 0.15.0, §3.5)**
+| Key | Default | Meaning |
+|---|---|---|
+| `CouchCampaign` | `true` | master switch: the campaign keeps the joined guests (own cars, split screen); `false` = the pre-0.15.0 behaviour (guests closed when the campaign starts) |
+| `CouchSkipPrologue` | `true` | a new run skips the vehicle-tryout prologue race (`Campaign.SkipPrologueEvents 1`, set at the front end) |
+| `CouchTimeTrials` | `true` | Field / Podracer Tests: 1 + guests entries, every human in P1's test vehicle, the others as ghosts; `false` = P1 alone |
+| `CouchPreRunSplit` | `true` | new-run VEHICLE SELECT / LOADOUT split: each guest picks class + racer style; `false` = guests follow P1's class |
+| `CouchPanel` | `true` | the guests' own reward / shop areas; `false` = guests pick no rewards and buy nothing |
+| `CouchPanelNative` | `true` | reward areas built from the game's CHOOSE AN UPGRADE widgets; `false` (or any build failure) = the dark list panel |
+| `CouchPanelNativeHover` | `true` | the focused guest card uses the card's own focus events; `false` = a hover look drawn by the mod |
+| `CouchGarage` | `true` | each guest's GARAGE (`garage.lua`): a *GARAGE* hint beside *(A) SHOP* on the run map opens his area (model, livery template, colours, finish); per seat and class in `Mods/SWGRCouch/guest-garage.txt` |
+| `CouchGarageApply` | `"upload"` | how his livery reaches his car: `"upload"` = `Server_UpdateVehicleRecipe(his recipe)` on his PlayerState's customisation component (the game's own per-player path) \| `"tags"` = the tags on his car's recipe actor + `OnRep_VehicleRecipe()` \| `"off"` = his model only (grid entry) |
+| `CouchGarageUnlocks` | `"p1"` | GARAGE options: what P1 owns (`IsOptionUnlockedAndPurchased` on P1's account) \| `"all"` |
+| `CouchGarageNative` | `true` | a guest's GARAGE = a TURN in the game's own full-screen garage (3D car; Choose Model / Edit Vehicle / Edit Livery driven by his pad; model, livery and kit parts saved to his seat and class; P1's garage backed up and restored exactly); `false` = the compact panel (also the fallback when a turn cannot start) |
+| `CouchGarageExclusive` | `true` | during that turn P1's pad does nothing (the guest's PC parked, P1's Slate focus on an invisible sink); `false` = P1's pad drives the guest's PC (first version) |
+| `CouchGarageNoPurchase` | `true` | during that turn the options P1's profile does not own are shown locked (no purchase with P1's profile, toast *LOCKED - P1'S PROFILE*); owned options equip |
+| `CouchGarageUndoForeign` | `true` | during that turn a tab change / screen back / garage close without the guest's press is put back |
+| `CouchGarageHideRoot` | `true` | couch-livefix r3: after that turn the game's garage root (deactivated, still drawn over the paddock) is collapsed; its visibility comes back when the game activates it again |
+| `CouchSkipReown` | `true` | couch-livefix r3: a guest- / dormant-owned skip-cinematic screen shows its prompt and ring from the mod's hold and is re-owned to P1's PC (the one in the skippable cutscene) before its own skip event; couch-skip (#33): re-owned to EVERY local PC in a skippable cutscene in turn (P1 last), so each player's own intro chain ends (the race intro is played per player and the race waits for all) |
+| `CouchSkipSweep` | `true` | couch-skip (#33): within `CouchSkipChainMs` of a skip (bridged, or the game's own hold on a P1-owned screen), paddock / PRERACE only, a local PC's skippable cinematic chain not skipped yet (a guest's chain, the grid intro after the track intro) gets the game's own handler `PlayerCinematicFlowComponent:SkipCinematicChain` without waiting for a skip screen; stops at the ignition / rolling start / countdown (the ignition chain is not skippable) |
+| `CouchMapPauseBridge` | `true` | couch-livefix r3: P1's START on the guest-owned paddock run map opens the game's paddock pause (the screen's own `OnPauseAction`) when the game did not |
+| `CouchGarageTries` | `3` | livery uploads per guest and race at most (a car the game rebuilt gets it again) |
+| `CouchToastMs` | `4000` | the *COUCH CAMPAIGN: P2 JOINS THE RUN* banner (ms; once per session and guest set, 2.5 s after the rules turn on); `0` = off |
+| `CouchPanelZ` | `1000` | viewport Z of the guest areas (the banner uses +10); must stay above the post-race holder (500) |
+
 `Defaults` holds the defaults of the `settings.txt` keys (§7.1).
 
 ## 8. Runtime test plan
@@ -1562,6 +1628,7 @@ Save `UE4SS.log` of each boot; `grep '\[fastboot\]' UE4SS.log`.
 | V-JOIN-01 | dormant guests | open the tab with pads 2..n plugged in (nothing created: `pads not enabled`), then ADD PLAYERS twice | `pads enabled (lobby ADD PLAYERS)`, one guest per plugged-in pad (`BP_GfnPlayerController_C`); menu unaffected; plugging a pad in later creates its guest within 1 s | `GuestCreate = "all"`; F6 twice |
 | V-JOIN-02 | single view | open the tab, then other tabs | one full view while guests exist, on every tab | report |
 | V-JOIN-11 | **no re-entry crash** | FREE MODE ↔ Arcade/Campaign tabs 10 times (~16 s apart, then fast), P2 joined once in between | no crash; `join session closed (…): k guest(s) kept` / `join session open: … (0 created now …)`; never a `RemovePlayer` line; P2 still joins; one view on the game tabs | report the log + dump; never set `GuestRemoval = "always"` except to reproduce |
+| V-JOIN-13 | **lazy join** (couch-livefix) | pads 2..4 plugged, ADD PLAYERS (or the COUCH CAMPAIGN page), only pad 2 presses A | `lazy join: a pad gets its LocalPlayer only when it presses A / START`, `lazy join: pad 2 pressed A -> LocalPlayer created for ctrlId 1, joined`; no `dormant guest created`; the lobby shows *press A to join* for pads 3 / 4; a race = 2 views | `lazy join unavailable` in the log: the DLL is old / not loaded (`native filter loaded early`, status `padwatch=1`) |
 | V-JOIN-12 | removal hazard (only `GuestRemoval = "launch"` + `GuestRemovalUnsafe = true`: crash reproducer) | a dormant guest, START RACE twice / start a Campaign race | expected: crash at the race load (dangling listener) | keep `"never"` |
 | V-JOIN-03 | guest pad in the menu | pad 2 presses A | P2 joins | `JoinFocusTrick = "userfocus"`, `"viewport"`, then `"gameandui"` (+ `JoinInputModeReapplyMs = 500`); last resort F6 + pad confirm |
 | V-JOIN-04 | pad ↔ ControllerId | pads 2..4, then `KeyboardIsP1` on | pad k → ControllerId k (k+1 with keyboard P1) | report (remap in `join`) |

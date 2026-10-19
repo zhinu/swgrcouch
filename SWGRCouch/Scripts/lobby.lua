@@ -24,9 +24,9 @@
 --     RACE (T_UI_FE_Tile_05) and GALAXY RUN (T_UI_MapEvent_Bg) on the top row, ADD PLAYERS (T_UI_FE_Tiles_MP_Custom_01)
 --     and OPTIONS (T_UI_Difficulty_Tile_04) below, each over an invisible ghost button (theme.ghost = ui.ghost) with
 --     the ids "quick", "custom", "galaxy", "pads", "options", so St.ui.rows, refresh, focusedId, activate and
---     ui.pollClicks work as for the rows. QUICK / CUSTOM set PlayMode and open RACE SETUP; GALAXY RUN arms a run of
---     RunPick races and opens RACE SETUP, between run races it opens the next race, and RIGHT on it (a focus trap, as
---     OPTIONS' value rows) steps the run length or switches the route. The painted focus look follows the ghosts'
+--     ui.pollClicks work as for the rows. QUICK / CUSTOM set PlayMode and open RACE SETUP; GALAXY RUN opens the run
+--     page (runpage.lua: new run / continue / node / League); RIGHT on it does nothing (its focus trap only holds the
+--     focus, 2026-10-14). The painted focus look follows the ghosts'
 --     CommonUI focus / mouse hover every FAST tick (v2Tick, run from lobby.keepFocus);
 --   * the START card (no ghost) under GALAXY RUN: what P1's pad Start does (race again / the run's next race / start
 --     the armed run, or the C11 lock reason), read on the release of P1's Start (tilesTick);
@@ -42,6 +42,16 @@
 --     label, value, kind, on), the help / "Default value" detail column, BACK in the command row, the back route (P1's
 --     pad B edge, Backspace, BACK, a tab change; armBackGuard for the game's Exit prompt), list navigation (explicit
 --     up / down chain, pad left / right through two invisible focus traps, keyboard left / right through onKey).
+--   * OPTIONS > PLAYERS > Player names (2026-10-14): a sub-list of the OPTIONS page (V2.opt.sub = "names", its own
+--     canvas in the list's place) with one row per slot; A opens the pad name editor in the row (nameedit.lua: up /
+--     down letter, left / right cursor through four focus traps, X delete, A keep, B cancel; keyboard arrows /
+--     Backspace / Enter), stored as settings Name1..Name4 and applied by nametags.lua. The players strip shows a
+--     slot's custom name in its pad line. VERIFY(V-NAM-05).
+--   * OPTIONS > ADVANCED > Delete all couch progress (#98, 2026-10-18: moved here from the COUCH CAMPAIGN act page):
+--     the first A arms it (the RUST pill + the detail column say what goes and what stays; refused at once with the
+--     reason when the COUCH save profile is not live), a second A on the same row 0.4 .. 10 s later runs
+--     couchacts.deleteAll (same refusals, couchrun.wipe's dated copy, the game's RestartCampaignSelected). Moving the
+--     focus off the row, closing OPTIONS or the window running out disarms it. Hidden with cfg.CouchDeleteProgress off.
 -- UiStyle = "classic" (and a v2 page that cannot be built) keeps the 0.11.0 rows below unchanged.
 -- VERIFY ids (spec §14): V-FIN-01 (page origin measured at the show vs the build), V-FIN-04 (ghost focus, explicit
 -- navigation, clicks, focus traps), V-FIN-12 (the pill, theme.lua), V-FIN-15 (OPTIONS back route), V-FIN-17 (0.13.0:
@@ -75,7 +85,19 @@ local GFX_WORD = {auto = "Auto", performance = "Performance", quality = "Quality
 local LAYOUT_WORD = {["top-bottom"] = "Top / bottom", ["side-by-side"] = "Side by side"}
 local NET_WORD = {offline = "Offline", host = "Host", join = "Join"}
 local MODE_WORD = {quick = "Quick race", custom = "Custom race"}       -- 0.13.0 settings PlayMode (quick.lua)
-local RUN_PICKS = {"4", "6", "9"}                                     -- 0.13.0 GALAXY RUN lengths (settings RunPick)
+local RUN_PICKS = {"qualifier", "league", "kestar", "sprint"}         -- 0.14 GALAXY RUN v3 presets (settings RunPick)
+
+-- "THE QUALIFIER (10 RACES)" for a preset key (run.presetLabel; the key upper-cased when run.lua is unavailable)
+local function runLabel(key)
+  local ok, t = pcall(function() return U.mod("run").presetLabel(key) end)
+  return (ok and type(t) == "string") and t or string.upper(tostring(key or "?"))
+end
+
+-- the short name alone ("THE QUALIFIER"), for the poster kicker and the OPTIONS value
+local function runName(key)
+  local ok, t = pcall(function() return U.mod("run").presetName(key) end)
+  return (ok and type(t) == "string") and t or string.upper(tostring(key or "?"))
+end
 
 local function onOff(v) return v and "ON" or "OFF" end
 
@@ -100,21 +122,38 @@ local nav = { idx = nil, hl = nil, primed = false, prev = {}, vdir = 0, vNextMs 
 ---------------------------------------------------------------------------------------------------- UI v2 state
 -- (spec §4 / §5; the code is in the "UI v2" section near the end of this file)
 local TILE_IDS = {"quick", "custom", "galaxy", "pads", "options"}     -- the lobby ghosts (tiles mode, §4.6; 0.13.0)
-local OPT_IDS = {"layout", "gfx", "takedown", "tags", "kbp1", "run", "net", "netact", "adv"}   -- OPTIONS (§5.3)
+local OPT_IDS = {"layout", "gfx", "takedown", "tags", "kbp1", "names", "run", "couch", "net", "netact", "adv",
+                 "couchdel"}   -- OPTIONS (§5.3); couchdel: #98 Delete all couch progress; couch: the COUCH CAMPAIGN list
+-- OPTIONS > PLAYER NAMES (2026-10-14, Jules: "in the free mode option let's add p1 p2 p3 p4 custom names"): the
+-- "names" row opens a sub-list of the OPTIONS page (V2.opt.sub = "names") with one row per slot; A on a row opens the
+-- pad name editor (nameedit.lua) in place. Names are settings Name1..Name4; nametags.lua applies them.
+local NAME_IDS = {"name1", "name2", "name3", "name4"}
+local NAME_SLOT = {name1 = 1, name2 = 2, name3 = 3, name4 = 4}
+-- OPTIONS > PLAYERS > Couch campaign (couch-fix39, audit Q10): the COUCH CAMPAIGN group, a sub-list like PLAYER NAMES
+-- (the OPTIONS list has no room for another group: it already ends at the status pill). One row per couch rule; every
+-- row is self-contained (lobby.SUBS.couch.ids + LABEL / BUTTON_ACTIONS / LR_ACTIONS / HELP entries).
+-- the OPTIONS sub-lists: V2.opt.sub -> its rows, group header, the OPTIONS row that opens it (a field of lobby, not a
+-- local: lobby.lua's main chunk is at Lua's 200-locals limit)
+lobby.SUBS = { names = { ids = NAME_IDS, header = "PLAYER NAMES", opener = "names", first = "name1" },
+               couch = { ids = {"mystteam", "couchecon"}, header = "COUCH CAMPAIGN", opener = "couch", first = "mystteam" } }
+function lobby.SUBS.idsOf(O)
+  local sb = O and O.sub and lobby.SUBS[O.sub]
+  return sb and sb.ids or OPT_IDS
+end
 
 -- One page instance (lobby.resetNav replaces it: the widgets die with their page). style: the UiStyle the page was
 -- built for ("v2" | "classic"; a v2 build that failed falls back to the rows and keeps "v2", so no rebuild loop);
 -- active: the v2 canvas is up; mode: "tiles" | "options"; geo: the page geometry the content was placed with (screen
 -- su; theme's builders convert with it), geoNow: the latest measurement, shift: the canvas render translation that
--- corrects the difference (alignCanvas, V-FIN-01); posters / galaxy / again / badge / strip / pill / opt: theme
--- elements (galaxy: the GALAXY RUN poster's event texts, again: the START card); painted: the tile with the focus look;
+-- corrects the difference (alignCanvas, V-FIN-01); posters / again / badge / strip / pill / opt: theme
+-- elements (again: the START card); painted: the tile with the focus look;
 -- sig: refresh signatures; ghostKeys: registry keys of our ghosts (dropped when the v2 build fails); bPrev / wasCovered:
 -- the OPTIONS back route's B edge; lrAtMs: last left / right step (a focus trap skips a second step of one press);
 -- trapR: GALAXY RUN's right focus trap; sPrev / sArmed: P1's pad Start (held at the last tick / pressed while nothing
 -- covered the lobby: the release runs START).
 local function newV2()
   return { style = nil, active = false, mode = "tiles", ctx = nil, root = nil, geo = nil, geoNow = nil,
-           shift = {0, 0}, canvas = nil, tilesCv = nil, posters = {}, galaxy = {}, again = nil, badge = {},
+           shift = {0, 0}, canvas = nil, tilesCv = nil, posters = {}, again = nil, badge = {},
            badgeOn = false, strip = nil, pill = nil, opt = nil, painted = nil, sig = {}, ghostKeys = {},
            bPrev = true, wasCovered = false, lrAtMs = -1e9, optLast = nil, headWait = false, focusSeen = false,
            raceRacers = nil, startState = nil, againKey = nil, againView = nil, fitIn = nil, fitOut = nil,
@@ -122,7 +161,7 @@ local function newV2()
 end
 local V2 = newV2()
 
-local padsConfirmUntilMs = 0     -- ADD PLAYERS 2-press window (lobby.onPads); the v2 PLAYERS badge shows meanwhile
+local padsConfirmUntilMs = 0     -- ADD PLAYERS 2-press window (lobby.onPads, PADS_CONFIRM_MS); the v2 PLAYERS badge shows meanwhile
 local pendingLevel = nil         -- {text, warn}: the pill level of the next "status" text this module emits (say)
 
 local function theme() return U.mod("theme") end
@@ -199,8 +238,8 @@ end
 
 -- 0.12.0: status() with its pill level: warn = true for refusals and errors (the RUST warn pill, spec §4.5 / §2.6).
 -- The "status" listener (lobby.setStatus) reads it; the classic status row ignores it (same text, same log).
-local function say(text, warn)
-  pendingLevel = {text = tostring(text or ""), warn = warn == true}
+local function say(text, warn, ms)
+  pendingLevel = {text = tostring(text or ""), warn = warn == true, ms = ms}
   status(text)
 end
 
@@ -242,10 +281,23 @@ local function runIs(what)
   return ok and v == true
 end
 
+-- 0.16 GALACTIC GRAND PRIX (gp.lua): "on" (running) / "between" (between two of its races) / "done" (podium waiting)
+local function gpIs(what)
+  if cfg.GrandPrix == false then return false end
+  local ok, v = pcall(function()
+    local g = U.mod("gp")
+    if what == "on" then return g.active() end
+    if what == "between" then return g.betweenRaces() end
+    if what == "done" then return g.done() end
+    return false
+  end)
+  return ok and v == true
+end
+
 -- 0.13.0: the poster of the mode START plays (its check badge, the default focus): GALAXY RUN while a run is on or
 -- armed, else the PlayMode's.
 local function modeTile()
-  if runIs("on") or runIs("armed") then return "galaxy" end
+  if runIs("on") or runIs("armed") or gpIs("on") then return "galaxy" end
   return (settings.get("PlayMode") == "custom") and "custom" or "quick"
 end
 
@@ -272,6 +324,104 @@ local function joinAddr()
   local a = tostring(settings.get("JoinAddress") or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if a:match("^[^:]+:%d+$") then return a end
   return a .. ":" .. tostring(port())
+end
+
+-- PLAYER NAMES (nametags.lua resolves the names, settings Name1..Name4 hold them, nameedit.lua is the pad editor).
+-- nameEdit = {slot, e = nameedit state, def = the slot's default name} while one name row is being edited.
+local NE = require("nameedit")
+local nameEdit = nil
+local function tagsMod()
+  local ok, m = pcall(U.mod, "nametags")
+  if ok and type(m) == "table" then return m end
+  return nil
+end
+local function customName(n)
+  local m = tagsMod()
+  if not m then return nil end
+  local ok, v = pcall(m.customName, n)
+  return ok and v or nil
+end
+-- P1's PlayerState (its profile name in the front end), nil when unreadable
+local function p1State()
+  local ps = nil
+  pcall(function()
+    local p1 = U.p1()
+    if U.ok(p1) and U.ok(p1.PlayerState) then ps = p1.PlayerState end
+  end)
+  return ps
+end
+-- The slot's name without a custom one: P1's profile name, "Player <n>" (cfg.GuestNames) for the guests.
+local function defaultName(n)
+  local m = tagsMod()
+  if not m then return "P" .. n end
+  local ok, v
+  if n == 1 then
+    ok, v = pcall(function()
+      local ps = p1State()
+      local name = ps and U.str(ps:GetPlayerName()) or nil     -- uobj: U.ok(ps) in p1State
+      if name and name ~= "" and name ~= customName(1) then return name end
+      return "Player 1"
+    end)
+  else
+    ok, v = pcall(m.defaultGuestName, n)
+  end
+  return (ok and type(v) == "string" and v ~= "") and v or ("Player " .. n)
+end
+local function cutText(s, max)
+  s = tostring(s or "")
+  if (utf8.len(s) or #s) <= max then return s end
+  local okO, o = pcall(utf8.offset, s, max)
+  return ((okO and o) and s:sub(1, o - 1) or s:sub(1, max - 1)) .. "\u{2026}"
+end
+-- the "Player names" row: "JULES · P2 · P3 · P4" (custom names, else the P-tag), "DEFAULT" when none is set
+local function namesSummary()
+  local parts, any = {}, false
+  for n = 1, 4 do
+    local c = customName(n)
+    if c then any = true end
+    parts[n] = c or ("P" .. n)
+  end
+  if not any then return "DEFAULT" end
+  return cutText(table.concat(parts, " \u{00B7} "), 44)
+end
+local function nameValue(n)
+  if nameEdit and nameEdit.slot == n then return NE.render(nameEdit.e) end
+  local c = customName(n)
+  if c then return c end
+  return defaultName(n) .. " (default)"
+end
+
+-- #98 OPTIONS > ADVANCED > Delete all couch progress (couchacts.deleteAll does the work and re-checks every refusal).
+-- lobby.CD.armedMs / untilMs: the first A's time and the end of its confirm window (0 = not armed); prof: the cached
+-- couch save profile check {live, why, atMs} (it reads files: at most once per CD.PROFILE_MS for the row text).
+-- (a field of lobby, no local: the main chunk is at Lua's 200-locals limit)
+lobby.CD = { armedMs = 0, untilMs = 0, focusId = nil, prof = nil, CONFIRM_MS = 10000, GUARD_MS = 400,
+             PROFILE_MS = 3000 }
+function lobby.CD.acts()
+  local ok, m = pcall(U.mod, "couchacts")
+  if ok and type(m) == "table" then return m end
+  return nil
+end
+function lobby.CD.on() return opt("CouchDeleteProgress", true) ~= false end
+function lobby.CD.profile(fresh)
+  local now = St.nowMs()
+  local p = lobby.CD.prof
+  if fresh or not p or now - p.atMs > lobby.CD.PROFILE_MS then
+    local A = lobby.CD.acts()
+    local okL, live, why = false, false, "The couch campaign module is not loaded."
+    if A then okL, live, why = pcall(A.couchProfileLive) end
+    if not okL then live, why = false, tostring(live) end
+    p = { live = live == true, why = tostring(why or ""), atMs = now }
+    lobby.CD.prof = p
+  end
+  return p
+end
+function lobby.CD.armed() return lobby.CD.untilMs > 0 and St.nowMs() <= lobby.CD.untilMs end
+function lobby.CD.disarm(why)
+  if lobby.CD.untilMs == 0 then return end
+  lobby.CD.armedMs, lobby.CD.untilMs, lobby.CD.focusId = 0, 0, nil
+  U.log(TAG, "DELETE ALL COUCH PROGRESS: confirm disarmed (%s)", tostring(why))
+  St.ui.dirty = true
 end
 
 -- Settings rows (§1.2; UI v2 §5.2 "LABEL -> label / value / kind"): LABEL[id]() -> label (v2, sentence case), value
@@ -309,17 +459,42 @@ local LABEL = {
     return "", "", "action"
   end,
   adv = function() return "Race builder", "OPEN", "action" end,   -- v2 OPTIONS > ADVANCED (§4.7: the word DEV goes)
-  -- 0.13.0 GALAXY RUN (run.lua): off / 4 / 6 / 9 races; while a run is on: its race and hull, A twice abandons it
+  couch = function() return "Couch campaign", "OPEN", "action" end,  -- couch-fix39: opens the COUCH CAMPAIGN sub-list
+  -- couch-fix39 (audit Q10) COUCH CAMPAIGN > a guest's mystery choice with a TEAM effect: greyed | allowed
+  mystteam = function()
+    local v = settings.get("CouchMysteryTeam")
+    return "Guests' team mystery choices", (v == "allowed") and "ALLOWED" or "GREYED", "cycle"
+  end,
+  -- couch-fix35 (Jules's Q1) COUCH CAMPAIGN > P1's rewards: OWN PLACE (his wallet / round follow his own result) |
+  -- BEST CARRIES EVERYONE (the old rule)
+  couchecon = function()
+    local v = settings.get("CouchEconomy")
+    return "P1's rewards", (v == "best") and "BEST CARRIES EVERYONE" or "OWN PLACE", "cycle"
+  end,
+  names = function() return "Player names", namesSummary(), "action" end,   -- opens the PLAYER NAMES sub-list
+  -- #98: armed = the second A deletes; LOCKED while the COUCH save profile is not live
+  couchdel = function()
+    if lobby.CD.armed() then return "Delete all couch progress", "PRESS (A) AGAIN", "action" end
+    return "Delete all couch progress", lobby.CD.profile().live and "DELETE" or "LOCKED", "action"
+  end,
+  -- GALAXY RUN v3 (run.lua): off / a League preset; while a run is on: its race and tokens, A twice abandons it
   run = function()
     local okR, r = pcall(function() return U.mod("run") end)
     local st = okR and r and r.state and r.state() or nil
     if st and st.status == "on" then
-      return "Galaxy run", string.format("RACE %d / %d · HULL %d", st.race or 1, st.length or 0, st.hull or 0), "action"
+      return "Galaxy run", string.format("RACE %d / %d · TOKENS %d", st.race or 1, st.length or 0, st.hull or 0), "action"
     end
     local v = tostring(settings.get("RunLength") or "off")
-    return "Galaxy run", (v == "off") and "OFF" or (v .. " RACES"), "cycle"
+    return "Galaxy run", (v == "off") and "OFF" or runName(v), "cycle"
   end,
 }
+
+for id, n in pairs(NAME_SLOT) do
+  -- the edited row shows the cycle arrows (its left / right move the cursor)
+  LABEL[id] = function()
+    return "Player " .. n, nameValue(n), (nameEdit and nameEdit.slot == n) and "cycle" or "action"
+  end
+end
 
 local CLASSIC_NAME = {layout = "2P LAYOUT", gfx = "SPLIT GRAPHICS", takedown = "TAKEDOWN CAMERAS", tags = "NAME TAGS",
                       kbp1 = "KEYBOARD IS P1", net = "NETWORK"}
@@ -449,7 +624,13 @@ local BUTTON_ACTIONS = {
   start = function() lobby.onStart() end,
   options = function() lobby.openOptions() end,       -- 0.12.0 v2: the OPTIONS tile
   run = function(dir) lobby.onRun(dir) end,            -- 0.13.0 OPTIONS > Galaxy run
+  names = function() lobby.openNames() end,            -- OPTIONS > Player names (sub-list)
+  couchdel = function() lobby.onCouchDelete() end,     -- #98 OPTIONS > Delete all couch progress (2-press confirm)
+  couch = function() lobby.openCouch() end,            -- couch-fix39 OPTIONS > Couch campaign (sub-list)
+  mystteam = function() lobby.onMystTeam() end,        -- couch-fix39 COUCH CAMPAIGN > Guests' team mystery choices
+  couchecon = function() lobby.onCouchEcon() end,      -- couch-fix35 COUCH CAMPAIGN > P1's rewards
 }
+for id, n in pairs(NAME_SLOT) do BUTTON_ACTIONS[id] = function() lobby.onName(n) end end
 
 -- 0.12.0 v2 START (0.13.0: P1's pad Start on the FREE MODE page, the START card shows what it does): locked = the
 -- reason as a warn pill; launching = ignored.
@@ -648,6 +829,13 @@ function lobby.build(menu)
   -- RACE SETUP panel (setup.lua) in the same page, collapsed until CHOOSE RACE
   U.try(TAG, function() U.mod("setup").build(root, pc, page) end)
 
+  -- GALAXY RUN page (runpage.lua) in the same page, collapsed until the poster's A (0.14 v3)
+  U.try(TAG, function() U.mod("runpage").build(root, pc, page) end)
+  -- 0.15 F01: the COUCH CAMPAIGN players page (couchpage.lua), opened by the Campaign tab's COUCH CAMPAIGN tile
+  U.try(TAG, function() U.mod("couchpage").build(root, pc, page) end)
+  -- 0.16: the GALACTIC GRAND PRIX page (gppage.lua), opened by the poster that was GALAXY RUN
+  U.try(TAG, function() U.mod("gppage").build(root, pc, page) end)
+
   if not restoredOnce then
     restoredOnce = true
     if St.race.choice == nil then
@@ -734,11 +922,12 @@ function lobby.setStatus(text)
   setRowText("status", St.ui.statusText)
   if V2.active and V2.pill then
     local warn
-    if lv and lv.text == St.ui.statusText then warn = lv.warn else warn = isWarnText(St.ui.statusText) end
+    local ms
+    if lv and lv.text == St.ui.statusText then warn, ms = lv.warn, lv.ms else warn = isWarnText(St.ui.statusText) end
     if St.ui.statusText == "" then
       V2.pill.post("", {})
     else
-      V2.pill.post(St.ui.statusText, {warn = warn})
+      V2.pill.post(St.ui.statusText, {warn = warn, ms = ms})
     end
   end
   if setupActive() then pcall(function() U.mod("setup").setStatus(St.ui.statusText) end) end
@@ -772,8 +961,12 @@ end
 
 -- ADD PLAYERS: guest LocalPlayers can never be removed (RemovePlayer crash) and follow every flow of this game
 -- session, online Multiplayer included, so the opt-in is confirmed: the first press only explains, a second press
--- within 5 s enables the pads (join.enablePads). Once on, the row only repeats how to turn them off.
+-- within the window (PADS_CONFIRM_MS) enables the pads (join.enablePads). Once on, the row only repeats how to turn them off.
 -- 0.12.0 v2: the PLAYERS tile (its RUST "Press again to confirm" badge shows during the window, v2Tick).
+-- #75 (tester #5 2026-10-18 04:27:42 / :52 / 04:28:08): every A reached onPads, but 9.9 s and 16.4 s apart: each
+-- press found the 5 s window over and only showed the prompt again (the long warning takes longer than 5 s to read).
+-- The window is PADS_CONFIRM_MS now, and the prompt pill + badge stay up exactly as long.
+local PADS_CONFIRM_MS = 15000
 function lobby.onPads()
   local join = U.mod("join")
   if join.padsEnabled() then
@@ -783,9 +976,9 @@ function lobby.onPads()
   else
     local now = St.nowMs()
     if now > padsConfirmUntilMs then
-      padsConfirmUntilMs = now + 5000
+      padsConfirmUntilMs = now + PADS_CONFIRM_MS
       if V2.active then
-        say("PADS STAY ON UNTIL THE GAME RESTARTS. NOT FOR ONLINE PLAY: PRESS (A) AGAIN", false)   -- §4.2
+        say("PADS STAY ON UNTIL THE GAME RESTARTS. NOT FOR ONLINE PLAY: PRESS (A) AGAIN", false, PADS_CONFIRM_MS)   -- §4.2
       else
         status("PADS STAY ON UNTIL GAME RESTART, NOT FOR ONLINE PLAY: PRESS AGAIN TO ADD PLAYERS")
       end
@@ -802,6 +995,13 @@ end
 -- 0.13.0 GALAXY RUN: between run races START (and RACE) open the run's next race on the racer cards. -> "opened" |
 -- "failed" (between run races, but the next race could not be opened: nothing else is launched) | nil (no run race)
 local function runNext()
+  -- 0.16: between GRAND PRIX races START opens its next race on the racer cards
+  if gpIs("between") then
+    local okG, opened = pcall(function() return U.mod("gp").openNext() end)
+    if okG and opened == true then return "opened" end
+    say("GRAND PRIX: THE NEXT RACE DID NOT OPEN. END IT ON THE GRAND PRIX PAGE", true)
+    return "failed"
+  end
   local okB, between = pcall(function() return U.mod("run").betweenRaces() end)
   if not (okB and between) then return nil end
   local ok, handled = pcall(function() return U.mod("run").openNext() end)
@@ -850,6 +1050,11 @@ local function playMode(mode)
     St.ui.dirty = true
     return
   end
+  if gpIs("on") then
+    say("A GRAND PRIX IS ON: PLAY IT ON GALACTIC GRAND PRIX, OR END IT THERE", true)
+    St.ui.dirty = true
+    return
+  end
   settings.set("PlayMode", mode)
   if tostring(settings.get("RunLength") or "off") ~= "off" then settings.set("RunLength", "off") end
   U.log(TAG, "FREE MODE: %s (RACE SETUP)", MODE_WORD[mode] or mode)
@@ -859,9 +1064,9 @@ end
 function lobby.onQuick() playMode("quick") end
 function lobby.onCustom() playMode("custom") end
 
--- The run length GALAXY RUN starts (settings RunPick; a length set in OPTIONS > Galaxy run updates it).
+-- The League preset GALAXY RUN starts (settings RunPick; a preset set in OPTIONS > Galaxy run updates it).
 local function runPick()
-  local v = tostring(settings.get("RunPick") or "4")
+  local v = tostring(settings.get("RunPick") or "qualifier")
   for _, p in ipairs(RUN_PICKS) do if p == v then return v end end
   return RUN_PICKS[1]
 end
@@ -870,6 +1075,15 @@ end
 -- run is armed with RunPick races (run.prelaunch starts it at the launch) and RACE SETUP opens for race 1.
 function lobby.onGalaxy()
   if St.launch.pending then return end
+  -- 0.16: A opens the GALACTIC GRAND PRIX page (gppage.lua); cfg.GrandPrix = false keeps the GALAXY RUN page
+  if cfg.GrandPrix ~= false then
+    local okG, gpOpen = pcall(function() return U.mod("gppage").open() end)
+    if okG and gpOpen == true then St.ui.dirty = true; return end
+  end
+  -- 0.14 v3: A opens the GALAXY RUN page (new run / continue / node / standings; runpage.lua)
+  local okO, pageOpen = pcall(function() return U.mod("runpage").open() end)
+  if okO and pageOpen == true then St.ui.dirty = true; return end
+  -- fallback (the page could not be built): the pre-page behaviour
   if runNext() then St.ui.dirty = true; return end
   if runIs("on") then                                 -- on, but no race to open (a race still in flight)
     local okT, t = pcall(function() return U.mod("run").statusText() end)
@@ -879,27 +1093,13 @@ function lobby.onGalaxy()
   end
   local len = runPick()
   settings.set("RunLength", len)
-  say("GALAXY RUN: THE NEXT RACE STARTS A " .. len .. "-RACE RUN")
+  say("GALAXY RUN: THE NEXT RACE STARTS " .. runLabel(len))
   openSetup()
 end
 
--- 0.13.0 GALAXY RUN poster (RIGHT, its focus trap / keyboard right): between run races the route (A <-> B), else the
--- run length 4 -> 6 -> 9 -> 4 (an armed run takes the new length).
-function lobby.onGalaxyRight()
-  if runIs("between") then
-    local okS, sw = pcall(function() return U.mod("run").switchRoute() end)
-    if not (okS and sw) then say("GALAXY RUN: ONE ROUTE LEFT") end
-  elseif not runIs("on") then
-    local cur, nxt = runPick(), RUN_PICKS[1]
-    for i, p in ipairs(RUN_PICKS) do
-      if p == cur then nxt = RUN_PICKS[i % #RUN_PICKS + 1] end
-    end
-    settings.set("RunPick", nxt)
-    if runIs("armed") then settings.set("RunLength", nxt) end
-    say("GALAXY RUN: " .. nxt .. " RACES")
-  end
-  St.ui.dirty = true
-end
+-- Jules 2026-10-14 (playtest note): GALAXY RUN is a plain button like QUICK / CUSTOM RACE. RIGHT on it does nothing
+-- (its focus trap only keeps the focus on the tile); the node and the League are picked on the run page (runpage.lua
+-- NEXT NODE / LEAGUE rows).
 
 function lobby.onAdvanced()
   U.mod("builder").open()
@@ -934,6 +1134,21 @@ end
 
 function lobby.onTags()
   settings.toggle("NameTags")
+  St.ui.dirty = true
+end
+
+-- couch-fix39 (audit Q10): COUCH CAMPAIGN > Guests' team mystery choices GREYED <-> ALLOWED (settings.txt
+-- CouchMysteryTeam; couchrun reads it at every mystery screen)
+function lobby.onMystTeam()
+  settings.cycle("CouchMysteryTeam", {"greyed", "allowed"})
+  St.ui.dirty = true
+end
+
+-- couch-fix35 (Jules's Q1): COUCH CAMPAIGN > P1's rewards OWN PLACE <-> BEST CARRIES EVERYONE (settings.txt
+-- CouchEconomy; couchrules.ownEconomy reads it at every race end)
+function lobby.onCouchEcon()
+  local v = settings.cycle("CouchEconomy", {"own", "best"})
+  U.log(TAG, "COUCH CAMPAIGN: P1's rewards %s", (v == "best") and "BEST CARRIES EVERYONE" or "OWN PLACE")
   St.ui.dirty = true
 end
 
@@ -992,20 +1207,61 @@ function lobby.onRun(dir)
       settings.set("RunLength", "off")
       say("GALAXY RUN ABANDONED")
     else
-      runAbandonUntil = now + 3000
+      runAbandonUntil = now + U.confirmMs()              -- couch-fix59 AUTO-145e
       say("PRESS A AGAIN TO ABANDON THE GALAXY RUN", true)
     end
   else
-    cycle("RunLength", {"off", "4", "6", "9"}, dir)
+    cycle("RunLength", {"off", "qualifier", "league", "kestar", "sprint"}, dir)
     local v = tostring(settings.get("RunLength") or "off")
     if v ~= "off" then
-      settings.set("RunPick", v)                        -- 0.13.0: the GALAXY RUN poster shows / starts this length
-      say("GALAXY RUN: THE NEXT RACE STARTS A " .. v .. "-RACE RUN")
+      settings.set("RunPick", v)                        -- the GALAXY RUN poster shows / starts this preset
+      say("GALAXY RUN: THE NEXT RACE STARTS " .. runLabel(v))
     else
       say("GALAXY RUN OFF")
     end
   end
   St.ui.dirty = true
+end
+
+-- #98 OPTIONS > Delete all couch progress. First A: refused with the reason (the COUCH save profile is not live), else
+-- armed for lobby.CD.CONFIRM_MS (the warning in the pill and the detail column). A second A in that window (not within
+-- lobby.CD.GUARD_MS of the first: the same press) runs couchacts.deleteAll, which checks every refusal again, keeps
+-- couch-run.txt in a dated copy (couchrun.wipe) and runs the game's campaign reset. OPTIONS and the join window close
+-- right before that reset (the act page did the same).
+function lobby.onCouchDelete()
+  St.ui.dirty = true
+  if not lobby.CD.on() then say("TURNED OFF (CouchDeleteProgress)", true); return end
+  local A = lobby.CD.acts()
+  if not A then say("THE COUCH CAMPAIGN MODULE IS NOT LOADED: NOTHING WAS CHANGED", true); return end
+  local now = St.nowMs()
+  if lobby.CD.armed() then
+    if now - lobby.CD.armedMs < lobby.CD.GUARD_MS then
+      U.log(TAG, "DELETE ALL COUCH PROGRESS: an A %d ms after the first one ignored (the same press)",
+        math.floor(now - lobby.CD.armedMs))
+      return
+    end
+    lobby.CD.disarm("confirmed")
+    U.log(TAG, "DELETE ALL COUCH PROGRESS: confirmed by P1's second A in OPTIONS")
+    local okD, ok, msg = pcall(A.deleteAll, function()
+      lobby.closeOptions("DELETE ALL COUCH PROGRESS")
+      pcall(function() U.mod("join").close("couch progress deleted") end)
+    end)
+    if not okD then ok, msg = false, "The delete failed (see the log): " .. tostring(ok) end
+    lobby.CD.profile(true)
+    if ok then say(string.upper(tostring(msg or "Couch progress deleted.")))
+    else say(string.upper(tostring(msg or "Nothing was changed.")), true) end
+    return
+  end
+  local p = lobby.CD.profile(true)
+  if not p.live then
+    U.log(TAG, "DELETE ALL COUCH PROGRESS refused in OPTIONS: %s", p.why)
+    say("NOT AVAILABLE: " .. string.upper(p.why), true)
+    return
+  end
+  lobby.CD.armedMs, lobby.CD.untilMs, lobby.CD.focusId = now, now + lobby.CD.CONFIRM_MS, nil   -- focusId: next tick
+  U.log(TAG, "DELETE ALL COUCH PROGRESS: armed in OPTIONS (a second A within %d s deletes)",
+    math.floor(lobby.CD.CONFIRM_MS / 1000))
+  say("DELETES THE COUCH CAMPAIGN SAVE AND EVERY GUEST'S PROGRESS: PRESS (A) AGAIN TO DELETE", true, lobby.CD.CONFIRM_MS)
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1046,8 +1302,12 @@ local LR_ACTIONS = {
   tags = function() lobby.onTags() end,
   kbp1 = function() lobby.onKbP1() end,
   net = function(dir) lobby.onNet(dir) end,
-  galaxy = function(dir) if dir > 0 then lobby.onGalaxyRight() end end,   -- 0.13.0 v2 tiles: RIGHT on GALAXY RUN
+  mystteam = function() lobby.onMystTeam() end,       -- couch-fix39: two values, either way flips
+  couchecon = function() lobby.onCouchEcon() end,     -- couch-fix35: two values, either way flips
 }
+for id, n in pairs(NAME_SLOT) do
+  LR_ACTIONS[id] = function(dir) lobby.nameEditKey((dir or 1) < 0 and "left" or "right", n) end
+end
 
 local PAD_KEYS = {
   up = {"Gamepad_DPad_Up", "Gamepad_LeftStick_Up"},
@@ -1104,7 +1364,10 @@ end
 
 -- The navigable ids of the page: the classic rows, or (v2) the tile ghosts / the OPTIONS row ghosts.
 local function navIds()
-  if V2.active then return (V2.mode == "options") and OPT_IDS or TILE_IDS end
+  if V2.active then
+    if V2.mode ~= "options" then return TILE_IDS end
+    return lobby.SUBS.idsOf(V2.opt)
+  end
   return NAV_IDS
 end
 
@@ -1162,6 +1425,7 @@ local function heldExtra(p1)
   local back = O.cmd and O.cmd.widget("back")
   if U.ok(back) and ui.hasFocus(back, p1) then return "back" end
   if ui.hasFocus(O.trapL, p1) or ui.hasFocus(O.trapR, p1) then return "trap" end
+  if (U.ok(O.trapU) and ui.hasFocus(O.trapU, p1)) or (U.ok(O.trapD) and ui.hasFocus(O.trapD, p1)) then return "trap" end
   return nil
 end
 
@@ -1233,11 +1497,15 @@ end
 -- ui.forgetAll / lobby.build: the rows are new widgets.
 function lobby.resetNav()
   pcall(function() U.mod("setup").forget() end)      -- the setup panel belonged to the same page
+  pcall(function() U.mod("runpage").forget() end)    -- the GALAXY RUN page too (0.14 v3)
+  pcall(function() U.mod("couchpage").forget() end)  -- the COUCH CAMPAIGN page (0.15 F01)
+  pcall(function() U.mod("gppage").forget() end)     -- the GALACTIC GRAND PRIX page (0.16)
   nav.idx, nav.hl, nav.primed, nav.lastFocus = nil, nil, false, nil
   nav.covered, nav.coverWhy, nav.layerBase, nav.backGuard, nav.consumed, nav.seenAct = false, nil, nil, false, nil, {}
   nav.keep.untilMs = 0
   St.ui.baseTexts = {}
   V2 = newV2()                                        -- 0.12.0: the v2 page state belongs to the page
+  nameEdit = nil                                      -- the name editor belonged to the page too
   St.ui.canvas = nil
 end
 
@@ -1262,7 +1530,7 @@ local function layerCounts()
   if not U.ok(mgr) then return nil end
   local out = {}
   for i, layer in ipairs(LAYERS) do
-    local ok, n = pcall(function() return mgr:GetWidgetCountInLayer(layer) end)   -- (Enum layer) -> Int
+    local ok, n = pcall(U.callMethod, mgr, "GetWidgetCountInLayer", layer)   -- (Enum layer) -> Int
     if not ok or type(n) ~= "number" then return nil end
     out[i] = n
   end
@@ -1273,7 +1541,7 @@ end
 -- IsActivated() never reads true (not on a CommonUI stack) must not disable the lobby input for good.
 local function deactivated(w, key)
   if not U.ok(w) then return false end
-  local ok, a = pcall(function() return w:IsActivated() end)       -- UCommonActivatableWidget::IsActivated() -> Bool
+  local ok, a = pcall(U.callMethod, w, "IsActivated")       -- UCommonActivatableWidget::IsActivated() -> Bool
   if not ok or type(a) ~= "boolean" then return false end
   nav.seenAct = nav.seenAct or {}
   if a then nav.seenAct[key] = true; return false end
@@ -1350,7 +1618,7 @@ end
 -- Builder page: P1's focus on its desired focus target (BP_GetDesiredFocusTarget = Btn_SetVehicle [MT§5]).
 local function builderTarget(bw)
   for _, name in ipairs({"Btn_SetVehicle", "Btn_Go"}) do
-    local ok, w = pcall(function() return bw[name] end)
+    local ok, w = pcall(U.getField, bw, name)
     if ok and U.ok(w) then return w end
   end
   return nil
@@ -1358,7 +1626,7 @@ end
 
 local function builderFocused(bw, p1)
   if not U.ok(p1) then return false end
-  local ok, v = pcall(function() return bw:HasUserFocusedDescendants(p1) end)   -- UWidget (Object) -> Bool
+  local ok, v = pcall(U.callMethod, bw, "HasUserFocusedDescendants", p1)   -- UWidget (Object) -> Bool
   return ok and v == true
 end
 
@@ -1535,6 +1803,9 @@ end
 -- FAST loop (ui.pollClicks) while the lobby page shows. Optional extra since 2026-10-07 (see the section header).
 function lobby.pollNav()
   if St.launchHold() then return end                  -- 0.12.0: the front end is being torn down (state.lua)
+  -- #21: a FREE MODE sub-page owns the screen (LB / RB inert, tab strip hidden, B = Back in the footer): menu_tab's
+  -- lock, applied within one FAST tick of the sub-page's open and lifted on the posters
+  U.try(TAG, function() U.mod("menu_tab").subPageTick() end)
   if St.menu.visible ~= "lobby" or not U.ok(St.menu.lobby) then nav.primed = false; return end
   if checkCovered() then nav.primed = false; return end
   if setupActive() then
@@ -1544,6 +1815,31 @@ function lobby.pollNav()
   end
   local p1 = U.p1()
   if not U.ok(p1) then return end
+  -- B04 (live 2026-10-15): P1's pad B on the GALAXY RUN page closes it (when P1's PlayerController sees pad B, after a
+  -- race); before that, backprompt.lua turns the game's QuitGame prompt this B posts into the same close
+  local okRP, rpOn = pcall(function() return U.mod("runpage").active() end)
+  local rpB = okRP and rpOn == true and settings.get("KeyboardIsP1") ~= true and U.mod("ui").keyDown(p1, C.KEY.B) or false
+  if rpB and not nav.rpBPrev then
+    nav.backGuard = true
+    U.try(TAG, function() U.mod("runpage").onP1Back("pad B") end)
+  end
+  nav.rpBPrev = rpB
+  -- 0.15 F01: the COUCH CAMPAIGN page closes on P1's B the same way
+  local okCP, cpOn = pcall(function() return U.mod("couchpage").active() end)
+  local cpB = okCP and cpOn == true and settings.get("KeyboardIsP1") ~= true and U.mod("ui").keyDown(p1, C.KEY.B) or false
+  if cpB and not nav.cpBPrev then
+    nav.backGuard = true
+    U.try(TAG, function() U.mod("couchpage").onP1Back("pad B") end)
+  end
+  nav.cpBPrev = cpB
+  -- 0.16: the GALACTIC GRAND PRIX page too (its setup view steps back to the tours, the others close)
+  local okGP, gpOn = pcall(function() return U.mod("gppage").active() end)
+  local gpB = okGP and gpOn == true and settings.get("KeyboardIsP1") ~= true and U.mod("ui").keyDown(p1, C.KEY.B) or false
+  if gpB and not nav.gpBPrev then
+    nav.backGuard = true
+    U.try(TAG, function() U.mod("gppage").onP1Back("pad B") end)
+  end
+  nav.gpBPrev = gpB
   local list = navList()
   if #list == 0 then return end
   local now = St.nowMs()
@@ -1579,7 +1875,9 @@ function lobby.pollNav()
   elseif now >= nav.vNextMs then
     nav.vNextMs, step = now + (tonumber(opt("LobbyNavRepeatMs", 140)) or 140), vdir
   end
-  if step ~= 0 and not focusMoved and not held then
+  if step ~= 0 and not focusMoved and not held and nameEdit and V2.mode == "options" then
+    lobby.nameEditKey(step < 0 and "up" or "down")     -- PLAYER NAMES editor: up / down step the letter
+  elseif step ~= 0 and not focusMoved and not held then
     nav.idx = moveIdx(list, nav.idx, step)
     if focusRow(nav.idx) then nav.lastFocus = nav.idx end
   end
@@ -1631,11 +1929,39 @@ function lobby.onKey(name)
     nav.backGuard = true
     return
   end
+  local okRP, rpActive = pcall(function() return U.mod("runpage").active() end)
+  if okRP and rpActive == true then
+    U.mod("runpage").onKey(name)
+    return
+  end
+  local okCP, cpActive = pcall(function() return U.mod("couchpage").active() end)
+  if okCP and cpActive == true then
+    U.mod("couchpage").onKey(name)
+    return
+  end
+  local okGP, gpActive = pcall(function() return U.mod("gppage").active() end)
+  if okGP and gpActive == true then
+    U.mod("gppage").onKey(name)
+    return
+  end
   if setupActive() then
     U.mod("setup").onKey(name)
     return
   end
   local options = V2.active and V2.mode == "options"
+  if options and nameEdit and (name == "back2" or name == "up" or name == "down" or name == "left"
+                               or name == "right") then
+    -- PLAYER NAMES editor: arrows step / move, Backspace deletes left of the cursor (CommonUI's own move onto a focus
+    -- trap only puts the focus back for keyboard input, optionsTick); Enter is CommonUI's click on the row (A)
+    V2.lrAtMs = St.nowMs()
+    lobby.nameEditKey(name)
+    return
+  end
+  if name == "back2" and options and V2.opt and V2.opt.sub then
+    lobby.armBackGuard()
+    lobby.closeSub("Backspace")
+    return
+  end
   if name == "back2" then
     if options then                                    -- 0.12.0 v2 §5.3: Backspace closes OPTIONS
       lobby.armBackGuard()
@@ -1733,13 +2059,6 @@ local TILE = { quick = {128, 345, 663, 700}, custom = {836, 345, 663, 700}, gala
                pads = {128, 1090, 663, 425}, options = {836, 1090, 663, 425} }
 local AGAIN = { x = 1544, y = 1090, w = 664, h = 425, pad = 48, glyph = 72 }
 local TILE_TRAP = {40, 140, 24, 24}                    -- GALAXY RUN's right focus trap (OPTIONS' traps: y 100)
--- GALAXY RUN's event texts (between run races / after a run), poster-local su, the RACE event card's stack (0.12.0
--- mockup event_card) moved to the top of a 535-su column: planet line, the caption 60 below it (Overpass Medium Italic
--- 30: the RACE card's letter-spaced artCaption fits 15 characters here; up to 2 lines of 40), the track name below the
--- caption (posterTitle 54, up to 2 lines of 58), the standings below the name (one line): all above y 374, the top of
--- the bottom text stack (kicker + 2 title lines at 69 + the focus desc). The planet line stops short of the check badge.
-local GAL_TXT = { x = 64, planet = 48, caption = 108, capLine = 40, gap = 4, nameLine = 58, standGap = 12, wrap = 535,
-                  planetW = 470 }
 local TXM = "/Game/Griffin/UI/Library/Textures/Content/MainMenu/"
 -- CUSTOM RACE's art: the chosen class's MODE strip (setup.lua MODE_V2.race)
 local CLASS_STRIP = { Car = "T_UI_FE_Tile_05", Bike = "T_UI_FE_Tile_05_Bike", Skimmer = "T_UI_FE_Tile_05_Skim",
@@ -1935,19 +2254,6 @@ local function raceView(c)
 end
 
 ---------------------------------------------------------------------------------------------------- build
--- GALAXY RUN's event texts (GAL_TXT): the next race between run races, the last run's result after one.
-local function buildGalaxyTexts()
-  local T, ctx, G = theme(), V2.ctx, V2.galaxy
-  local gc, x = V2.posters.galaxy.cv, GAL_TXT.x
-  G.planet = T.text(ctx, gc, "planetLine", { rect = { x, GAL_TXT.planet }, z = 5, visible = false })
-  G.caption = T.text(ctx, gc, "posterDesc", { rect = { x, GAL_TXT.caption }, z = 5, visible = false })
-  G.name = T.text(ctx, gc, "posterTitle", { size = 54, colour = T.COL.WHITE, wrapW = GAL_TXT.wrap,
-                                           rect = { x, GAL_TXT.caption + GAL_TXT.capLine + GAL_TXT.gap }, z = 5,
-                                           visible = false })
-  G.stand = T.text(ctx, gc, "posterDesc", { rect = { x, GAL_TXT.caption + 3 * GAL_TXT.capLine }, z = 5,
-                                            visible = false })
-end
-
 -- START card (AGAIN, 0.13.0): the strip's backer (white @0.42 RoundedBox r 21), P1's Start glyph, the action ("RACE
 -- AGAIN" / "NEXT RACE" / "START RUN", Moki 39 INK), the track (Moki 30), its class / mode caption (the strip's NETWORK
 -- label role) and the play mode / lock line (Overpass Medium Italic 30, 2 lines). No ghost: pad Start (tilesTick) is
@@ -1970,6 +2276,7 @@ end
 
 -- PLAYERS "Press again to confirm" (§4.2): MI_UI_Pill_Generic RUST + Overpass Medium Italic 30 WHITE, top-right
 -- inset 24.
+lobby.PADS_BADGE_BOTTOM = 24 + 66                     -- buildBadge: top inset 24, 66 tall
 local function buildBadge()
   local T, ctx, p = theme(), V2.ctx, V2.posters.pads
   local w = TILE.pads[3]
@@ -2063,10 +2370,15 @@ buildV2 = function(page, root, pc)
   poster("quick", { art = T.TEX.LobbyStart, ax = 0.5, ay = 0.2, zoom = 2.0, title = "QUICK\nRACE", titleSize = 69 })
   poster("custom", { art = TXM .. CLASS_STRIP.Car .. "." .. CLASS_STRIP.Car, ax = 0.5, ay = 0.5,
                      title = "CUSTOM\nRACE", titleSize = 69 })
-  poster("galaxy", { art = T.TEX.MapEventBg, ax = 0.6, ay = 0.5, title = "GALAXY\nRUN", titleSize = 69 })
+  -- 0.16: the GALACTIC GRAND PRIX poster (the GALAXY RUN's slot; cfg.GrandPrix = false: the old one)
+  if cfg.GrandPrix ~= false then
+    poster("galaxy", { art = TXM .. "T_UI_FE_Tile_MP_06.T_UI_FE_Tile_MP_06", ax = 0.62, ay = 0.5,
+                       title = "GALACTIC\nGRAND PRIX", titleSize = 54 })
+  else
+    poster("galaxy", { art = T.TEX.MapEventBg, ax = 0.6, ay = 0.5, title = "GALAXY\nRUN", titleSize = 69 })
+  end
   poster("pads", { art = T.TEX.LobbyPlayers, ax = 0.5, ay = 0.36, title = "ADD\nPLAYERS", titleSize = 60 })
   poster("options", { art = T.TEX.LobbyOptions, ax = 0.5, ay = 0.62, title = "OPTIONS", titleSize = 60 })
-  buildGalaxyTexts()
   U.try(TAG, buildBadge)
   if not U.try(TAG, buildAgain) then U.warn(TAG, "START card not built: pad Start still runs START") end
   for _, id in ipairs(TILE_IDS) do
@@ -2128,28 +2440,6 @@ local function fitTo(s, role, size, maxW)
   return ELLIPSIS
 end
 
--- s in at most maxLines lines of maxW su: whole " · " parts packed greedily, the last line cut with "…" (fitTo).
--- -> text ("\n" between the lines), the line count.
-local function packLines(s, role, size, maxW, maxLines)
-  s = tostring(s or "")
-  if s == "" then return "", 0 end
-  local T, sep = theme(), " " .. DOT .. " "
-  local parts, lines = {}, {}
-  for part in (s .. sep):gmatch("(.-)" .. sep) do parts[#parts + 1] = part end
-  local cur = nil
-  for i, part in ipairs(parts) do
-    local try = cur and (cur .. sep .. part) or part
-    if cur and #lines < maxLines - 1 and T.textWidth(try, role, size) > maxW then
-      lines[#lines + 1] = cur
-      cur = part
-    else
-      cur = try
-    end
-    if i == #parts then lines[#lines + 1] = fitTo(cur, role, size, maxW) end
-  end
-  return table.concat(lines, "\n"), #lines
-end
-
 -- "PRO" -> "Pro" (quick.name's difficulty words in the posters' sentence case)
 local function word(s)
   s = string.lower(tostring(s or ""))
@@ -2184,62 +2474,44 @@ local function refreshModes()
   end
 end
 
--- 0.13.0 GALAXY RUN: between run races "Race n / len · Hull h" (always shown) and the next race on the event texts
--- (route caption, planet, track, standings); after a run its result until a new one starts; with no run the length
--- RIGHT steps (armed: the next launch starts it).
-local function refreshGalaxy()
-  local T = theme()
-  local p = V2.posters.galaxy
-  if not p then return end
+-- GALAXY RUN (Jules 2026-10-14: "it should just open to a page"): a clean button like QUICK / CUSTOM RACE, the
+-- title + at most ONE short status line (the kicker): "Run in progress" (always shown) while a run is on, "Starts
+-- <League>" (always shown) for an armed run, else on focus the League a new run starts ("Next: ..." after a finished
+-- run). No run details on the tile (they overlapped the title): node, planet, track and standings live on the run
+-- page its A opens (runpage.lua).
+local function galaxyLine()
+  if cfg.GrandPrix ~= false then                      -- 0.16 GALACTIC GRAND PRIX: its race / podium, else the tours
+    local okG, st = pcall(function() return U.mod("gp").state() end)
+    st = okG and st or nil
+    if st and st.status == "on" then
+      return string.format("Race %d of %d", math.min(st.race or 1, #(st.races or {})), #(st.races or {})), true
+    end
+    if st and st.status == "done" then return "Podium waiting", true end
+    return "Pods, planets, galaxy", false
+  end
   local okR, ri = pcall(function()
     local run = U.mod("run")
     local st = run.state()
-    return { on = run.active(), between = run.betweenRaces(), view = run.cardView(), st = st,
-             status = st and run.statusText() or nil, stand = st and run.standingsText() or nil,
-             routes = (st and type(st.options) == "table") and #st.options or 0 }
+    return { on = run.active(), status = st and st.status or nil }
   end)
   ri = (okR and type(ri) == "table") and ri or {}
-  local st, pick, armed = ri.st, runPick(), runIs("armed")
-  local f = { kickerAlways = false, check = modeTile() == "galaxy" }
-  local ev = {}                                        -- the event texts: planet, caption, name, stand
-  if ri.on and st then
-    f.kicker = string.format("Race %d / %d %s Hull %d", st.race or 1, st.length or 0, DOT, st.hull or 0)
-    f.kickerAlways = ri.between == true
-    f.desc = ""
-    if ri.between then
-      local v = type(ri.view) == "table" and ri.view or {}
-      f.desc = (ri.routes > 1) and "RIGHT: switch route" or "A: next race"
-      ev = { planet = v.planet, caption = v.caption, name = v.track,      -- the hull is in the kicker
-             stand = (tostring(v.footer or ""):gsub(" " .. DOT .. " HULL %d+$", "")) }
-    end
-  else
-    f.kicker = armed and string.format("Starts a %s-race run", pick) or (pick .. " races")
-    f.desc = "RIGHT: 4 / 6 / 9 races"
-    if st and (st.status == "won" or st.status == "lost") then      -- the last run until a new one starts
-      f.kicker = "New " .. pick .. "-race run"
-      ev = { caption = ri.status, stand = ri.stand }
-    end
-  end
-  local up = function(s) return string.upper(tostring(s or "")) end
-  ev = { planet = up(ev.planet), caption = up(ev.caption), name = tostring(ev.name or ""), stand = up(ev.stand) }
-  local sig = table.concat({ tostring(f.kicker), f.desc, tostring(f.check), tostring(f.kickerAlways), ev.planet,
-                             ev.caption, ev.name, ev.stand }, "|")
+  local lbl = runName(runPick())
+  if ri.on then return "Run in progress", true end
+  if runIs("armed") then return "Starts " .. lbl, true end
+  if ri.status == "won" or ri.status == "lost" then return "Next: " .. lbl, false end
+  return lbl, false
+end
+
+local function refreshGalaxy()
+  local p = V2.posters.galaxy
+  if not p then return end
+  local line, always = galaxyLine()
+  local f = { kicker = line, kickerAlways = always, desc = "", check = modeTile() == "galaxy" }
+  local sig = table.concat({ tostring(f.kicker), tostring(f.check), tostring(f.kickerAlways) }, "|")
   if V2.sig.galaxy == sig then return end
   V2.sig.galaxy = sig
   p.set(f)
-  local G = V2.galaxy
-  T.set(G.planet, { text = fitTo(ev.planet, "planetLine", nil, GAL_TXT.planetW), visible = ev.planet ~= "",
-                    colour = T.planet(ev.planet) or T.COL.BEIGE })
-  -- the stack below the planet line follows the line counts (the RACE card had 1030 su for one line each)
-  local X = GAL_TXT.x
-  local cap, nCap = packLines(ev.caption, "posterDesc", nil, GAL_TXT.wrap, 2)
-  T.set(G.caption, { text = cap, visible = nCap > 0, rect = { X, GAL_TXT.caption } })
-  local y = GAL_TXT.caption + math.max(1, nCap) * GAL_TXT.capLine + GAL_TXT.gap
-  local nName = (ev.name == "") and 0 or ((T.textWidth(string.upper(ev.name), "posterTitle", 54) > GAL_TXT.wrap) and 2 or 1)
-  T.set(G.name, { text = ev.name, visible = nName > 0, rect = { X, y } })
-  y = y + nName * GAL_TXT.nameLine + GAL_TXT.standGap
-  T.set(G.stand, { text = fitTo(ev.stand, "posterDesc", nil, GAL_TXT.wrap), visible = ev.stand ~= "", rect = { X, y } })
-  U.dbg(TAG, "GALAXY RUN poster: %s | %s | %s | %s", tostring(f.kicker), ev.caption, ev.name, ev.stand)
+  U.dbg(TAG, "GALAXY RUN poster: %s", tostring(f.kicker))
 end
 
 -- "2 players · 10 AI" (§4.2): local humans (+ remote ones while hosting) and the grid of the chosen race.
@@ -2280,6 +2552,13 @@ local function refreshAgain()
   if st.kind == "launching" then
     title, dim = "LAUNCHING" .. ELLIPSIS, 0.5
     line, sub = v and v.track or "", v and v.caption or ""
+  elseif gpIs("between") then
+    local okN, nr = pcall(function() return U.mod("gp").nextRace() end)
+    local okS, gs = pcall(function() return U.mod("gp").state() end)
+    nr = (okN and type(nr) == "table") and nr or {}
+    title = "NEXT RACE"
+    line, sub = tostring(nr.name or ""), tostring(nr.layout or "")
+    desc = (okS and gs) and string.format("Grand prix %s race %d / %d", DOT, gs.race or 1, #(gs.races or {})) or "Grand prix"
   elseif runIs("between") then
     local okV, rv = pcall(function() return U.mod("run").cardView() end)
     local okS, rs = pcall(function() return U.mod("run").state() end)
@@ -2292,7 +2571,7 @@ local function refreshAgain()
     line, sub = v.track, v.caption
     if runIs("armed") then
       title = "START RUN"
-      desc = string.format("Starts a %s-race Galaxy run", tostring(settings.get("RunLength")))
+      desc = "Starts " .. runLabel(tostring(settings.get("RunLength")))
     elseif runIs("on") then
       desc = "Galaxy run"
     else
@@ -2336,10 +2615,16 @@ local function refreshPads()
   local sig = tostring(on) .. "|" .. tostring(refused) .. "|" .. tostring(range)
   if V2.sig.pads == sig then return end
   V2.sig.pads = sig
-  p.set({ title = on and "PADS ON" or "ADD\nPLAYERS",
-          kicker = on and "Until the game restarts" or (range and ("Join with " .. range) or ""),
-          desc = "Pads stay on until the game restarts.",
-          lock = refused and "Disconnect to change players" or false })
+  -- couch-fix59 (AUTO-145c, shot r4-113): the stack [kicker / title / desc] must stay under the "Press again to
+  -- confirm" badge (top 24, 66 tall): the desc goes when it would push the stack over it (it says what the confirm
+  -- prompt says anyway)
+  local f = { title = on and "PADS ON" or "ADD\nPLAYERS",
+              kicker = on and "Until the game restarts" or (range and ("Join with " .. range) or ""),
+              desc = "Pads stay on until the game restarts." }
+  local T = theme()
+  if T.posterStackTop(TILE.pads[3], TILE.pads[4], f) < lobby.PADS_BADGE_BOTTOM + 8 then f.desc = "" end
+  f.lock = refused and "Disconnect to change players" or false
+  p.set(f)
 end
 
 local function refreshOptionsTile()
@@ -2418,7 +2703,10 @@ local function renderCell(i, st, top)
   -- glyph before it when it names a button
   local tx = joined and (x + 260) or (x + 114)
   local ink = (kind == "padsoff") and T.alpha(INK, 0.5) or INK
-  T.set(c.pad, { text = tostring(st.pad or ("PAD " .. pnum)), colour = ink, rect = LP(tx, top + 3) })
+  -- the pad line: the slot's custom name (OPTIONS > PLAYER NAMES) in its place, cut to the cell
+  local cname = customName(pnum)
+  local padText = cname and fitTo(cname, "statusText", nil, (x + STRIP.pitch - 24) - tx) or tostring(st.pad or ("PAD " .. pnum))
+  T.set(c.pad, { text = padText, colour = ink, rect = LP(tx, top + 3) })
   local line, key = stateLine(st)
   local g = key and T.glyph(key) or nil
   if g then
@@ -2484,17 +2772,25 @@ local function refreshStrip()
 end
 
 ---------------------------------------------------------------------------------------------------- OPTIONS
--- §5.1 / §5.2: groups from y 450 (header, first row 78 below its top, rows 96 tall at a pitch of 102, groups 36
+-- §5.1 / §5.2: groups from y 450 (header, first row 78 below its top, rows 96 tall at a pitch of 102, groups 24
 -- apart), list x 128-2000, detail column at x 2190 (top 520, width 1430), BACK in the command row. The ADVANCED group
 -- lives on its own canvas that moves one pitch up while the NETWORK action row is collapsed (offline).
 local OPT_GROUPS = {
   { label = "SPLIT SCREEN", ids = {"layout", "gfx", "takedown", "tags"} },
-  { label = "PLAYERS", ids = {"kbp1", "run"} },   -- 0.13.0: Play mode left for the QUICK / CUSTOM posters
+  { label = "PLAYERS", ids = {"kbp1", "names", "run", "couch"} },   -- 0.13.0: Play mode left for the QUICK / CUSTOM posters
   { label = "NETWORK", ids = {"net", "netact"} },
-  { label = "ADVANCED", ids = {"adv"}, shift = true },
+  { label = "ADVANCED", ids = {"adv", "couchdel"}, shift = true },
 }
-local OPT = { x0 = 128, x1 = 2000, y0 = 450, first = 78, pitch = 102, h = 96, gap = 36, detailX = 2190, detailY = 520,
-              detailW = 1430, trapL = {40, 100, 24, 24}, trapR = {72, 100, 24, 24} }
+-- #98: Delete all couch progress is the ADVANCED group's second row. Offline (the network action row collapsed, the
+-- group one pitch up) the list still ends at y 1848; with the network action row shown it ends at 1950: below the
+-- content bottom, but left of BACK (x 3292) and above the status pill (y >= 1995).
+-- gap 24 (was 36) since the Player names row: the ten rows end at y 1848 with the network action row shown, above the
+-- content bottom (FRAME.content.y1 1856) and the command row (y 1880).
+-- couch-fix39: the Couch campaign row (PLAYERS): first 70 (was 78), gap 12 (was 24): the twelve rows end at y 1984 with
+-- the network action row shown (still above the status pill, y >= 1995), 1882 offline.
+local OPT = { x0 = 128, x1 = 2000, y0 = 450, first = 70, pitch = 102, h = 96, gap = 12, detailX = 2190, detailY = 520,
+              detailW = 1430, trapL = {40, 100, 24, 24}, trapR = {72, 100, 24, 24}, trapU = {104, 100, 24, 24},
+              trapD = {136, 100, 24, 24} }
 local LR_KINDS = { cycle = true, toggle = true }
 
 local NET_HELP = "<H1>Host</>: friends join your race over the network. <H1>Join</>: race on a host's grid."
@@ -2512,7 +2808,9 @@ local HELP = {
   gfx = { def = "SplitGraphics", body = "The graphics preset while the screen is split. <H1>Auto</> picks one by the "
     .. "number of views; <H1>My settings</> keeps your own settings." },
   takedown = { def = "TakedownCams", body = "Show the takedown cutaway camera in split races." },
-  tags = { def = "NameTags", body = "Show the P1-P4 tags over the human racers." },
+  tags = { def = "NameTags", body = "Show the P1-P4 tags (or the players' own names) over the human racers." },
+  names = { body = "Your own name for each player: on the tags over the cars, in the race positions and the results. "
+    .. "<H1>A</> opens the four names." },
   kbp1 = { def = "KeyboardIsP1", body = "P1 plays with the keyboard and every pad becomes a guest." },
   net = { def = "NetMode", body = function()          -- the remote status in full, then the two modes
     local s = netStatus()
@@ -2521,12 +2819,81 @@ local HELP = {
   end },
   netact = { body = netStatus },
   adv = { body = "The game's own race builder, for any race this screen cannot make." },
-  run = { def = "RunLength", body = "A rogue-style career for 1-4 players. The next race starts the run, everyone on "
-    .. "a <H1>starter build</>. Races and <H1>challenges</> (time trial, hot lap, boost, takedowns) score every player; "
-    .. "a missed <H1>team target</> costs a hull point, 0 hull ends the run. Between races: a free reward, then the "
-    .. "<H1>shop</> with your credits. The <H1>GALAXY RUN</> poster starts a run and its next races; RIGHT on it "
-    .. "switches the route. While a run is on, A twice here ends it." },
+  couch = { body = "The couch campaign's rules for 2-4 players: the guests' choices, what pays P1. <H1>A</> opens the "
+    .. "list." },
+  mystteam = { def = "CouchMysteryTeam", body = "A mystery encounter's choice with a <H1>team</> effect: a League "
+    .. "token, a sabotage, a debuff on P1's car, the rivals' difficulty, Hibi's prices. <H1>Greyed</>: only P1 can "
+    .. "take it. <H1>Allowed</>: a guest may take it too: the team effect goes onto the shared run, whatever it does "
+    .. "(a sabotage of P1's car included), his credits and parts stay his own. The same effect taken twice in one "
+    .. "encounter counts once. Deals paid later in the run stay greyed for guests." },
+  couchecon = { def = "CouchEconomy", body = "What P1's wallet and reward round follow after a race. <H1>Own place</>: "
+    .. "his own finish, like every guest's (the team's best result still decides League Tokens, must-win events and "
+    .. "the act). <H1>Best carries everyone</>: the best human's result pays P1 too (the old rule)." },
+  couchdel = { body = function()
+    if lobby.CD.armed() then
+      return "<H1>A</> again deletes the couch campaign save and every guest's progress: the acts lock again and a "
+        .. "fresh ACT I starts right away. Your solo campaign is not touched; vehicle upgrades and logbook unlocks "
+        .. "stay. Move away or wait to keep everything."
+    end
+    local p = lobby.CD.profile()
+    local base = "Deletes the couch campaign save and every guest's progress (the guests' file is kept in a dated "
+      .. "copy). Your solo campaign is not touched. <H1>A</> twice deletes."
+    if p.live then return base .. "\nCouch save profile live: only couch data is deleted." end
+    return base .. "\nNot available: " .. richSafe(p.why)
+  end },
+  run = { def = "RunLength", body = "The game's own rogue mode for 1-4 players: a League across the campaign's real "
+    .. "planets, everyone on a <H1>starter build</>. Each planet is a <H1>node map</>: races, eliminators, field "
+    .. "tests; the boss events are <H1>must-win</>. Missed targets cost <H1>League Tokens</>; 0 tokens ends the run. "
+    .. "Between races: a reward (real rarity odds), then the <H1>shop</> with the campaign's prices; a wreck turns a "
+    .. "part <H1>faulty</>. The <H1>GALAXY RUN</> poster starts a run and its next races; RIGHT on it picks the next "
+    .. "node. While a run is on, A twice here ends it." },
 }
+
+-- couch-fix36 (Jules's audit decision Q4; couchpenalty.lua): a COUCH CAMPAIGN row, self-contained here (ids,
+-- LABEL, BUTTON_ACTIONS, LR_ACTIONS, HELP); cycle rows on settings.txt keys, the default first. A field of lobby, no
+-- new local (the main chunk is at Lua's 200-locals limit). couch-fix41: the fix36 cbtokens row is gone (solo parity:
+-- an unhappy backer never costs a League Token).
+lobby.FIX36 = {
+  cbbroker = { key = "CouchBrokerPenalty", label = "Broker penalty: Eliminators", values = { "both", "owner" },
+    words = { both = "BOTH PLAYERS", owner = "OWNER ONLY" },
+    body = "The Broker's penalty for a POOR rating turns the next events into <H1>Eliminators</>. <H1>Both "
+      .. "players</>: a guest's Broker changes the shared map for everybody. <H1>Owner only</>: a guest's Broker is his "
+      .. "own rule (his races outside the top 3 earn him no reward round). P1's own Broker is the game's and always "
+      .. "changes the shared map. The Hutt's penalty (2 crashes fewer) is always the player's own car." },
+}
+for _, id in ipairs({ "cbbroker" }) do
+  local r = lobby.FIX36[id]
+  local function word(v) return r.words[v] or string.upper(tostring(v)) end
+  local ids = lobby.SUBS.couch.ids
+  ids[#ids + 1] = id
+  LABEL[id] = function() return r.label, word(settings.get(r.key)), "cycle" end
+  local function step(dir)
+    cycle(r.key, r.values, dir)
+    St.ui.dirty = true
+    U.log(TAG, "COUCH CAMPAIGN: %s = %s", r.key, tostring(settings.get(r.key)))
+  end
+  BUTTON_ACTIONS[id], LR_ACTIONS[id], r.step = step, step, step
+  HELP[id] = { body = r.body, foot = function()
+    local d = type(cfg.Defaults) == "table" and cfg.Defaults[r.key] or nil
+    -- couch-fix50 (AUTO-130a): sentence case like every other "Default value: …" (spec §5.2), not the row's CAPS
+    local w = string.lower(tostring(word(d or r.values[1])))
+    return "Default value: " .. richSafe((w:gsub("^%l", string.upper)))
+  end }
+end
+
+local NAME_EDIT_HELP = "<H1>Up / Down</> change the letter, <H1>Left / Right</> move, <H1>X</> deletes. <H1>A</> "
+  .. "keeps the name, <H1>B</> gives the old one back. Keyboard: arrows, Backspace, Enter."
+for id, n in pairs(NAME_SLOT) do
+  HELP[id] = {
+    body = function()
+      if nameEdit and nameEdit.slot == n then return NAME_EDIT_HELP end
+      return "<H1>A</> edits P" .. n .. "'s name (up to " .. tostring(tonumber(cfg.PlayerNameMaxChars) or 16)
+        .. " letters). An empty name gives the default back. Lower case: settings.txt <H1>Name" .. n
+        .. "</> or the console couch set Name" .. n .. " ..."
+    end,
+    foot = function() return "Default value: " .. richSafe(defaultName(n)) end,
+  }
+end
 
 -- The default value in words (config.Defaults, so the text follows a changed default).
 local function defaultWord(key)
@@ -2536,8 +2903,10 @@ local function defaultWord(key)
   if key == "Layout2P" then return LAYOUT_WORD[v] or tostring(v) end
   if key == "SplitGraphics" then return GFX_WORD[v] or tostring(v) end
   if key == "NetMode" then return NET_WORD[v] or tostring(v) end
+  if key == "CouchEconomy" then return (v == "best") and "Best carries everyone" or "Own place" end   -- couch-fix35
   if type(v) == "boolean" then return v and "On" or "Off" end
-  return tostring(v)
+  -- couch-fix50 (live round 2 AUTO-130a: COUCH CAMPAIGN "Default value: greyed"): a plain setting word in sentence case
+  return (tostring(v):gsub("^%l", string.upper))
 end
 
 -- P1 uses a pad (CommonInputSubsystem:GetCurrentInputType() ~= MouseAndKeyboard; unknown = pad), undebounced (setup's
@@ -2553,7 +2922,7 @@ local function p1PadInput()
     end)
     if not cis then return true end
   end
-  local ok, t = pcall(function() return cis:GetCurrentInputType() end)   -- 0 MouseAndKeyboard, 1 Gamepad, 2 Touch
+  local ok, t = pcall(U.callMethod, cis, "GetCurrentInputType")   -- uobj: U.ok(cis) above (or freshly found) -- 0 MouseAndKeyboard, 1 Gamepad, 2 Touch
   if not ok then return true end
   return tonumber(t) ~= 0
 end
@@ -2567,11 +2936,19 @@ local function updateDetail(id)
   if type(body) == "function" then body = body() end
   body = tostring(body or "")
   local foot = h.def and ("Default value: " .. defaultWord(h.def)) or nil
+  if not foot and type(h.foot) == "function" then foot = h.foot() end
   O.detailId = id
   local sig = table.concat({ id, tostring(label), body, tostring(foot) }, "|")
   if O.detailSig == sig then return end
   O.detailSig = sig
   O.detail.set({ title = label, body = body, foot = foot and { foot } or {} })
+end
+-- couch-fix50: the "Default value: …" foot of a row (tools/test_ui130.lua)
+lobby._helpFoot = function(id)
+  local h = HELP[id] or {}
+  if h.def then return "Default value: " .. defaultWord(h.def) end
+  if type(h.foot) == "function" then return h.foot() end
+  return nil
 end
 
 -- Explicit navigation (V-FIN-04): up / down between the visible rows, the last row's down = BACK and BACK's up = the
@@ -2581,9 +2958,10 @@ local function relinkOptions()
   if not O then return end
   local T = theme()
   local vis = {}
-  for _, id in ipairs(OPT_IDS) do
+  for _, id in ipairs(lobby.SUBS.idsOf(O)) do
     local r = O.rows[id]
-    if r and U.ok(r.ghost) and not (id == "netact" and O.actShown == false) then vis[#vis + 1] = id end
+    if r and U.ok(r.ghost) and not (id == "netact" and O.actShown == false)
+       and not (id == "couchdel" and O.delShown == false) then vis[#vis + 1] = id end
   end
   local n = 0
   for i, id in ipairs(vis) do
@@ -2601,6 +2979,25 @@ local function relinkOptions()
     local last = O.rows[vis[#vis]].ghost
     if T.nav(last, "down", back) then n = n + 1 end
     if T.nav(back, "up", last) then n = n + 1 end
+  end
+  -- PLAYER NAMES: a row's own rules after an edit (an explicit rule stays until replaced): the first row's up and the
+  -- rows' left / right stay on the row itself (no rule of their own before), not on the editor's focus traps
+  if O.sub == "names" and #vis > 0 then
+    if T.nav(O.rows[vis[1]].ghost, "up", O.rows[vis[1]].ghost) then n = n + 1 end
+    for _, id in ipairs(vis) do
+      local w = O.rows[id].ghost
+      if T.nav(w, "left", w) then n = n + 1 end
+      if T.nav(w, "right", w) then n = n + 1 end
+    end
+  end
+  -- the name being edited: its four directions go to the focus traps (optionsTick steps the editor)
+  if nameEdit and O.sub == "names" then
+    local r = O.rows["name" .. nameEdit.slot]
+    if r and U.ok(r.ghost) then
+      for dir, trap in pairs({ up = O.trapU, down = O.trapD, left = O.trapL, right = O.trapR }) do
+        if T.nav(r.ghost, dir, trap) then n = n + 1 end
+      end
+    end
   end
   U.dbg(TAG, "OPTIONS navigation: %d explicit rule(s) over %d rows (%s)", n, #vis, table.concat(vis, ", "))
 end
@@ -2621,7 +3018,22 @@ local function refreshOptionsPage()
     end
     relinkOptions()
   end
-  for _, id in ipairs(OPT_IDS) do
+  -- #98: the delete row only while cfg.CouchDeleteProgress is on
+  local showDel = lobby.CD.on()
+  St.ui.shown.couchdel = showDel
+  if O.delShown ~= showDel then
+    O.delShown = showDel
+    if O.rows.couchdel then O.rows.couchdel.show(showDel) end
+    if not showDel then
+      lobby.CD.disarm("turned off")
+      if nav.idx == "couchdel" then
+        nav.idx = "adv"
+        if V2.mode == "options" and St.menu.visible == "lobby" then focusRow("adv") end
+      end
+    end
+    relinkOptions()
+  end
+  for _, id in ipairs(lobby.SUBS.idsOf(O)) do
     local r = O.rows[id]
     if r then
       local label, value, kind, on = LABEL[id]()
@@ -2648,10 +3060,11 @@ local function buildOptions()
   showW(O.cv, false)
   O.bg = T.pageBackground(ctx, O.cv, geo, "hub", { z = -10 })                -- C1 (V-FIN-02)
   O.title = T.screenTitle(ctx, O.cv, geo, "OPTIONS")                         -- C2 (V-FIN-03)
-  O.advCv = subCanvas(O.cv, 3)
+  O.listCv = subCanvas(O.cv, 3)                        -- the groups below (hidden while PLAYER NAMES shows)
+  O.advCv = subCanvas(O.listCv, 3)
   local y, nRows = OPT.y0, 0
   for _, grp in ipairs(OPT_GROUPS) do
-    local cv = grp.shift and O.advCv or O.cv
+    local cv = grp.shift and O.advCv or O.listCv
     O.headers[#O.headers + 1] = T.groupHeader(ctx, cv, OPT.x0, OPT.x1, y, grp.label, { geo = geo })
     y = y + OPT.first
     for _, id in ipairs(grp.ids) do
@@ -2669,9 +3082,46 @@ local function buildOptions()
     y = y + OPT.gap
   end
   if nRows == 0 then error("no OPTIONS row could be built") end
+  -- PLAYER NAMES: one group on its own canvas in the list's place (lobby.openNames / closeNames)
+  O.namesCv = subCanvas(O.cv, 3)
+  showW(O.namesCv, false)
+  local yN = OPT.y0
+  O.headers[#O.headers + 1] = T.groupHeader(ctx, O.namesCv, OPT.x0, OPT.x1, yN, "PLAYER NAMES", { geo = geo })
+  yN = yN + OPT.first
+  for _, id in ipairs(NAME_IDS) do
+    local r = T.settingsRow(ctx, O.namesCv, { OPT.x0, yN, OPT.x1 - OPT.x0, OPT.h }, { geo = geo, id = id, fn = ghostFn(id) })
+    if r and U.ok(r.ghost) then
+      O.rows[id] = r
+      St.ui.rows[id] = r.ghost
+      noteGhost(r.ghost)
+    else
+      U.warn(TAG, "PLAYER NAMES row '%s' not built", id)
+    end
+    yN = yN + OPT.pitch
+  end
+  -- couch-fix39: COUCH CAMPAIGN, the same way (lobby.openCouch / closeSub)
+  O.couchCv = subCanvas(O.cv, 3)
+  showW(O.couchCv, false)
+  local yC = OPT.y0
+  O.headers[#O.headers + 1] = T.groupHeader(ctx, O.couchCv, OPT.x0, OPT.x1, yC, lobby.SUBS.couch.header, { geo = geo })
+  yC = yC + OPT.first
+  for _, id in ipairs(lobby.SUBS.couch.ids) do
+    local r = T.settingsRow(ctx, O.couchCv, { OPT.x0, yC, OPT.x1 - OPT.x0, OPT.h }, { geo = geo, id = id, fn = ghostFn(id) })
+    if r and U.ok(r.ghost) then
+      O.rows[id] = r
+      St.ui.rows[id] = r.ghost
+      noteGhost(r.ghost)
+    else
+      U.warn(TAG, "COUCH CAMPAIGN row '%s' not built", id)
+    end
+    yC = yC + OPT.pitch
+  end
   O.detail = T.detailColumn(ctx, O.cv, OPT.detailX, OPT.detailY, OPT.detailW, { geo = geo })   -- C12
   O.cmd = T.commandRow(ctx, O.cv, geo, { { id = "back", label = "BACK", ghostId = "opt:back",
-                                           fn = function() lobby.closeOptions("BACK") end } })   -- C4
+                                           fn = function()
+                                             if V2.opt and V2.opt.sub then lobby.closeSub("BACK")
+                                             else lobby.closeOptions("BACK") end
+                                           end } })   -- C4
   if O.cmd then
     O.cmd.show({ back = true })
     noteGhost(O.cmd.widget("back"))
@@ -2681,8 +3131,12 @@ local function buildOptions()
   local noop = function() end
   O.trapL = T.ghost(ctx, O.cv, OPT.trapL, "opt:trapL", noop, { geo = geo })
   O.trapR = T.ghost(ctx, O.cv, OPT.trapR, "opt:trapR", noop, { geo = geo })
+  O.trapU = T.ghost(ctx, O.cv, OPT.trapU, "opt:trapU", noop, { geo = geo })   -- the name editor's up / down
+  O.trapD = T.ghost(ctx, O.cv, OPT.trapD, "opt:trapD", noop, { geo = geo })
   noteGhost(O.trapL)
   noteGhost(O.trapR)
+  noteGhost(O.trapU)
+  noteGhost(O.trapD)
   V2.opt = O
   refreshOptionsPage()                                 -- values, the action row's visibility, the explicit navigation
   U.log(TAG, "OPTIONS page built: %d rows, detail column %s, BACK %s, focus traps %s (V-FIN-04)", nRows,
@@ -2704,6 +3158,17 @@ end
 -- OPTIONS -> tiles without focus handling (closeOptions, a setup opened over OPTIONS).
 local function leaveOptions()
   local O = V2.opt
+  lobby.CD.disarm("OPTIONS closed")                     -- #98: a delete confirm never outlives the page
+  if nameEdit then U.try(TAG, lobby.endNameEdit, "cancel") end   -- an unfinished name is dropped
+  if O and O.sub then
+    O.sub = nil
+    showW(O.namesCv, false)
+    if O.couchCv then showW(O.couchCv, false) end
+    showW(O.listCv, true)
+    U.try(TAG, relinkOptions)
+  end
+  if NAME_SLOT[V2.optLast or ""] then V2.optLast = "names" end
+  for _, id in ipairs(lobby.SUBS.couch.ids) do if V2.optLast == id then V2.optLast = "couch" end end
   V2.mode = "tiles"
   if O then
     if O.painted and O.rows[O.painted] then O.rows[O.painted].set({ focused = false }) end
@@ -2738,7 +3203,8 @@ local function tilesTick(p1, now)
     U.log(TAG, "P1's CommonUI focus is on the '%s' ghost; the painted look follows it (V-FIN-04)", focused)
   end
   if focused then nav.idx = focused end                -- the cursor follows CommonUI (also with LobbyPadNav off)
-  -- 0.13.0 pad right on GALAXY RUN: CommonUI moved P1's focus onto its focus trap -> its RIGHT action, focus back
+  -- 0.13.0 pad right on GALAXY RUN: CommonUI moved P1's focus onto its focus trap -> focus back (RIGHT does nothing
+  -- there since 2026-10-14: no LR action on the tile)
   -- (keyboard right steps through onKey; the trap only puts the focus back then)
   if U.ok(V2.trapR) and ui.hasFocus(V2.trapR, p1) then
     if not checkCovered() and p1PadInput() and now - V2.lrAtMs > 300 then
@@ -2789,15 +3255,42 @@ local function optionsTick(p1, now)
   V2.bPrev = bDown
   if edge and not V2.wasCovered then
     lobby.armBackGuard()
-    U.log(TAG, "P1's B: OPTIONS closed, the next accept is guarded (V-FIN-15)")
-    lobby.closeOptions("pad B")
+    V2.backMs = now                                    -- backprompt.lua: this B's step is done (lastP1BackMs)
+    lobby.optionsBack("pad B")
     return
   end
   local covered = checkCovered()
   V2.wasCovered = covered
+  -- PLAYER NAMES editor: pad X deletes (edge; not with KeyboardIsP1, pad 1 is a guest's then)
+  local xDown = nameEdit ~= nil and (not kbp1) and U.ok(p1) and ui.keyDown(p1, C.KEY.X) or false
+  if xDown and not V2.xPrev and not covered and nameEdit then lobby.nameEditKey("delete") end
+  V2.xPrev = xDown
+  -- the edited name's up / down: CommonUI moved P1's focus onto the up / down trap (relinkOptions) -> one letter step
+  if nameEdit then
+    local v = nil
+    if U.ok(O.trapU) and ui.hasFocus(O.trapU, p1) then v = "up" elseif U.ok(O.trapD) and ui.hasFocus(O.trapD, p1) then v = "down" end
+    local tl = ui.hasFocus(O.trapL, p1) and "left" or (ui.hasFocus(O.trapR, p1) and "right") or nil
+    local k = v or tl
+    if k then
+      local step = tonumber(opt("NameEditStepMs", 200)) or 200
+      if not covered and p1PadInput() and now - V2.lrAtMs > step then
+        V2.lrAtMs = now
+        U.logOnce("lobby.nameTrap", TAG, "PLAYER NAMES: pad %s through the focus trap (V-NAM-05)", k)
+        lobby.nameEditKey(k)
+      end
+      if nameEdit then focusRow("name" .. nameEdit.slot) end
+    end
+  end
+  -- an up / down trap holds the focus with no editor open (a stale rule): back on the row
+  if not nameEdit and ((U.ok(O.trapU) and ui.hasFocus(O.trapU, p1)) or (U.ok(O.trapD) and ui.hasFocus(O.trapD, p1))) then
+    local id = (V2.optLast and U.ok(St.ui.rows[V2.optLast])) and V2.optLast or nav.idx
+    if id then focusRow(id) end
+  end
   -- pad left / right on a value row: CommonUI moved P1's focus onto a focus trap -> step that row, focus back on it
   local trap = nil
-  if ui.hasFocus(O.trapL, p1) then trap = -1 elseif ui.hasFocus(O.trapR, p1) then trap = 1 end
+  if nameEdit then
+    trap = nil                                         -- the editor took the left / right traps above
+  elseif ui.hasFocus(O.trapL, p1) then trap = -1 elseif ui.hasFocus(O.trapR, p1) then trap = 1 end
   if trap then
     local id = (V2.optLast and U.ok(St.ui.rows[V2.optLast])) and V2.optLast or nav.idx
     if id and not covered and p1PadInput() and now - V2.lrAtMs > 300 then
@@ -2817,6 +3310,17 @@ local function optionsTick(p1, now)
     if not focused and ui.hasFocus(w, p1) then focused = id end
   end
   if focused then V2.optLast, nav.idx = focused, focused end   -- the cursor follows CommonUI (LobbyPadNav off too)
+  -- #98: the delete confirm holds only while the window runs and P1's focus stays where it was when it armed (the
+  -- delete row for the pad; a mouse click may arm it with the focus elsewhere)
+  if lobby.CD.untilMs > 0 then
+    local f = focused or "-"
+    if lobby.CD.focusId == nil then lobby.CD.focusId = f end
+    local why = (not lobby.CD.armed() and "window over") or (f ~= lobby.CD.focusId and ("focus moved to " .. f)) or nil
+    if why then
+      lobby.CD.disarm(why)
+      say("COUCH PROGRESS KEPT")                       -- replaces the "PRESS (A) AGAIN" pill
+    end
+  end
   local back = O.cmd and O.cmd.poll(p1) or nil
   paintRows((back == nil) and (hovered or focused or nav.idx) or nil)
 end
@@ -2898,6 +3402,197 @@ function lobby.closeOptions(why)
   return true
 end
 
+-- OPTIONS > PLAYER NAMES ---------------------------------------------------------------------------------------------
+-- The sub-list over the OPTIONS rows (O.sub = "names"): P1's B, Backspace and BACK return to the OPTIONS list.
+local function showSub(name)
+  local O = V2.opt
+  if not O then return false end
+  O.sub = name
+  showW(O.listCv, name == nil)
+  showW(O.namesCv, name == "names")
+  if O.couchCv then showW(O.couchCv, name == "couch") end
+  if O.painted and O.rows[O.painted] then O.rows[O.painted].set({ focused = false }) end
+  O.painted = nil
+  relinkOptions()
+  return true
+end
+
+function lobby.openNames()
+  local O = V2.opt
+  if not (V2.active and V2.mode == "options" and O and U.ok(O.namesCv)) then
+    U.dbg(TAG, "openNames: only from the v2 OPTIONS page")
+    return false
+  end
+  if O.sub == "names" then return true end
+  showSub("names")
+  nav.idx, V2.optLast = "name1", "name1"
+  St.ui.dirty = true
+  U.try(TAG, lobby.refresh)
+  U.try(TAG, updateDetail, "name1")
+  if St.menu.visible == "lobby" then
+    focusRow("name1")
+    lobby.armFocusKeeper("names")
+  end
+  U.log(TAG, "PLAYER NAMES opened (%s)", namesSummary())
+  return true
+end
+
+function lobby.closeNames(why)
+  local O = V2.opt
+  if not (O and O.sub == "names") then return false end
+  if nameEdit then lobby.endNameEdit("cancel") end
+  showSub(nil)
+  nav.idx, V2.optLast = "names", "names"
+  St.ui.dirty = true
+  U.try(TAG, lobby.refresh)
+  if St.menu.visible == "lobby" and V2.mode == "options" then
+    focusRow("names")
+    lobby.armFocusKeeper("names closed")
+  end
+  U.log(TAG, "PLAYER NAMES closed (%s)", tostring(why or "?"))
+  return true
+end
+
+-- couch-fix39: OPTIONS > PLAYERS > Couch campaign = the COUCH CAMPAIGN sub-list (B / Backspace / BACK return)
+function lobby.openCouch()
+  local O = V2.opt
+  if not (V2.active and V2.mode == "options" and O and U.ok(O.couchCv)) then
+    U.dbg(TAG, "openCouch: only from the v2 OPTIONS page")
+    return false
+  end
+  if O.sub == "couch" then return true end
+  local first = lobby.SUBS.couch.first
+  showSub("couch")
+  nav.idx, V2.optLast = first, first
+  St.ui.dirty = true
+  U.try(TAG, lobby.refresh)
+  U.try(TAG, updateDetail, first)
+  if St.menu.visible == "lobby" then
+    focusRow(first)
+    lobby.armFocusKeeper("couch")
+  end
+  U.log(TAG, "COUCH CAMPAIGN opened (team mystery choices %s)", tostring(settings.get("CouchMysteryTeam")))
+  return true
+end
+
+function lobby.closeCouch(why)
+  local O = V2.opt
+  if not (O and O.sub == "couch") then return false end
+  showSub(nil)
+  nav.idx, V2.optLast = "couch", "couch"
+  St.ui.dirty = true
+  U.try(TAG, lobby.refresh)
+  if St.menu.visible == "lobby" and V2.mode == "options" then
+    focusRow("couch")
+    lobby.armFocusKeeper("couch closed")
+  end
+  U.log(TAG, "COUCH CAMPAIGN closed (%s)", tostring(why or "?"))
+  return true
+end
+
+-- the open sub-list back to the OPTIONS list
+function lobby.closeSub(why)
+  local O = V2.opt
+  if O and O.sub == "couch" then return lobby.closeCouch(why) end
+  return lobby.closeNames(why)
+end
+
+local function nameRefresh()
+  St.ui.dirty = true
+  if V2.opt then
+    U.try(TAG, refreshOptionsPage)
+    if nameEdit then U.try(TAG, updateDetail, "name" .. nameEdit.slot) end
+  end
+end
+
+-- A on a name row: open its editor; A on the row being edited keeps the name (a click on another row keeps the
+-- edited one and opens that row's editor).
+function lobby.onName(n)
+  n = math.tointeger(tonumber(n))
+  if not n or n < 1 or n > 4 then return end
+  if nameEdit then
+    local same = nameEdit.slot == n
+    lobby.endNameEdit("keep")
+    if same then return end
+  end
+  local def = defaultName(n)
+  nameEdit = { slot = n, def = def, e = NE.new(customName(n) or def, cfg.PlayerNameMaxChars) }
+  V2.xPrev = true                                      -- a held X is no delete
+  V2.lrAtMs = St.nowMs()
+  U.try(TAG, relinkOptions)                            -- the row's four directions -> the focus traps
+  nameRefresh()
+  if St.menu.visible == "lobby" then focusRow("name" .. n) end
+  U.log(TAG, "P%d's name: editor open on '%s'", n, NE.text(nameEdit.e))
+end
+
+-- how = "keep" (A / Enter / a click on another row) | "cancel" (B, leaving OPTIONS, the page rebuilt).
+function lobby.endNameEdit(how)
+  local ed = nameEdit
+  if not ed then return false end
+  nameEdit = nil
+  if how == "keep" then
+    local text = NE.text(ed.e)
+    -- the default typed again (the editor writes upper case): no custom name, the default keeps its own spelling
+    local stored = (string.upper(text) == string.upper(tostring(ed.def or ""))) and "" or text
+    local okS, why = settings.set("Name" .. ed.slot, stored)
+    if okS == false then
+      say("P" .. ed.slot .. " NAME REFUSED (" .. string.upper(tostring(why)) .. ")", true)
+    elseif stored == "" then
+      say("P" .. ed.slot .. " USES THE DEFAULT NAME")
+    else
+      say("P" .. ed.slot .. " IS NOW " .. string.upper(stored))
+    end
+  else
+    U.log(TAG, "P%d's name edit cancelled (kept '%s')", ed.slot, tostring(customName(ed.slot) or "default"))
+  end
+  if V2.opt then
+    U.try(TAG, relinkOptions)                          -- the row's own up / down chain back
+    if St.menu.visible == "lobby" and V2.mode == "options" and V2.opt.sub == "names" then
+      focusRow("name" .. ed.slot)
+    end
+  end
+  nameRefresh()
+  return true
+end
+
+-- One editor key: "up" | "down" (letter), "left" | "right" (cursor), "delete" (pad X), "back2" (Backspace). slot:
+-- only that slot's editor (the LR row actions name theirs).
+function lobby.nameEditKey(key, slot)
+  local ed = nameEdit
+  if not ed or (slot ~= nil and slot ~= ed.slot) then return false end
+  if key == "up" then NE.step(ed.e, 1)
+  elseif key == "down" then NE.step(ed.e, -1)
+  elseif key == "left" then NE.move(ed.e, -1)
+  elseif key == "right" then NE.move(ed.e, 1)
+  elseif key == "delete" then NE.delete(ed.e)
+  elseif key == "back2" then NE.backspace(ed.e)
+  else return false end
+  nameRefresh()
+  return true
+end
+
+-- One step back on the OPTIONS page (P1's B; backprompt.lua when the game's Quit prompt took that B): the name being
+-- edited gets its old text back, else PLAYER NAMES returns to the OPTIONS list, else OPTIONS closes.
+function lobby.optionsBack(why)
+  if not (V2.active and V2.mode == "options") then return false end
+  if nameEdit then
+    U.log(TAG, "%s: P%d's name edit cancelled", tostring(why), nameEdit.slot)
+    return lobby.endNameEdit("cancel")
+  end
+  if V2.opt and V2.opt.sub then return lobby.closeSub(why) end
+  U.log(TAG, "%s: OPTIONS closed, the next accept is guarded (V-FIN-15)", tostring(why))
+  return lobby.closeOptions(why)
+end
+
+-- when P1's B last stepped back on the OPTIONS page (optionsTick's edge poll; backprompt.lua skips its own step then)
+function lobby.lastP1BackMs() return V2.backMs or -1e12 end
+
+-- test helper / diag: the editor state (nil when closed)
+function lobby.nameEditState()
+  if not nameEdit then return nil end
+  return { slot = nameEdit.slot, text = NE.text(nameEdit.e), shown = NE.render(nameEdit.e), cur = nameEdit.e.cur }
+end
+
 -- One line for diag / test.cmd: page style, mode, painted tile / row, cursor, canvas shift, strip cells, START state.
 function lobby.status()
   if not V2.active then
@@ -2916,7 +3611,8 @@ function lobby.status()
     string.format("shift %d,%d", V2.shift[1], V2.shift[2]),
     "strip " .. ((#cells > 0) and table.concat(cells, ",") or "not built"),
     "start " .. tostring(V2.startState and V2.startState.kind or "?"),
-    "options " .. (V2.opt and "built" or "not built"),
+    "options " .. (V2.opt and "built" or "not built") .. ((V2.opt and V2.opt.sub) and (" / " .. V2.opt.sub) or "")
+      .. (nameEdit and string.format(" (editing P%d)", nameEdit.slot) or ""),
     string.format("head MIDs %d%s", HEAD.mids, HEAD.broken and " (plain heads)" or ""),
     "net '" .. tostring(lastNetText or "") .. "'",
   }, " | ")
@@ -2947,7 +3643,9 @@ end
 ---------------------------------------------------------------------------------------------------
 -- RACE SETUP mode (setup.open / setup.close): the lobby rows are collapsed while the setup panel is shown.
 ---------------------------------------------------------------------------------------------------
-function lobby.setSetupMode(on)
+-- returnTo (fix16): the tile that opened the page gets the focus back when it closes (the GRAND PRIX page: "galaxy",
+-- its poster; without it the mode tile = QUICK RACE took it, live 2026-10-15)
+function lobby.setSetupMode(on, returnTo)
   if V2.active then                                    -- 0.12.0 v2: the whole page canvas (tiles, strip, pill, OPTIONS)
     if on and V2.mode == "options" then leaveOptions() end   -- the setup opened over OPTIONS (debugJump)
     showW(V2.canvas, not on)
@@ -2959,6 +3657,7 @@ function lobby.setSetupMode(on)
       U.try(TAG, lobby.refresh)
       if St.menu.visible == "lobby" then
         nav.idx = (V2.mode == "tiles") and modeTile() or nav.idx   -- 0.13.0: the poster of the mode START plays
+        if returnTo and V2.mode == "tiles" and U.ok(St.ui.rows[returnTo]) then nav.idx = returnTo end
         U.try(TAG, lobby.focusFirst)
         lobby.armFocusKeeper("race setup closed")
       end

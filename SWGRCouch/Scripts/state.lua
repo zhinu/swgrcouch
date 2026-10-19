@@ -87,8 +87,74 @@ St.pendingHooks = {}          -- path -> {spec, tag, ...}             (util.lua)
 local clk = { real = nil, atClock = nil, rate = 1.0, lastOut = 0, source = "os.clock", fails = 0, logged = false,
               rateSamples = 0, offset = nil }
 
+---------------------------------------------------------------------------------------------------- out-param leak
+-- UE4SS LEAK (couch-racefast, live 2026-10-15 after one couch race: 635,469 Lua registry entries, 632,054 of them
+-- {Seconds, PartialSeconds} tables and 6,885 {OutFoundPriority}; Lua heap 64 MB LIVE after a full collect, a full
+-- collect 55-79 ms). A UFunction call with out-params luaL_ref's the Lua table passed for them in the registry and
+-- never unrefs it: every GetAccurateRealTime (the clock sample of EVERY sched loop run, ~45 a second; the profiler
+-- twice per profiled call) left a table in the registry for the rest of the session. The live heap only grows, so
+-- every incremental GC cycle marks more and its atomic phase gets longer: the 10-20 ms spikes that land in whatever
+-- module tick allocates at that moment, worse the longer the session runs.
+-- Fix: out-param tables are reused (St.outParams) and the refs a call left on them are dropped from the registry
+-- right after it (St.dropOutRefs: the refs sit at the registry's tail); St.sweepOutRefs (every 3 s from the clock
+-- sample) removes any other entry holding a registered out table or a leaked out-param table of a known shape
+-- (callers not migrated, a hot reload's predecessor). UE4SS never reads these refs again after the call returns.
+local REG = nil
+pcall(function() REG = debug.getregistry() end)
+local outSet = setmetatable({}, { __mode = "k" })
+-- the key sets of the leaked out-param tables (exactly these keys, nothing else)
+local OUT_SHAPES = { { "PartialSeconds", "Seconds" }, { "OutFoundPriority" } }
+
+--- Register a reusable out-param table (its registry refs are dropped by St.dropOutRefs / St.sweepOutRefs).
+function St.outParams(t) outSet[t] = true; return t end
+
+--- Right after a UFunction call with out table t: drop the refs it left at the registry's tail. -> refs dropped
+function St.dropOutRefs(t)
+    if REG == nil then return 0 end
+    local n, k = #REG, 0
+    while n > 3 and k < 16 and rawequal(rawget(REG, n), t) do
+        rawset(REG, n, nil)
+        n, k = n - 1, k + 1
+    end
+    return k
+end
+
+local function leakedShape(v)
+    if outSet[v] then return true end
+    if getmetatable(v) ~= nil then return false end
+    for _, shape in ipairs(OUT_SHAPES) do
+        local n, ok = 0, true
+        for key in pairs(v) do
+            n = n + 1
+            local hit = false
+            for _, want in ipairs(shape) do if key == want then hit = true end end
+            if not hit then ok = false; break end
+        end
+        if ok and n > 0 then return true end
+    end
+    return false
+end
+
+local sweep = { at = nil, total = 0, last = 0 }
+--- Remove every registry entry that holds an out-param table (registered or of a known leaked shape). -> removed
+function St.sweepOutRefs()
+    if REG == nil then return 0 end
+    local n = 0
+    for k, v in pairs(REG) do
+        if type(k) == "number" and k > 3 and type(v) == "table" and leakedShape(v) then
+            REG[k] = nil                        -- assigning nil to an existing field during next() is allowed
+            n = n + 1
+        end
+    end
+    sweep.total, sweep.last = sweep.total + n, n
+    return n
+end
+function St.outRefStats() return { total = sweep.total, last = sweep.last } end
+
+local CLK_OUT = St.outParams({})
+local function clockCall(gs, a) return gs:GetAccurateRealTime(a, a) end
+local function clockFn(gs) return gs.GetAccurateRealTime end
 local function realSecondsNow()
-    local a, b = {}, {}
     local gs = clk.gs
     if gs == nil or not gs:IsValid() then
         gs = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -97,10 +163,33 @@ local function realSecondsNow()
     end
     -- Two SCALAR out-params: UE4SS 3f4037d2 (LuaUObject.cpp ~203-223) refs stack index 1 for EVERY out-param and a
     -- non-struct/non-array out-param does not consume its table, so both values land in the FIRST table. Pass the
-    -- same table twice and read both fields from it (b is still read as a fallback, should a later UE4SS fix this).
-    gs:GetAccurateRealTime(a, a)
-    local s = tonumber(a.Seconds) or tonumber(b.Seconds)
-    local p = tonumber(a.PartialSeconds) or tonumber(b.PartialSeconds)
+    -- same table twice and read both fields from it. ONE table for every call (see the out-param leak above).
+    -- couch-racegc: the UFunction wrapper of `gs.GetAccurateRealTime` is kept with the CDO wrapper and called again
+    -- (its calling context is the CDO; `gs:GetAccurateRealTime` built a new wrapper - a finalizable userdata - at every
+    -- call: ~45 loop runs a second plus two per profiled module call). The built-in CallFunction with a UFunction found
+    -- by StaticFindObject is refused by this UE4SS (live 2026-10-16, util.lua U.pcallFn).
+    local a = CLK_OUT
+    a.Seconds, a.PartialSeconds = nil, nil
+    local fw = clk.fnW
+    if fw == nil or clk.fnWOf ~= gs then
+        local okF, f = pcall(clockFn, gs)
+        fw = (okF and type(f) == "userdata") and f or nil
+        clk.fnW, clk.fnWOf = fw, gs
+    end
+    local okC, err
+    if fw ~= nil then
+        okC, err = pcall(fw, gs, a, a)
+        if not okC then clk.fnW = nil end                -- looked up again next time; this sample the plain call
+    end
+    if fw == nil or not okC then
+        St.dropOutRefs(a)
+        a.Seconds, a.PartialSeconds = nil, nil
+        okC, err = pcall(clockCall, gs, a)
+    end
+    St.dropOutRefs(a)
+    if not okC then error(err, 0) end
+    local s = tonumber(a.Seconds)
+    local p = tonumber(a.PartialSeconds)
     if s == nil or p == nil then return nil end
     return s + p
 end
@@ -133,12 +222,25 @@ function St.sampleClock()
         clk.winReal, clk.winClock = realMs, c
     end
     clk.real, clk.atClock, clk.source = realMs, c, "GetAccurateRealTime"
+    -- the out-param leak sweep (cheap: the registry stays small once swept), every 3 s of real time
+    if sweep.at == nil or realMs - sweep.at >= 3000 then
+        sweep.at = realMs
+        pcall(St.sweepOutRefs)
+    end
     if not clk.logged and clk.rateSamples >= 10 then
         clk.logged = true
         print(string.format("[SWGRCouch][state] clock: real time source GetAccurateRealTime (os.clock runs at x%.2f "
             .. "of real time)\n", 1 / clk.rate))
     end
     return true
+end
+
+--- Profiling only (main.lua's tick profiler): the engine's real time in ms NOW (one static UFunction call, not the
+--- extrapolated St.nowMs), or nil. os.clock() is process CPU time under Wine, useless for spans.
+function St.preciseMs()
+    local ok, sec = pcall(realSecondsNow)
+    if ok and type(sec) == "number" then return sec * 1000 end
+    return nil
 end
 
 --- Milliseconds for timers (monotonic, real time once sampled).  VERIFY(V-CORE-02): FAST deltas ~33 ms.

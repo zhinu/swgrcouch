@@ -109,6 +109,18 @@ function M.presetFor(nViews)
     return presets[s]
 end
 
+-- The preset plus cfg.GfxSplitFixes (split-screen correctness values, applied even with SplitGraphics "off"); nil when
+-- both are empty. A fresh table: the config tables are never written.
+local function wantedFor(nViews)
+    local p = M.presetFor(nViews)
+    local fixes = cfg.GfxSplitFixes
+    if type(fixes) ~= "table" or next(fixes) == nil then return p end
+    local t = {}
+    for k, v in pairs(p or {}) do t[k] = v end
+    for k, v in pairs(fixes) do t[k] = v end
+    return t
+end
+
 -- Write back saved values that are not part of `keep` (nil = all) and forget them.
 -- g.saved = console cvars (name -> float), g.savedUS = scalability groups (sg name -> {group, level}).
 -- Returns the count restored and whether a GameUserSettings group changed (ApplyNonResolutionSettings pending).
@@ -141,7 +153,7 @@ function M.applyForViews(nViews)
     local g = G()
     nViews = nViews or 1
     if nViews < 2 then return end
-    local p = M.presetFor(nViews)
+    local p = wantedFor(nViews)
     -- a preset change mid-race (console `couch gfx`): values of the old preset go back first
     local _, usDirty = restoreCvars(p)
     local mode = applyMode()
@@ -168,7 +180,7 @@ function M.applyForViews(nViews)
                 if U.try(TAG, setCvar, name, value) then applied = applied + 1 end
             end
         end
-        U.log(TAG, "split preset '%s' for %d views: %d values applied (%d via GameUserSettings, mode %s)",
+        U.log(TAG, "split preset '%s' + split fixes for %d views: %d values applied (%d via GameUserSettings, mode %s)",
             tostring(settings.get("SplitGraphics")), nViews, applied, viaUS, mode)
     else
         U.log(TAG, "split graphics off: user settings kept")
@@ -350,6 +362,7 @@ function M.init()
             -- St.race.singleView: join's "race_enter" guard (emitted before "phase") handed the guests' cars to the AI
             -- and the race keeps one view: no split-screen preset, takedown cameras untouched.
             local n = (St.race.singleView == true) and 1 or #U.localPlayers()
+            pcall(function() n = U.mod("split").viewCount() end)   -- couch-livefix r2: dormant players hold no view
             M.applyForViews(n)
         elseif new == "FRONTEND" then
             M.restore()

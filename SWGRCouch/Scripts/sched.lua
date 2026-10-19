@@ -36,6 +36,7 @@ end
 
 ---------------------------------------------------------------------------------------------------- helpers
 local handles = {}       -- handle -> tag (every live handle this module created)
+local loopSeqN = 0       -- St.loopSeq source (sched.every runs)
 local loopStats = {}     -- tag -> {runs, errors, suppressed, lastRunMs, lastDeltaMs, maxDeltaMs, lastErrLogMs}
 
 local function toMs(ms)
@@ -139,7 +140,50 @@ function sched.every(tag, ms, fn)
         end
         st.lastRunMs = now
         st.runs = st.runs + 1
+        if U.trace then U.trace("loop", tag) end
+        -- tick profiler (main.lua call(), stutter hunt 2026-10-14): whole-loop spans + the gap between two runs of
+        -- the loop (a gap far over its period = a long game frame: a hitch), only while _G.SWGRCouch_prof is set
+        local prof = _G.SWGRCouch_prof and St.preciseMs or nil
+        local t0 = prof and prof() or nil
+        -- couch-racegc: collector cycles (gctune's sentinel) during this loop run
+        local gt = prof and package.loaded.gctune or nil
+        local c0 = gt and gt.cycleCount and gt.cycleCount() or nil
+        -- St.loopSeq: one id per loop run (util.lua's per-run U.localPlayers cache), nil outside loop runs
+        loopSeqN = loopSeqN + 1
+        St.loopSeq = loopSeqN
         local ok, e = xpcall(fn, debug.traceback)
+        St.loopSeq = nil
+        if t0 then
+            local t1 = prof()
+            if t1 then
+                local D = _G.SWGRCouch_profData or {}
+                _G.SWGRCouch_profData = D
+                local k = "loop:" .. tostring(tag)
+                local p = D[k] or { n = 0, sum = 0, max = 0, over2 = 0, phase = {}, gapN = 0, gap60 = 0, gap100 = 0, gapMax = 0 }
+                D[k] = p
+                local d = t1 - t0
+                p.n, p.sum = p.n + 1, p.sum + d
+                if d > p.max then p.max = d end
+                if d > 2 then p.over2 = p.over2 + 1; p.phase[St.phase or "?"] = (p.phase[St.phase or "?"] or 0) + 1 end
+                if c0 and gt.cycleCount() ~= c0 then
+                    p.cyc = (p.cyc or 0) + 1
+                    if St.phase == "RACING" and d > (p.rcycMax or 0) then p.rcycMax = d end
+                end
+                if St.phase == "RACING" then
+                    p.rn, p.rsum = (p.rn or 0) + 1, (p.rsum or 0) + d
+                    if d > (p.rmax or 0) then p.rmax = d end
+                    if p.lastT0 and t0 - p.lastT0 > 60 then p.rgap60 = (p.rgap60 or 0) + 1 end
+                end
+                if p.lastT0 then
+                    local g = t0 - p.lastT0
+                    p.gapN = p.gapN + 1
+                    if g > 60 then p.gap60 = p.gap60 + 1 end
+                    if g > 100 then p.gap100 = p.gap100 + 1 end
+                    if g > p.gapMax then p.gapMax = g end
+                end
+                p.lastT0 = t0
+            end
+        end
         if not ok then
             st.errors = st.errors + 1
             local every = cfg.LoopErrorLogEveryMs or 5000

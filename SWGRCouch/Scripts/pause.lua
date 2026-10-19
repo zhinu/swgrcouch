@@ -191,7 +191,7 @@ end
 
 local function pnumDesc(pc)
     if not U.ok(pc) then return "none" end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.key(lp.pc) == U.key(pc) then return "P" .. lp.index end
     end
     return "other " .. U.pathOf(pc)
@@ -200,7 +200,7 @@ end
 -- "P2 (ctrlId 1)": owner lines (ControllerId decides the Slate/CommonUI user, V-PAU-15)
 local function pnumCtrl(pc)
     if not U.ok(pc) then return "none" end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.key(lp.pc) == U.key(pc) then return string.format("P%d (ctrlId %s)", lp.index, tostring(lp.ctrlId)) end
     end
     return "other " .. U.pathOf(pc)
@@ -208,7 +208,8 @@ end
 
 local function splitViews()
     local n = 0
-    for _, lp in ipairs(U.localPlayers()) do if U.ok(lp.pc) then n = n + 1 end end
+    for _, lp in ipairs(U.localPlayersRO()) do if U.ok(lp.pc) then n = n + 1 end end
+    pcall(function() n = U.mod("split").viewCount() end)     -- couch-livefix r2: dormant players hold no view
     local ok, present = pcall(U.mod, "present")
     if ok and type(present) == "table" and type(present.isSingleView) == "function" then
         local okS, single = pcall(present.isSingleView)
@@ -221,7 +222,7 @@ end
 -- Local PlayerControllers (a race with >= 2 has the UIManager owner problem, single view or not).
 local function localPCCount()
     local n = 0
-    for _, lp in ipairs(U.localPlayers()) do if U.ok(lp.pc) then n = n + 1 end end
+    for _, lp in ipairs(U.localPlayersRO()) do if U.ok(lp.pc) then n = n + 1 end end
     return n
 end
 
@@ -296,7 +297,7 @@ end
 local function layerCount(layer)
     local mgr = U.giSubsystem("UIManager")
     if not U.ok(mgr) then return "?" end
-    local ok, n = pcall(function() return mgr:GetWidgetCountInLayer(layer) end)
+    local ok, n = pcall(U.callMethod, mgr, "GetWidgetCountInLayer", layer)
     return ok and tostring(n) or "?"
 end
 
@@ -306,6 +307,7 @@ end
 
 -- "PauseMenu" for the object CSM_PauseMenus_PauseMenu (nil when unreadable)
 local function stateShort(o)
+    if not U.ok(o) then return nil end        -- GetFName on a null wrapper is a native AV
     local ok, s = pcall(function() return o:GetFName():ToString() end)
     if not ok or type(s) ~= "string" then return nil end
     return (s:gsub("^CSM_PauseMenus_", ""))
@@ -333,14 +335,14 @@ end
 local function lpOf(pc)
     local k = U.key(pc)
     if k == 0 then return nil end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.key(lp.pc) == k then return lp end
     end
     return nil
 end
 
 local function pcByCtrlId(c)
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if lp.ctrlId == c and U.ok(lp.pc) then return lp.pc end
     end
     return nil
@@ -465,7 +467,7 @@ end
 local function slotZ(w)
     local vs = viewportSub()
     if not (vs and U.ok(w)) then return nil end
-    local ok, t = pcall(function() return vs:GetWidgetSlot(w) end)     -- Struct GameViewportWidgetSlot -> table
+    local ok, t = pcall(U.callMethod, vs, "GetWidgetSlot", w)     -- Struct GameViewportWidgetSlot -> table
     if not ok or t == nil then return nil end
     local z
     pcall(function() z = tonumber(t.ZOrder) end)
@@ -537,9 +539,12 @@ local function eiSub(pc)
 end
 
 -- HasMappingContext(imc, out OutFoundPriority) -> has, priority (nil, nil when not callable)
+local EI_OUT = (St.outParams or function(t) return t end)({})          -- one out table for every call (state.lua: the UE4SS out-param leak)
 local function eiHas(sub, imc)
-    local out = {}
-    local ok, r = pcall(function() return sub:HasMappingContext(imc, out) end)
+    local out = EI_OUT
+    out.OutFoundPriority = nil
+    local ok, r = pcall(U.callMethod, sub, "HasMappingContext", imc, out)
+    if St.dropOutRefs then St.dropOutRefs(out) end
     if not ok or type(r) ~= "boolean" then return nil, nil end
     local p = tonumber(out.OutFoundPriority)
     return r, p and math.floor(p) or nil
@@ -562,7 +567,7 @@ local function imcBoost(st, owner, why)
     local act = imcPrios()
     st.imc = st.imc or {}
     local done = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if lp.index >= 2 and U.ok(lp.pc) and (mode == "all" or U.key(lp.pc) == U.key(owner)) then
             local k = U.key(lp.pc)
             local rec = st.imc[k]
@@ -594,7 +599,7 @@ local function imcRestore(st, why)
     if not imc then st.imc, st.imcBoosted = {}, false; return "IMC_UI not found" end
     local act, def = imcPrios()
     local done = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if lp.index >= 2 and U.ok(lp.pc) then
             local rec = st.imc and st.imc[U.key(lp.pc)]
             local sub = eiSub(lp.pc)
@@ -625,7 +630,7 @@ local function imcDesc()
     local imc = loaded(IMC_UI_PATH)
     if not imc then return "?" end
     local parts = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.ok(lp.pc) then
             local sub = eiSub(lp.pc)
             local has, p
@@ -777,7 +782,7 @@ end
 local function isPauseSm(o)
     local root = rootAsset()
     if not root or U.key(o) == 0 then return false end
-    local ok, a = pcall(function() return o.mCsmAsset end)
+    local ok, a = pcall(U.getField, o, "mCsmAsset")
     if ok and U.key(a) ~= 0 and U.key(a) == U.key(root) then
         smKnownKey = U.key(o)
         return true
@@ -790,7 +795,7 @@ local function currentPauseSm()
     local mgr = U.giSubsystem("CosmeticStateMachineManager")
     local root = rootAsset()
     if not (U.ok(mgr) and root) then return nil end
-    local ok, o = pcall(function() return mgr:GetStateMachineForRoot(root) end)
+    local ok, o = pcall(U.callMethod, mgr, "GetStateMachineForRoot", root)
     if ok and U.ok(o) then
         smKnownKey = U.key(o)
         return o
@@ -823,7 +828,7 @@ local function humansRacing()
             return n, table.concat(names, ",")
         end
     end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         local ok, r = pcall(function() return lp.pc.PlayerState.RaceEventComponent:IsStillRacing() end)
         if ok and r == true then n = n + 1; names[#names + 1] = "P" .. lp.index end
     end
@@ -871,7 +876,7 @@ end
 local function inLayerFirst(cls)
     local mgr = U.giSubsystem("UIManager")
     if not U.ok(mgr) then return nil, nil end
-    local ok, w = pcall(function() return mgr:GetWidgetInLayer(cls, MENU) end)
+    local ok, w = pcall(U.callMethod, mgr, "GetWidgetInLayer", cls, MENU)
     return (ok and U.ok(w)) and w or nil, mgr
 end
 
@@ -1133,7 +1138,7 @@ local function findPauseMenu(st)
     for _, path in ipairs(PAUSE_MENUS) do
         local cls = loaded(path)                       -- never LoadAsset from the FAST loop
         if cls and U.ok(mgr) then
-            local ok, w = pcall(function() return mgr:GetWidgetInLayer(cls, MENU) end)
+            local ok, w = pcall(U.callMethod, mgr, "GetWidgetInLayer", cls, MENU)
             if ok and U.ok(w) then return w, "UIManager" end
         end
     end
@@ -1187,7 +1192,7 @@ local function probe(st, w, tagTxt)
     local focus = "?"
     pcall(function()
         local parts = {}
-        for _, lp in ipairs(U.localPlayers()) do
+        for _, lp in ipairs(U.localPlayersRO()) do
             if U.ok(lp.pc) and (w:HasUserFocus(lp.pc) == true or w:HasUserFocusedDescendants(lp.pc) == true) then
                 parts[#parts + 1] = "P" .. lp.index
             end
@@ -1197,7 +1202,7 @@ local function probe(st, w, tagTxt)
     local pre = (st.pre and st.pre.key == U.key(w)) and "ours" or "game"
     U.log(TAG, "pause menu probe %s: %s via %s owner=%s pre=%s osm=%s vis=%s opacity=%s inViewport=%s activated=%s "
         .. "parent=%s chain=[%s] pauser=%s (%s) views=%d ourHUDs=[%s] csmPaused=%s focus=%s imcUi=%s z=%s states=[%s] "
-        .. "menuLayer=%s", tagTxt, U.pathOf(w:GetClass()), tostring(st.menuHow), d.owner, pre, d.osm, d.vis, d.op, d.vp,
+        .. "menuLayer=%s", tagTxt, U.pathOf(U.ok(w) and w:GetClass() or nil), tostring(st.menuHow), d.owner, pre, d.osm, d.vis, d.op, d.vp,
         d.act, d.parent, table.concat(d.chain, " < "), pnumDesc(st.pauser), tostring(st.pauserWhy), splitViews(),
         hudVis, tostring(M.isPaused()), focus, imcDesc(), tostring(slotZ(w)), (activeSubStates()), layerCount(MENU))
 end
@@ -1216,7 +1221,7 @@ local function forceVisible(w)
             end
             if o:GetRenderOpacity() < 0.99 then o:SetRenderOpacity(1.0); fixed = fixed + 1 end
         end)
-        local ok, par = pcall(function() return o:GetParent() end)
+        local ok, par = pcall(U.callMethod, o, "GetParent")
         o = ok and par or nil
     end
     return fixed
@@ -1248,6 +1253,7 @@ local PART_WALK_MAX = 400
 local panelClsP, userClsP
 
 local function lname(o)
+    if not U.ok(o) then return "" end         -- GetFName on a null wrapper is a native AV
     local ok, s = pcall(function() return o:GetFName():ToString() end)
     return ok and type(s) == "string" and string.lower(s) or ""
 end
@@ -1396,10 +1402,7 @@ local function rehost(st, w, why)
 end
 
 ---------------------------------------------------------------------------------------------------- request hook (B)
-local function keyDown(pc, k)
-    local ok, v = pcall(function() return pc:IsInputKeyDown(k) end)
-    return ok and v == true
-end
+local function keyDown(pc, k) return U.keyDown(pc, k) end   -- couch-racegc: cached UFunction, no wrapper per call
 
 -- The pause key a local player holds now: Start (pads), Escape / P (P1's keyboard). Returns name, viaPad.
 local function pauseKeyOf(lp)
@@ -1445,8 +1448,11 @@ local function pauserFor(st, kind, now)
     end
     keys()
     local cands = {}
-    for _, lp in ipairs(U.localPlayers()) do
-        if U.ok(lp.pc) then
+    for _, lp in ipairs(U.localPlayersRO()) do
+        -- couch-livefix r2: a dormant local player (no view in this race, split.lua) never pauses it for himself
+        local dormant = false
+        pcall(function() dormant = U.mod("split").noView(lp.pc) == true end)
+        if U.ok(lp.pc) and not dormant then
             local k, pad
             if kind == "player" then k, pad = playerKeyJustReleased(lp) else k, pad = pauseKeyOf(lp) end
             if k then cands[#cands + 1] = { lp = lp, key = k, pad = pad } end
@@ -1561,7 +1567,7 @@ local function onCsmPre(ctxP, newStateP)
     st.hookCalls = (st.hookCalls or 0) + 1
     local tname
     if opt("PauseHookReadState", true) then
-        local ok, o = pcall(function() return newStateP:get() end)
+        local ok, o = pcall(U.callMethod, newStateP, "get")
         if ok and U.ok(o) then tname = stateShort(o) end
     end
     if st.ownCall and now - st.ownCall.atMs > 1000 then st.ownCall = nil end
@@ -1600,7 +1606,7 @@ local function onCsmPre(ctxP, newStateP)
         if not kind then
             local e = st.lastPlayerPress
             kind = (e and now - e.atMs < 700) and "player" or "pause"
-            for _, lp in ipairs(U.localPlayers()) do
+            for _, lp in ipairs(U.localPlayersRO()) do
                 if U.ok(lp.pc) and pauseKeyOf(lp) then kind = "pause"; break end
             end
         end
@@ -1610,7 +1616,7 @@ local function onCsmPre(ctxP, newStateP)
     local leaf = leafOf(set)
     if set.PauseMenu and not leaf then return onPick(st, pickLeaf() or "Paused_Racing", now) end
     if set.PauseMenu and leaf then
-        for _, lp in ipairs(U.localPlayers()) do
+        for _, lp in ipairs(U.localPlayersRO()) do
             if U.ok(lp.pc) and pauseKeyOf(lp) then
                 st.dupAtMs = now
                 U.warn(TAG, "ChangeStateTo while [%s] with %s's pause key down: probably a duplicate PauseMenu "
@@ -1895,7 +1901,7 @@ local function findSubScreen()
     for _, path in ipairs(SUB_PATHS) do
         local cls = loaded(path)
         if cls then
-            local ok, w = pcall(function() return mgr:GetWidgetInLayer(cls, MENU) end)
+            local ok, w = pcall(U.callMethod, mgr, "GetWidgetInLayer", cls, MENU)
             if ok and U.ok(w) then
                 local shown, act = false, true
                 pcall(function() shown = w:IsInViewport() == true or U.ok(w:GetParent()) end)
@@ -1910,7 +1916,7 @@ end
 -- "P2" / "P1,P2" / "none": the local players whose slate user focuses w or a descendant
 local function focusOf(w)
     local parts = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         local has = false
         if U.ok(lp.pc) then
             pcall(function() has = w:HasUserFocus(lp.pc) == true or w:HasUserFocusedDescendants(lp.pc) == true end)
@@ -2045,7 +2051,7 @@ local function menuTick(st, pausedNow, now)
             local z = slotZ(w)
             if z and z ~= zSeen then
                 zSeen = z
-                U.log(TAG, "Menu-layer ZOrder seen on the UIManager's %s: %d", U.pathOf(w:GetClass()):match("[^%.]+$")
+                U.log(TAG, "Menu-layer ZOrder seen on the UIManager's %s: %d", U.pathOf(U.ok(w) and w:GetClass() or nil):match("[^%.]+$")
                     or "?", z)
             end
         end
@@ -2116,6 +2122,7 @@ end
 -- rehost, the menu keys (A / B / Enter) are tracked too (st.lastMenuPressMs: "the player resumed, not the rehost").
 local MENU_KEYS = { "Gamepad_FaceButton_Bottom", "Gamepad_FaceButton_Right", "Enter" }
 local menuKeyStructs = nil
+local trackSeen = {}               -- couch-fix40: one reused set (a new table every FAST tick before)
 local function trackPresses(st, now, pausedNow)
     keys()
     st.keyState = st.keyState or {}
@@ -2124,8 +2131,9 @@ local function trackPresses(st, now, pausedNow)
         menuKeyStructs = {}
         for i, n in ipairs(MENU_KEYS) do menuKeyStructs[i] = { KeyName = U.fname(n) } end
     end
-    local seen = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    local seen = trackSeen
+    for k in pairs(seen) do seen[k] = nil end
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.ok(lp.pc) then
             local k = U.key(lp.pc)
             seen[k] = true
@@ -2351,6 +2359,35 @@ local function requestWatch(st, now, pausedNow)
 end
 
 ---------------------------------------------------------------------------------------------------- poll
+-- couch-fix40: the guests' may-pause set and the per-player Start poll as plain functions (U.tryEvery passes their
+-- arguments; two closures per player per FAST tick before) and reused sets
+local pollSeen, pollMay = {}, {}
+local function wipe(t) for k in pairs(t) do t[k] = nil end return t end
+local function mayPauseFill(mayPause)
+    local join = U.mod("join")
+    for _, e in ipairs(join.joinedList()) do         -- Lua table
+        local s = St.join.slots[e.ctrlId]
+        if s and not (s.leaving or s.abandoned or s.abandonPending) and U.ok(e.pc) then
+            mayPause[U.key(e.pc)] = true
+        end
+    end
+end
+local function pollStart(st, pc, k, isP1, quiet, now)
+    local down = U.keyDown(pc, KEY_START)
+    local pad = down
+    -- VERIFY(V-PAU-03): P1's keyboard pause key is Escape (IsInputKeyDown on P1's PC sees it).
+    if isP1 and not down then down = U.keyDown(pc, KEY_ESC) end
+    if down and not st.prevStart[k] and quiet then
+        local may, why = true, nil
+        if isP1 then may, why = p1MayPause() end
+        if may then
+            st.pending[k] = { pc = pc, atMs = now, isP1 = isP1, pad = pad }
+        else
+            U.dbg(TAG, "P1 pause press ignored: %s", tostring(why))
+        end
+    end
+    st.prevStart[k] = down
+end
 -- FAST loop, every race tick (main.lua calls it whenever phase.isRace()).
 function M.poll()
     keys()
@@ -2441,46 +2478,23 @@ function M.poll()
             end
         end
     end
-    local seen = {}
+    local seen = wipe(pollSeen)
     -- Guests that may pause: joined (join.joinedList: valid PC, slot.joined) and still driving their own car. A
     -- single-view race (St.race.singleView: guests handed to the AI) polls no guest at all.
     local mayPause = nil
     if guestsPoll then
-        mayPause = {}
+        mayPause = wipe(pollMay)
         if St.race.singleView ~= true then
-            U.tryEvery("pause.guests", nil, TAG, function()
-                local join = U.mod("join")
-                for _, e in ipairs(join.joinedList()) do         -- Lua table
-                    local s = St.join.slots[e.ctrlId]
-                    if s and not (s.leaving or s.abandoned or s.abandonPending) and U.ok(e.pc) then
-                        mayPause[U.key(e.pc)] = true
-                    end
-                end
-            end)
+            U.tryEvery("pause.guests", nil, TAG, mayPauseFill, mayPause)
         end
     end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         local pc = lp.pc
         local isP1 = (lp.index == 1)
         if U.ok(pc) and ((isP1 and p1) or (not isP1 and guestsPoll and mayPause[U.key(pc)] == true)) then
             local k = U.key(pc)
             seen[k] = true
-            U.tryEvery("pause.poll", nil, TAG, function()
-                local down = pc:IsInputKeyDown(KEY_START) == true
-                local pad = down
-                -- VERIFY(V-PAU-03): P1's keyboard pause key is Escape (IsInputKeyDown on P1's PC sees it).
-                if isP1 and not down then down = pc:IsInputKeyDown(KEY_ESC) == true end
-                if down and not st.prevStart[k] and quiet then
-                    local may, why = true, nil
-                    if isP1 then may, why = p1MayPause() end
-                    if may then
-                        st.pending[k] = { pc = pc, atMs = now, isP1 = isP1, pad = pad }
-                    else
-                        U.dbg(TAG, "P1 pause press ignored: %s", tostring(why))
-                    end
-                end
-                st.prevStart[k] = down
-            end)
+            U.tryEvery("pause.poll", nil, TAG, pollStart, st, pc, k, isP1, quiet, now)
         end
     end
     for k in pairs(st.prevStart) do

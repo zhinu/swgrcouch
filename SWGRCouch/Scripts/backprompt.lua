@@ -13,9 +13,10 @@
 -- the same prompt; on a sub-page it means back too. When P1's PC does see B (after a race), lobby's / setup's own polls
 -- already went back in the same press: this module then only answers the prompt (no second back step).
 -- Config: cfg.BackPromptAsBack (true) | false = the 0.11 behaviour (the game's prompt stays up).
--- HOOK RULES (subsplit's): the two hooks are registered ONLY while OPTIONS or RACE SETUP shows and no launch is
--- pending, and UnregisterHook-ed otherwise (launch.lua also calls M.disarm() right before LaunchCustomRace): no Lua
--- runs inside the game's messaging in races or on the other tabs. (The launch crashes of 2026-10-10 were NOT these
+-- HOOK RULES (subsplit's): the two hooks are registered at the first sub-page of a front-end visit (#23: then kept
+-- until the front end goes - no RegisterHook / UnregisterHook pair per sub-page open) and UnregisterHook-ed when the
+-- phase leaves FRONTEND or a launch is pending (launch.lua also calls M.disarm() right before LaunchCustomRace): no Lua
+-- runs inside the game's messaging in races; on the posters / the game's tabs onPost only compares the message id. (The launch crashes of 2026-10-10 were NOT these
 -- hooks: they also happened with BackPromptAsBack = false; their cause was the v2 pages' widget calls after the
 -- front end was freed, fixed by the launch hold, state.lua St.launchHold.)
 -- KeyboardIsP1 (review flow-1): pad 0 then belongs to a guest whose B still reaches P1's CommonUI back. The prompt is
@@ -24,6 +25,9 @@
 --   (V-BP-01)"; no prompt left on screen; the tiles show with OPTIONS focused. RACE SETUP on PLANET: "... over RACE
 --   SETUP: answered No (1 click(s), ...), one step back (V-BP-01)" and CLASS shows. On the plain lobby: no [backprompt]
 --   line, the game's prompt stays.
+--   PLAYER NAMES (OPTIONS sub-list): one B = one step (a name edit cancelled, else back to the OPTIONS list): the line
+--   ends "the lobby's own B poll already stepped back" or "OPTIONS stepped back", and OPTIONS stays open.
+--   VERIFY(V-NAM-06)
 
 local cfg = require("config")
 local St = require("state")
@@ -72,12 +76,24 @@ local function context()
     if okO and optOpen then return "options" end
     local okS, act = pcall(function() return setup and setup.isActive and setup.isActive() end)
     if okS and act and St.menu.visible == "lobby" then return "setup" end
+    -- B04 (live 2026-10-15): the GALAXY RUN page too (its B quit the game through this prompt)
+    local okR, rp = pcall(function() return U.mod("runpage").active() end)
+    if okR and rp == true and St.menu.visible == "lobby" then return "runpage" end
+    -- 0.15 F01: the COUCH CAMPAIGN page (couchpage.lua)
+    local okC, cp = pcall(function() return U.mod("couchpage").active() end)
+    if okC and cp == true and St.menu.visible == "lobby" then return "couchpage" end
+    -- 0.16: the GALACTIC GRAND PRIX page (gppage.lua)
+    local okG, gpp = pcall(function() return U.mod("gppage").active() end)
+    if okG and gpp == true and St.menu.visible == "lobby" then return "gppage" end
     return nil
 end
+local WHAT = { options = "OPTIONS", setup = "RACE SETUP", runpage = "the GALAXY RUN page", couchpage = "the COUCH CAMPAIGN page",
+               gppage = "the GALACTIC GRAND PRIX page" }
 
 -- the hook's handler (game thread, inside the game's AddMessage call): note a QuitGame post on a sub-page
 local function onPost(id)
     if id ~= "QuitGame" then return end
+    Q.lastPostMs = St.nowMs()
     local what = context()
     if not what then return end
     local before = {}
@@ -119,6 +135,8 @@ local function disarm(why)
 end
 
 function M.disarm(why) return disarm(why or "launch") end
+-- B04: when the game last posted its QuitGame prompt while watched (runpage: a B between END THE RUN's two presses)
+function M.lastQuitPostMs() return Q.lastPostMs or -1e12 end
 
 local function ensureHooks(now)
     local H = HK()
@@ -185,8 +203,38 @@ local function backStep(pd)
     pcall(function() kbp1 = require("settings").get("KeyboardIsP1") == true end)
     if kbp1 then return "no back step (KeyboardIsP1: pad 0 is a guest; P1's back is Backspace)" end
     if pd.what == "options" then
-        local ok, closed = pcall(function() return U.mod("lobby").closeOptions("pad B (the game's Quit prompt)") end)
-        return (ok and closed) and "OPTIONS closed" or "OPTIONS was already closed"
+        -- the lobby's own B poll stepped back for this press already (a name edit cancelled / PLAYER NAMES left /
+        -- OPTIONS closed): no second step (it would close OPTIONS over the PLAYER NAMES list)
+        local lobby = U.mod("lobby")
+        local lastB = -1e12
+        pcall(function() lastB = lobby.lastP1BackMs() end)
+        if lastB >= pd.atMs - 150 then return "the lobby's own B poll already stepped back" end
+        local ok, closed = pcall(function() return lobby.optionsBack("pad B (the game's Quit prompt)") end)
+        return (ok and closed) and "OPTIONS stepped back" or "OPTIONS was already closed"
+    end
+    if pd.what == "couchpage" then
+        local cp = U.mod("couchpage")
+        local lastB = -1e12
+        pcall(function() lastB = cp.lastP1BackMs() end)
+        if lastB >= pd.atMs - 150 then return "the lobby's own B poll already closed the COUCH CAMPAIGN page" end
+        local ok, closed = pcall(function() return cp.onP1Back("pad B (the game's Quit prompt)") end)
+        return (ok and closed) and "COUCH CAMPAIGN page closed" or "the COUCH CAMPAIGN page was already closed"
+    end
+    if pd.what == "gppage" then
+        local gpp = U.mod("gppage")
+        local lastB = -1e12
+        pcall(function() lastB = gpp.lastP1BackMs() end)
+        if lastB >= pd.atMs - 150 then return "the lobby's own B poll already stepped the GRAND PRIX page back" end
+        local ok, closed = pcall(function() return gpp.onP1Back("pad B (the game's Quit prompt)") end)
+        return (ok and closed) and "GRAND PRIX page stepped back" or "the GRAND PRIX page was already closed"
+    end
+    if pd.what == "runpage" then
+        local rp = U.mod("runpage")
+        local lastB = -1e12
+        pcall(function() lastB = rp.lastP1BackMs() end)
+        if lastB >= pd.atMs - 150 then return "the lobby's own B poll already closed the run page" end
+        local ok, closed = pcall(function() return rp.onP1Back("pad B (the game's Quit prompt)") end)
+        return (ok and closed) and "run page closed" or "the run page was already closed"
     end
     local setup = U.mod("setup")
     local last = -1e12
@@ -249,8 +297,20 @@ local function answer(pd, now)
         if pd.clicks > 0 then
             Q.answered = Q.answered + 1
             U.log(TAG, "QuitGame prompt over %s: answered No (%d click(s), %d ms after the post), %s (V-BP-01)",
-                pd.what == "options" and "OPTIONS" or "RACE SETUP", pd.clicks, math.floor(now - pd.atMs),
+                WHAT[pd.what] or tostring(pd.what), pd.clicks, math.floor(now - pd.atMs),
                 tostring(pd.did))
+            -- fix16 (GP hub B, live 2026-10-15): the answered prompt hands the focus back to the lobby page's default
+            -- (QUICK RACE) after the GRAND PRIX page closed onto its poster: focus the lobby's cursor (the poster) again
+            if pd.what == "gppage" then
+                local okA, on = pcall(function() return U.mod("gppage").active() end)
+                if okA and on == false then
+                    pcall(function()
+                        local lobby = U.mod("lobby")
+                        lobby.focusFirst()
+                        lobby.armFocusKeeper("GRAND PRIX page closed (prompt answered)")
+                    end)
+                end
+            end
         else
             U.log(TAG, "QuitGame prompt over %s closed before it was answered (the player did) (V-BP-01)", pd.what)
         end
@@ -305,7 +365,13 @@ function M.fastTick()
         return
     end
     local now = St.nowMs()
-    if St.menu.visible == "lobby" and context() then ensureHooks(now) else disarm("no sub-page") end
+    -- #23 (live 2026-10-17: "Registered native hook ... GfnMessagingSubsystem" / "QuitGame watch armed" on every
+    -- sub-page visit, a RegisterHook + UnregisterHook pair per open / close): armed at the first sub-page of a front-end
+    -- visit and KEPT for the rest of it; onPost is the gate (context() is nil on the posters and the game's tabs, so a
+    -- QuitGame posted there is left alone). Disarmed only when the front end goes, a launch is pending or the feature is
+    -- off (above). cfg.BackPromptKeepArmed = false: the 0.12 per-visit arming.
+    if St.menu.visible == "lobby" and context() then ensureHooks(now)
+    elseif opt("BackPromptKeepArmed", true) == false then disarm("no sub-page") end
     local pd = Q.pending
     if pd then U.try(TAG, answer, pd, now) end
 end

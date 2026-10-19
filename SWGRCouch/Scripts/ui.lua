@@ -176,7 +176,7 @@ end
 -- true while the mouse is over w (UWidget::IsHovered() -> Bool); false on any error or an invalid widget.
 function ui.hovered(w)
   if not U.ok(w) then return false end
-  local ok, v = pcall(function() return w:IsHovered() end)
+  local ok, v = pcall(U.callMethod, w, "IsHovered")
   return ok and v == true
 end
 
@@ -249,14 +249,14 @@ function ui.hasFocus(w, pc)
   if not U.ok(w) then return false end
   if pc == nil then pc = U.p1() end
   if U.ok(pc) then
-    local ok, v = pcall(function() return w:HasUserFocus(pc) end)                -- (Object) -> Bool
+    local ok, v = pcall(U.callMethod, w, "HasUserFocus", pc)                -- (Object) -> Bool
     if ok and v == true then focusMatched("HasUserFocus"); return true end
-    ok, v = pcall(function() return w:HasUserFocusedDescendants(pc) end)         -- (Object) -> Bool
+    ok, v = pcall(U.callMethod, w, "HasUserFocusedDescendants", pc)         -- (Object) -> Bool
     if ok and v == true then focusMatched("HasUserFocusedDescendants"); return true end
   end
-  local ok2, v2 = pcall(function() return w:HasKeyboardFocus() end)              -- () -> Bool
+  local ok2, v2 = pcall(U.callMethod, w, "HasKeyboardFocus")              -- () -> Bool
   if ok2 and v2 == true then focusMatched("HasKeyboardFocus"); return true end
-  ok2, v2 = pcall(function() return w:HasFocusedDescendants() end)               -- () -> Bool
+  ok2, v2 = pcall(U.callMethod, w, "HasFocusedDescendants")               -- () -> Bool
   if ok2 and v2 == true then focusMatched("HasFocusedDescendants"); return true end
   return false
 end
@@ -335,7 +335,7 @@ function ui.keyDown(pc, name)
     k = {KeyName = U.fname(name)}
     fkeys[name] = k
   end
-  local ok, v = pcall(function() return pc:IsInputKeyDown(k) end)   -- IsInputKeyDown(Struct Key) -> Bool
+  local ok, v = pcall(U.callMethod, pc, "IsInputKeyDown", k)   -- IsInputKeyDown(Struct Key) -> Bool
   return ok and v == true
 end
 

@@ -16,15 +16,25 @@ local DEFAULTS = cfg.Defaults
 local ORDER = { "Layout2P", "SplitGraphics", "TakedownCams", "NameTags", "KeyboardIsP1", "NetMode",
                 "JoinAddress", "Port", "LastRaceArchetype", "LastRaceGameMode", "LastRacePlanet", "LastRaceTrack",
                 "LastRaceBuild", "LastRaceDebugBuild", "LastRaceCondition", "LastRaceMaxRacers", "LastRaceVehicles",
-                "LastRaceRacers", "OpponentTier", "PlayMode", "OpponentMatch", "RunPick" }
+                "LastRaceRacers", "OpponentTier", "PlayMode", "OpponentMatch", "RunPick",
+                "Name1", "Name2", "Name3", "Name4", "CouchMysteryTeam",
+                "CouchEconomy" }                                     -- couch-fix35: COUCH CAMPAIGN rules
 -- Enumerated string keys: allowed values (a value outside the list is refused / replaced by the default)
 settings.ALLOWED = {
     Layout2P      = { "top-bottom", "side-by-side" },
     SplitGraphics = { "auto", "performance", "quality", "off" },
     NetMode       = { "offline", "host", "join" },
     PlayMode      = { "quick", "custom" },
-    RunPick       = { "4", "6", "9" },
+    RunPick       = { "qualifier", "league", "kestar", "sprint" },
+    CouchMysteryTeam = { "greyed", "allowed" },            -- couch-fix39 (OPTIONS > COUCH CAMPAIGN)
+    CouchEconomy  = { "own", "best" },                               -- couch-fix35 (Q1)
 }
+-- couch-fix36: OPTIONS > COUCH CAMPAIGN (couchpenalty.lua)
+settings.ALLOWED.CouchBrokerPenalty = { "both", "owner" }
+ORDER[#ORDER + 1] = "CouchBrokerPenalty"
+-- couch-fix41: retired keys - an old settings.txt line is dropped quietly (never kept, never written back).
+-- CouchBackerTokens (couch-fix36's backer token rule): solo parity, an unhappy backer never costs a League Token.
+settings.RETIRED = { CouchBackerTokens = true }
 -- A config_user.lua `Defaults` override has the right type but may be outside ALLOWED (`NetMode = "Host"`): it would
 -- become a default that coerce() falls back to and every save writes back. Replaced by the built-in default here.
 for key, list in pairs(settings.ALLOWED) do
@@ -53,8 +63,27 @@ local COMMENTS = {
     OpponentTier      = "RACE SETUP opponents (speeders): 1 = TIER 1 [0%] (weakest) .. 6 = TIER 6 [58%]",
     OpponentMatch     = "CUSTOM opponents: true = the AI get the players' average build (MATCH THE PLAYERS)",
     PlayMode          = "quick (QUICK RACE: everybody on the Opponents tier, no perks) | custom (perks per kart)",
-    RunPick           = "FREE MODE GALAXY RUN length: 4 | 6 | 9 races (RunLength off/4/6/9 arms the next launch)",
+    RunPick           = "FREE MODE GALAXY RUN preset: qualifier | league | kestar | sprint (RunLength arms the next launch)",
+    CouchBrokerPenalty = "couch campaign, a guest's Broker penalty: both | owner (OPTIONS > COUCH CAMPAIGN)",
+    CouchMysteryTeam  = "greyed | allowed: a guest may take a mystery choice with a TEAM effect (OPTIONS > COUCH CAMPAIGN)",
+    CouchEconomy      = "COUCH CAMPAIGN: own (P1's wallet / rounds follow his own place) | best (the best result carries everyone)",
+    Name1             = "custom player names (OPTIONS > PLAYER NAMES; empty = default: P1's own name, 'Player <n>')",
 }
+
+-- Custom player names (Name1..Name4): one line of printable text, runs of blanks collapsed, at most
+-- cfg.PlayerNameMaxChars characters (UTF-8 aware). `""`, `''` and `default` mean "no custom name" (the console
+-- cannot pass an empty value: 'couch set Name2 default').
+settings.NAME_KEYS = { Name1 = 1, Name2 = 2, Name3 = 3, Name4 = 4 }
+function settings.cleanName(v, maxChars)
+    local s = tostring(v or "")
+    s = s:gsub("%c", " "):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    if s == '""' or s == "''" or s:lower() == "default" then return "" end
+    local max = math.tointeger(tonumber(maxChars) or tonumber(cfg.PlayerNameMaxChars) or 16) or 16
+    if max < 1 then max = 1 end
+    if utf8.len(s) == nil then s = s:gsub("[\128-\255]", "?") end    -- not UTF-8: keep it printable ASCII
+    if utf8.len(s) > max then s = s:sub(1, utf8.offset(s, max + 1) - 1):gsub(" $", "") end
+    return s
+end
 
 local values = {}        -- key -> typed value (only keys of DEFAULTS)
 local extraLines = {}    -- unknown "Key = value" lines, verbatim, in file order
@@ -141,6 +170,7 @@ local function coerce(key, v)
             return nil, "expected a string"
         end
         local s = trim(tostring(v)):gsub("[\r\n]", " ")
+        if settings.NAME_KEYS[key] then s = settings.cleanName(s) end
         if not allowed(key, s) then
             return nil, "allowed: " .. table.concat(settings.ALLOWED[key], ", ")
         end
@@ -235,7 +265,9 @@ function settings.load()
                 for i = 1, #ORDER do if ORDER[i] == k then isOrderKey = true; break end end
                 local dup = false
                 for i = 1, #extraLines do if extraLines[i] == s then dup = true; break end end
-                if isOrderKey then
+                if settings.RETIRED[k] then
+                    U.log("settings", "%s is retired: line dropped", k)
+                elseif isOrderKey then
                     U.warn("settings", "%s has no default in config.Defaults: line dropped", k)
                 elseif not dup then
                     extraLines[#extraLines + 1] = s

@@ -32,6 +32,7 @@
 --             T.screenTitle(ctx, cv, geo, text) -> t                 C2 t.set(text), t.show(on)
 --             T.stepRow(ctx, cv, geo) -> r                           C3 r.render{{label, state = "done"|"current"|"next"}}
 --             T.commandRow(ctx, cv, geo, defs) -> c                  C4 c.show{back, start, save}; c.look(id, look);
+--                                                                       defs {id, label, ghostId, fn, opts, rect (optional)}
 --                                                                       c.poll(p1) -> paintedId; c.widget(id)
 --             T.statusPill(ctx, cv, geo) -> p                        C5 p.post(text, {warn, pips, ms, sticky, prio, key});
 --                                                                       p.clear([key]); p.tick(nowMs) -> text | nil
@@ -1060,7 +1061,7 @@ end
 -- build FGeometry comes back as an empty table (no reflected fields), so this returns nil with the reason.
 local function slateGeometry(root)
     if not U.ok(root) then return nil, "no root" end
-    local okG, g = pcall(function() return root:GetCachedGeometry() end)  -- UWidget::GetCachedGeometry() -> FGeometry
+    local okG, g = pcall(U.callMethod, root, "GetCachedGeometry")  -- UWidget::GetCachedGeometry() -> FGeometry
     if not okG or g == nil then return nil, "GetCachedGeometry failed" end
     if type(g) == "table" and next(g) == nil then return nil, "GetCachedGeometry returned no fields" end
     local sbl = U.cdo("/Script/UMG.Default__SlateBlueprintLibrary")
@@ -1069,7 +1070,7 @@ local function slateGeometry(root)
     -- LocalToViewport(Object WorldContextObject, Geometry, Vector2D LocalCoordinate, out PixelPosition,
     --   out ViewportPosition); struct out-params are filled in place
     local okL = pcall(function() sbl:LocalToViewport(U.world(), g, { X = 0, Y = 0 }, px, vp) end)
-    local okS, size = pcall(function() return sbl:GetLocalSize(g) end)  -- GetLocalSize(Geometry) -> Vector2D
+    local okS, size = pcall(U.callMethod, sbl, "GetLocalSize", g)  -- GetLocalSize(Geometry) -> Vector2D
     local x, y = tonumber(vp.X), tonumber(vp.Y)
     local w, h = okS and size and tonumber(size.X), okS and size and tonumber(size.Y)
     if not (okL and x and y and w and h) then return nil, "LocalToViewport / GetLocalSize unusable" end
@@ -1103,7 +1104,7 @@ local function layoutGeometry(root)
     for i = 0, n - 1 do
         if i ~= idx then
             local c = vb:GetChildAt(i)
-            local okV, v = pcall(function() return c:GetVisibility() end)
+            local okV, v = pcall(U.callMethod, c, "GetVisibility")
             if U.ok(c) and not (okV and v == VIS.Collapsed) then
                 local hh = 0
                 pcall(function() hh = tonumber(c:GetDesiredSize().Y) or 0 end)   -- Widget:GetDesiredSize() -> Vector2D
@@ -1120,7 +1121,8 @@ local function layoutGeometry(root)
     end)
     local pp = { l = 0, t = 0, r = 0, b = 0 }
     pcall(function()
-        local page = root:GetOuter():GetOuter()            -- WidgetTree -> its UserWidget (our page in the switcher)
+        local tree = U.ok(root) and root:GetOuter() or nil                -- null GetOuter = native AV
+        local page = U.ok(tree) and tree:GetOuter() or nil              -- WidgetTree -> its UserWidget (our page)
         if U.ok(page) then pp = padOf(page) end
     end)
     local _, vh = viewportSu()
@@ -1393,7 +1395,7 @@ function T.isFocused(w, p1)
     local h = false
     if type(ui.hovered) == "function" then h = ui.hovered(w) == true
     else
-        local ok, v = pcall(function() return w:IsHovered() end)
+        local ok, v = pcall(U.callMethod, w, "IsHovered")
         h = ok and v == true
     end
     if h and not hoverSeen then
@@ -1691,7 +1693,9 @@ function T.commandRow(ctx, cv, geo, defs)
         local c = { kind = "cmdrow", gen = R.gen, btn = {}, order = {}, forced = nil, showGen = R.showGen }
         local painted = opt("UiHeroPill", "backer") == "painted"
         for _, d in ipairs(type(defs) == "table" and defs or {}) do
-            local slot = d.id and F.slots[d.id]
+            -- d.rect {x, y, w, h} (screen su; y is replaced by the row's y): a pill wider than its slot (GP page:
+            -- "START GRAND PRIX" overflowed the 600-su start slot into BACK, live 2026-10-15)
+            local slot = (type(d.rect) == "table" and d.rect[3] and d.rect) or (d.id and F.slots[d.id])
             if not slot then
                 U.logOnce("theme.cmd?" .. tostring(d.id), TAG, "command row: no slot for id '%s' (back | start | save)",
                     tostring(d.id))
@@ -1810,6 +1814,11 @@ function T.commandRow(ctx, cv, geo, defs)
             return want, foc, hov
         end)
         c.widget = function(id) local b = c.btn[id]; return b and b.ghost or nil end
+        -- couch-fix59 (AUTO-145e): a button's label (an armed press-twice confirmation shows it on the row)
+        c.label = guard("cmd.label", function(id, text)
+            local b = c.btn[id]
+            if b and b.label and b.text ~= text then b.text = text; T.set(b.label, { text = text }) end
+        end)
         c.rect = function(id) local b = c.btn[id]; return b and b.rect or nil end
         for _, id in ipairs(c.order) do paint(c.btn[id], "idle") end
         U.log(TAG, "command row: %s at y %d (%s pills, V-FIN-16)", table.concat(c.order, ", "), rnd(cy),
@@ -1840,6 +1849,47 @@ local function splitRuns(s)
     end
     if pos <= #s then runs[#runs + 1] = { t = s:sub(pos) } end
     return runs
+end
+
+-- couch-fix46 (live round 1 AUTO-121, shot 145922-a16-armed: "DELETES THE COUCH CAMPAIGN SAVE AND EVERY GUEST'S
+-- PROGRESS: PRESS (A) AGAIN TO DELETE" ran under the Select / Settings / Back bar, its end unreadable): a text with a
+-- pad glyph had NO wrap (only a glyph-less text wrapped at F.wrap), so one long line from the screen's left edge. Now
+-- the first text run wraps at what the line has left after the glyph(s) and the text after them; two lines when it
+-- does. Pure: slots = the render's text / glyph slots, wrap = F.wrap, width(text) -> su. -> first run's wrap width
+-- (0 = none), two lines?
+T.PILL_GLYPH_W = 64                                         -- a 48-su glyph + its 8-su paddings
+function T.pillLayout(slots, wrap, width)
+    local multi = slots[2] ~= nil or slots[4] ~= nil
+    local w1 = (slots[1] and slots[1] ~= "") and width(slots[1]) or 0
+    if not multi then return wrap, w1 > wrap end
+    local rest = 0
+    for i = 2, 5 do
+        local x = slots[i]
+        if x ~= nil and x ~= "" then rest = rest + ((i % 2 == 0) and T.PILL_GLYPH_W or width(x)) end
+    end
+    if w1 + rest <= wrap then return 0, false end
+    return math.max(600, wrap - rest), true
+end
+
+-- couch-fix59 (AUTO-145c, live round 4 shots r4-113 / r4-114: "PADS STAY ON UNTIL THE GAME / RESTARTS. NOT FOR ONLINE
+-- PLAY: (A) AGAIN / PRESS"): the pill is ONE HBox (text / glyph / text ...), vertically centred. When the first text run
+-- wraps, the glyph and the text after it sit beside the wrapped BLOCK, mid-height: the words before the glyph that wrap
+-- to the last line are read after it ("(A) AGAIN PRESS"), in every locale and for every armed prompt. Pure: the pill's
+-- slots for a text -> slots, first run's wrap width (0 = none), two lines?. A glyph text that fits on one line keeps its
+-- glyph slots; one that needs two lines is ONE text run in reading order with its "(A)" tokens as written.
+function T.pillSlots(text, wrap, width)
+    local slots, si = {}, 1
+    for _, r in ipairs(splitRuns(text)) do
+        if r.t then slots[si] = (slots[si] or "") .. r.t
+        elseif si < 5 then slots[si + 1] = r.g; si = si + 2
+        else slots[5] = (slots[5] or "") .. r.raw end
+    end
+    local wrap1, two = T.pillLayout(slots, wrap, width)
+    if two and (slots[2] ~= nil or slots[4] ~= nil) then
+        local plain = { text }
+        return plain, wrap, width(text) > wrap
+    end
+    return slots, wrap1, two
 end
 
 function T.statusPill(ctx, cv, geo)
@@ -1923,14 +1973,10 @@ function T.statusPill(ctx, cv, geo)
             for i = 1, F.capsules do
                 T.set(p.caps[i], { colour = T.hex(string.format("#%02X%02X%02X", caps[i], caps[i], caps[i])) })
             end
-            -- slots text / glyph / text / glyph / text; a third token stays text "(A)" in the last slot
-            local slots, si = {}, 1
-            for _, r in ipairs(splitRuns(e.text)) do
-                if r.t then slots[si] = (slots[si] or "") .. r.t
-                elseif si < 5 then slots[si + 1] = r.g; si = si + 2
-                else slots[5] = (slots[5] or "") .. r.raw end
-            end
-            local multi = slots[2] ~= nil or slots[4] ~= nil
+            -- slots text / glyph / text / glyph / text; a third token stays text "(A)" in the last slot; a glyph text
+            -- that needs two lines is one text run (AUTO-145c: the reading order)
+            local slots, wrap1, twoLines = T.pillSlots(e.text, F.wrap,
+                function(t) return T.textWidth(t, ROLE.statusText) end)
             -- a message that starts with a glyph: the glyph keeps the capsules' 42-su gap (the empty text run collapses)
             local gl = (slots[1] == nil or slots[1] == "") and 42 or 8
             if p.c_gl ~= gl and U.ok(p.runSlots[2]) and pcall(function() p.runSlots[2]:SetPadding(pad(gl, 0, 8, 0)) end) then
@@ -1941,7 +1987,7 @@ function T.statusPill(ctx, cv, geo)
                 if i % 2 == 1 then
                     local s = slots[i]
                     T.set(el, { text = s or "", colour = ink, visible = s ~= nil and s ~= "" })
-                    if i == 1 then T.set(el, { wrapW = multi and 0 or F.wrap }) end
+                    if i == 1 then T.set(el, { wrapW = wrap1 }) end
                 else
                     local g = slots[i] and T.glyph(slots[i]) or nil
                     if g then T.set(el, { tex = g, colour = ink, visible = true }) else T.set(el, { visible = false }) end
@@ -1954,7 +2000,7 @@ function T.statusPill(ctx, cv, geo)
                 else T.set(p.pips[i], { tex = v and TEX.CircleFill or TEX.CircleFrame, visible = true }) end
             end
             -- 2 lines past 1700 su: a 168-tall pill keeps half-height corners
-            local h = (not multi and T.textWidth(e.text, ROLE.statusText) > F.wrap) and F.h2 or F.h
+            local h = twoLines and F.h2 or F.h
             brushSize(p.bg, h, h)
             T.set(ov, { visible = true })
             if not p.logged then
@@ -2086,6 +2132,31 @@ end
 -- reason; false = unlocked), dim (title opacity), scrim (a colour: the band behind the title, see below; false = none),
 -- z, geo}. p.set takes the same fields (+ art, ax, ay, zoom). p.cv is the
 -- poster's own canvas (poster-local su) for extra texts (event cards).
+-- couch-fix59 (AUTO-145c, live round 4 shot r4-113: ADD PLAYERS' kicker ran off the 425-tall tile's top and its
+-- "Press again to confirm" badge (top-right, y 24-90) sat on the 2-line title): the estimated top (poster-local su) of
+-- the bottom-left text stack [kicker / title / desc] a focused poster of size w x h shows for o = {kicker, title,
+-- titleSize, desc}. Line heights from the roles' em (size x 4/3): Moki titles x lineH x 1.1, Overpass x 1.25 (the shot:
+-- the 2-line title 134 su).
+function T.posterStackTop(w, h, o)
+    local wrapW = math.max(1, w - 148)
+    local function lines(text, r, size)
+        local n = 0
+        for part in (tostring(text) .. "\n"):gmatch("([^\n]*)\n") do
+            n = n + math.max(1, math.ceil(T.textWidth(part, r, size) / wrapW))
+        end
+        return n
+    end
+    local function em(r, size) r = roleOf(r); return (tonumber(size) or r.size) * 4 / 3 end
+    local hgt = 64
+    if o.kicker ~= nil and tostring(o.kicker) ~= "" then hgt = hgt + lines(o.kicker, "posterKicker") * em("posterKicker") * 1.25 + 18 end
+    if o.title ~= nil and tostring(o.title) ~= "" then
+        local tr = roleOf("posterTitle")
+        hgt = hgt + lines(o.title, tr, o.titleSize) * em(tr, o.titleSize) * (tr.lineH or 1) * 1.1
+    end
+    if o.desc ~= nil and tostring(o.desc) ~= "" then hgt = hgt + 16 + lines(o.desc, "posterDesc") * em("posterDesc") * 1.25 end
+    return h - hgt
+end
+
 function T.poster(ctx, cv, rect, opts)
     opts = opts or {}
     return build("poster", function()
@@ -2535,7 +2606,76 @@ function T.forceInputMode(mode)
 end
 
 ---------------------------------------------------------------------------------------------------- life cycle
+---------------------------------------------------------------------------------------------------- texture pins (#23)
+-- Live playtest 2026-10-17 #23 (stutter on the FREE MODE / GRAND PRIX pages): every view switch loaded its art
+-- synchronously (5 "Asset loaded" right before "[gppage] view setup": the race thumbnails and the preview poster), and an
+-- art that left its last image (a thumbnail stepped away, the preview's previous race) could be collected and loaded
+-- again on the next visit. A page now hands its art list to T.preload once: one texture per cfg.UiPreloadEveryMs is
+-- loaded in the background (only while no visible texture waits in the queue) onto a HIDDEN image of the page's pin
+-- canvas (T.pinHost), which keeps a hard reference for the page's life (UImage brush resource). Navigation then finds
+-- every texture in memory (texNow: StaticFindObject, no LoadAsset). The pins die with the page (T.forget).
+local PIN = { ctx = nil, cv = nil, els = {}, n = 0, want = {}, wanted = {}, nextMs = 0, made = 0 }
+
+-- the canvas the hidden pin images go to (a page canvas that lives as long as the page; collapsed is fine)
+function T.pinHost(ctx, cv)
+    if PIN.cv ~= cv then PIN.els, PIN.n, PIN.want, PIN.wanted = {}, 0, {}, {} end
+    PIN.ctx, PIN.cv = ctx, cv
+end
+
+-- queue paths for the background preload (each pinned once; order kept: the likely first views first)
+function T.preload(paths)
+    if opt("UiPreload", true) == false then return 0 end
+    local n = 0
+    for _, p in ipairs(paths or {}) do
+        if type(p) == "string" and p ~= "" and not PIN.els[p] and not PIN.wanted[p] and not Q.missing[p] then
+            PIN.wanted[p] = true
+            PIN.want[#PIN.want + 1] = p
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- the path is held by a pin image (its texture cannot be collected while the page lives)
+function T.pinned(path)
+    local e = PIN.els[path]
+    return e ~= nil and e ~= false and e.c ~= nil and e.c.tex == path
+end
+
+function T.pinStatus()
+    return { pinned = PIN.n, queued = #PIN.want, made = PIN.made }
+end
+
+-- one background preload step (FAST, the GP page's tick): -> true when it pinned / started one texture
+function T.preloadTick(now)
+    if not (PIN.cv and #PIN.want > 0) then return false end
+    if St.launchHold() or St.phase ~= "FRONTEND" then return false end
+    -- the pin canvas went with its page (live 2026-10-17 18:44:33: the COUCH CAMPAIGN page closed, the next preload
+    -- step logged "image not built: canvas invalid" with a stack): the queue belongs to that page, dropped quietly
+    if not U.ok(PIN.cv) then
+        U.dbg(TAG, "preload: the pin canvas is gone (%d texture(s) still queued): queue dropped", #PIN.want)
+        PIN.ctx, PIN.cv, PIN.els, PIN.n, PIN.want, PIN.wanted = nil, nil, {}, 0, {}, {}
+        return false
+    end
+    now = tonumber(now) or nowMs()
+    if now < PIN.nextMs then return false end
+    if #Q.hi + #Q.lo > 0 then return false end            -- the visible page's own textures first
+    PIN.nextMs = now + max(16, num("UiPreloadEveryMs", 150))
+    while #PIN.want > 0 do
+        local path = table.remove(PIN.want, 1)
+        PIN.wanted[path] = nil
+        if not PIN.els[path] and not Q.missing[path] then
+            local ok, e = pcall(T.image, PIN.ctx, PIN.cv, { tex = path, visible = false, rect = { 0, 0, 8, 8 } })
+            PIN.els[path] = (ok and e) or false
+            if ok and e then PIN.n, PIN.made = PIN.n + 1, PIN.made + 1 end
+            return true
+        end
+    end
+    return false
+end
+
 function T.forget()
+    PIN.ctx, PIN.cv, PIN.els, PIN.n, PIN.want, PIN.wanted = nil, nil, {}, 0, {}, {}
     R.gen = R.gen + 1
     R.nEls, R.builders, R.ghosts = 0, {}, {}
     R.widgets = 0

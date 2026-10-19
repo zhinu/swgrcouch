@@ -125,6 +125,7 @@ local function bcall(obj, fn, ...)
 end
 
 local function isDefault(o)
+    if not U.ok(o) then return false end      -- GetFName on a null wrapper is a native AV
     local ok, v = pcall(function()
         local n = o:GetFName():ToString()
         if type(n) == "string" and n:sub(1, 9) == "Default__" then return true end
@@ -193,7 +194,7 @@ local function enforceEpicOff(now, force)
     S.epic.lastMs = now
     local found = false
     for _, p in ipairs(profiles(now)) do
-        local ok, v = pcall(function() return p.bUseEosLinking end)
+        local ok, v = pcall(U.getField, p, "bUseEosLinking")
         if ok and type(v) == "boolean" then
             found = true
             if S.epic.wasOn == nil then S.epic.wasOn = v end
@@ -201,7 +202,7 @@ local function enforceEpicOff(now, force)
                 local okW, e = pcall(function() p.bUseEosLinking = false end)
                 if okW then
                     S.epic.flips = S.epic.flips + 1
-                    local okN, name = pcall(function() return p:GetFullName() end)
+                    local okN, name = pcall(U.callMethod, p, "GetFullName")
                     note("epic", "profile bUseEosLinking true -> false (%s); no Epic login / overlay modal",
                         okN and tostring(name) or "?")
                 else
@@ -213,7 +214,7 @@ local function enforceEpicOff(now, force)
     -- settings mirror (GEngine.GameUserSettings = GfnUserSettingsPC): keep the in-game toggle consistent
     local gus = userSettingsObj()
     if gus then
-        local ok, v = pcall(function() return gus.bEnableEOSAccountLinking end)
+        local ok, v = pcall(U.getField, gus, "bEnableEOSAccountLinking")
         if ok and v == true then
             if pcall(function() gus.bEnableEOSAccountLinking = false end) then
                 S.epic.settingsFlips = S.epic.settingsFlips + 1
@@ -233,7 +234,7 @@ local function stopIdentMovies()
     if not opt("FastBootStopIdentMovies") then return end
     for _, w in ipairs(instances(W.Title)) do
         for _, prop in ipairs({ "FirstMovieMediaPlayer", "SecondMovieMediaPlayer" }) do
-            local ok, mp = pcall(function() return w[prop] end)
+            local ok, mp = pcall(U.getField, w, prop)
             -- UMediaPlayer::Close(): no OnEndReached, so the Fuse ident cannot chain into the brand ident [V-bc 2388/3482]
             if ok and U.ok(mp) then
                 local okC, e = call(mp, "Close")
@@ -297,7 +298,7 @@ end
 local function continueLike(gm, w, allowMenuFallback)
     local sm = nil
     if w then
-        local ok, v = pcall(function() return w.OwningStateMachine end)   -- UFuseScreenWidget +0x5d0 [reflect]
+        local ok, v = pcall(U.getField, w, "OwningStateMachine")   -- UFuseScreenWidget +0x5d0 [reflect]
         if ok and U.ok(v) then sm = v end
     end
     if sm then
@@ -345,7 +346,7 @@ local function stepLink(gm, now)
     if not up then S.linkSeenMs = nil; return end
     S.linkSeenMs = S.linkSeenMs or now
     if now - S.linkSeenMs < opt("FastBootSettleMs") or not w then return end
-    local okS, sm = pcall(function() return w.OwningStateMachine end)
+    local okS, sm = pcall(U.getField, w, "OwningStateMachine")
     if not okS or not U.ok(sm) then return end
     local ok, e = call(sm, "ContinueToNextState", nil)
     S.linkDone = true

@@ -67,19 +67,33 @@ local function trace(kind, what)
     end
 end
 
+U.trace = trace
+
+-- couch-racegc: no table.pack per call (U.try / U.tryEvery wrap every module tick: ~55 calls per 33 ms FAST run, each
+-- packing its results was ~100 bytes of garbage per call); the results stay on the stack through a vararg tail.
+local function tryDone(tag, ok, ...)
+    if ok then return ok, ... end
+    U.err(tag, "%s", tostr((...)))
+    return false
+end
 function U.try(tag, fn, ...)
     trace("try", tag)
     if type(fn) ~= "function" then
         U.err(tag, "U.try: not a function (%s)", type(fn))
         return false
     end
-    local r = table.pack(xpcall(fn, debug.traceback, ...))
-    if not r[1] then
-        U.err(tag, "%s", tostr(r[2]))
-        return false
-    end
-    return table.unpack(r, 1, r.n)
+    return tryDone(tag, xpcall(fn, debug.traceback, ...))
 end
+
+--- pcall(o:name(...)) without a closure (couch-racegc: `pcall(callMethod, o, "F")` allocates a closure and an
+--- upvalue per call, ~80 bytes; a race tick made thousands). The index and the call both run inside the pcall.
+local function callMethod(o, name, ...) return o[name](o, ...) end
+U.callMethod = callMethod
+function U.pcallM(o, name, ...) return pcall(callMethod, o, name, ...) end
+--- pcall(o[k]) without a closure: ok, value
+local function getField(o, k) return o[k] end
+U.getField = getField
+function U.pcallGet(o, k) return pcall(getField, o, k) end
 
 --- U.try for code that runs on every FAST/MAIN tick: the first error of `key` is logged with its traceback, later
 --- ones at most one line per `ms` (default cfg.LoopErrorLogEveryMs) with the count suppressed in between. A
@@ -92,8 +106,11 @@ function U.tryEvery(key, ms, tag, fn, ...)
         U.logEvery("tryEvery!" .. tostr(key), 60000, tag, "ERROR U.tryEvery(%s): not a function (%s)", tostr(key), type(fn))
         return false
     end
-    local r = table.pack(xpcall(fn, debug.traceback, ...))
-    if r[1] then return table.unpack(r, 1, r.n) end
+    return U.tryEveryDone(key, ms, tag, xpcall(fn, debug.traceback, ...))
+end
+function U.tryEveryDone(key, ms, tag, ok, ...)
+    if ok then return ok, ... end
+    local r = { ok, ... }
     local now = St.nowMs()
     local st = tryEveryState[key]
     if not st then st = { lastMs = nil, suppressed = 0, total = 0 }; tryEveryState[key] = st end
@@ -120,9 +137,10 @@ end
 
 ---------------------------------------------------------------------------------------------------- validity
 --- true when o is a live UObject wrapper (UE4SS IsValid: non-null, in the object map, reachable [API§7]).
+local function isValidOf(o) return o:IsValid() end
 function U.ok(o)
     if o == nil or type(o) ~= "userdata" then return false end
-    local ok, v = pcall(function() return o:IsValid() end)
+    local ok, v = pcall(isValidOf, o)
     return ok and v == true
 end
 
@@ -149,7 +167,7 @@ function U.kslIsValidRaw(o)
     -- Built-in CallFunction (LuaUObject.hpp:647 -> call_ufunction_from_lua): self = calling context,
     -- first arg = the UFunction, then exactly the declared params (1) [API§9].
     -- VERIFY(V-CORE-05): returns a Lua boolean and does not throw.
-    return pcall(function() return ksl:CallFunction(KSL_ISVALID, o) end)
+    return pcall(callMethod, ksl, "CallFunction", KSL_ISVALID, o)
 end
 
 --- U.ok plus, when cfg.UseKslIsValid, KismetSystemLibrary::IsValid (catches Garbage-marked actors).
@@ -170,9 +188,18 @@ end
 --- Address of a UObject as an integer table key; 0 when invalid.
 function U.key(o)
     if not U.ok(o) then return 0 end
-    local ok, a = pcall(function() return o:GetAddress() end)
+    local ok, a = pcall(callMethod, o, "GetAddress")
     if ok and type(a) == "number" then return a end
     return 0
+end
+
+-- couch-fix59 (AUTO-145e, live round 4: END GRAND PRIX / START with un-joined pads took the second A only within
+-- ~1-2 s; a second A 3 s later re-armed the prompt and looked like a dead button): every press-twice confirmation of
+-- the mod uses this one window (cfg.ConfirmWindowMs, default 5 s), measured on St.nowMs (the real clock).
+function U.confirmMs()
+    local v = tonumber(cfg.ConfirmWindowMs)
+    if not v or v < 1000 then v = 5000 end
+    return v
 end
 
 --- Both valid and the same object (UE4SS `==` compares pointers [API§7]).
@@ -180,13 +207,90 @@ function U.same(a, b)
     return U.ok(a) and U.ok(b) and a == b
 end
 
+-- NULL-UNSAFE BUILT-INS. A UE4SS wrapper whose UObject pointer is NULL is a truthy userdata: a null object property
+-- (pc.Pawn with no car), a UFunction returning no object, a FindFirstOf / StaticFindObject miss. Its property reads
+-- (another null wrapper) and UFunction calls (a Lua error) are safe, but GetClass ([obj+0x10], UE4SS.dll+0x2ace40:
+-- the "UE4SS.dll+0x2ace67 reading null+0x10" crashes of 2026-10-14), GetFName (+0x18), GetOuter (+0x20),
+-- IsClass/IsAnyClass, AActor:GetLevel and the UStruct/UClass walkers dereference it with no null check: a native
+-- access violation that pcall does NOT catch. Use these helpers (tools/lint_uobject_guards.lua enforces it).
+
+-- FINDING #31 (live 2026-10-17 19:05:35 UTC, crash_2026_10_17_19_05_35.9674787.dmp): AV in UE4SS.dll+0x2ace27 reading
+-- 0x18 = the Lua UObject:GetFName lambda (UE4SS.dll+0x2ace00, registered as "GetFName" next to GetClass +0x2ace40) on a
+-- NULL wrapper. Every direct :GetFName() of the mod was already behind U.ok on its receiver; the one unguarded receiver
+-- was the CLASS in o:GetClass():GetFName() (the lint exempted it: "the class of a live object is never null"). U.ok only
+-- proves the wrapper's pointer is in UE4SS's live-object set: a widget whose memory is being torn down / recycled can
+-- pass it with a NULL ClassPrivate, and GetClass then hands out a NULL wrapper. The class is now U.ok'ed too, here and
+-- in U.clsStr (every former GetClass():GetFName() chain of the mod).
+--- Class short name of o as a string; raises a Lua error (never a native AV) when o or its class is nil / null / dead.
+function U.clsStr(o)
+    if not U.ok(o) then error("invalid object", 2) end
+    local c = o:GetClass()
+    if not U.ok(c) then error("object without a valid class", 2) end
+    local s = c:GetFName():ToString()
+    if type(s) ~= "string" then error("class name unreadable", 2) end
+    return s
+end
+
+-- FINDING #42 (live 2026-10-17 22:07:44 UTC, crash_2026_10_17_22_07_44.2801614.dmp): ACCESS VIOLATION in
+-- SWGR-Win64-Shipping.exe+0x9338e7 (FWidgetAnimationState init under execPlayAnimation +0x931c12, called from UE4SS's
+-- UFunction call +0x49f7a5 inside a Lua callback), InAnimation = 0x814600010000000f. couchflow's COLLECT played
+-- w.Anim_Out on WBP_PostRace_Rewards_CreditsBreakdown_Presentation_C, which has no such animation (decoded: Anim_In,
+-- Anim_ContinueBtn). A missing member is NOT nil in UE4SS: it is a "TrivialObject" placeholder (special_invalid_ptr,
+-- IsValid false), and push_objectproperty takes any userdata as an object parameter and writes its bytes as the
+-- UObject*. pcall cannot catch the AV. Every widget animation of the mod goes through these two helpers.
+--- The widget animation `name` of w when it really exists (a live UWidgetAnimation), else nil.
+function U.anim(w, name)
+    if not U.ok(w) or type(name) ~= "string" then return nil end
+    local a = nil
+    pcall(function() a = w[name] end)
+    if U.ok(a) then return a end                 -- U.ok: the TrivialObject placeholder's IsValid is false
+    return nil
+end
+--- w:PlayAnimation(w[name], start, 1 loop, mode, 1.0, false) only when that animation exists. -> true when played
+function U.playAnim(w, name, mode, start)
+    local a = U.anim(w, name)
+    if not a then return false end
+    local ok = pcall(function() w:PlayAnimation(a, start or 0, 1, mode or 0, 1, false) end)
+    return ok
+end
+
+--- Class short name ("WBP_Foo_C") of a live object; "" when o (or its class) is nil / null / dead.
+function U.className(o)
+    if not U.ok(o) then return "" end
+    local ok, s = pcall(U.clsStr, o)
+    return (ok and type(s) == "string") and s or ""
+end
+
+--- Object short name of a live object; "" when o is nil / null / dead.
+function U.objName(o)
+    if not U.ok(o) then return "" end
+    local ok, s = pcall(function() return o:GetFName():ToString() end)
+    return (ok and type(s) == "string") and s or ""
+end
+
+--- Class object of a live object; an invalid object when o is nil / null / dead (U.pathOf / U.ok handle it).
+function U.classOf(o)
+    if not U.ok(o) then return CreateInvalidObject() end
+    local ok, c = pcall(callMethod, o, "GetClass")
+    if ok and c ~= nil then return c end
+    return CreateInvalidObject()
+end
+
+--- Outer of a live object; an invalid object when o is nil / null / dead (chains stop there: U.ok is false).
+function U.outerOf(o)
+    if not U.ok(o) then return CreateInvalidObject() end
+    local ok, x = pcall(callMethod, o, "GetOuter")
+    if ok and x ~= nil then return x end
+    return CreateInvalidObject()
+end
+
 ---------------------------------------------------------------------------------------------------- values
 --- Unwrap a RemoteUnrealParam / LocalUnrealParam (hook params, TArray-return elements); other values pass.
 local function unwrapParam(v)
     if type(v) ~= "userdata" then return v end
-    local ok, t = pcall(function() return v:type() end)
+    local ok, t = pcall(callMethod, v, "type")
     if ok and (t == "RemoteUnrealParam" or t == "LocalUnrealParam") then
-        local ok2, inner = pcall(function() return v:get() end)
+        local ok2, inner = pcall(callMethod, v, "get")
         if ok2 then return inner end
     end
     return v
@@ -201,7 +305,7 @@ function U.str(v)
     if tv ~= "userdata" then return tostr(v) end
     v = unwrapParam(v)
     if type(v) == "string" then return v end
-    local ok, s = pcall(function() return v:ToString() end)
+    local ok, s = pcall(callMethod, v, "ToString")
     if ok and type(s) == "string" then return s end
     return tostr(v)
 end
@@ -234,10 +338,10 @@ function U.arrayToTable(arr)
         return out
     end
     if type(arr) ~= "userdata" then return out end
-    local ok, n = pcall(function() return arr:GetArrayNum() end)
+    local ok, n = pcall(callMethod, arr, "GetArrayNum")
     if not ok or type(n) ~= "number" then return out end
     for i = 1, n do
-        local okE, v = pcall(function() return arr[i] end)
+        local okE, v = pcall(getField, arr, i)
         if okE then out[#out + 1] = unwrapParam(v) end
     end
     return out
@@ -247,7 +351,7 @@ end
 function U.arrayCount(arr)
     if type(arr) == "table" then return #arr end
     if type(arr) ~= "userdata" then return 0 end
-    local ok, n = pcall(function() return arr:GetArrayNum() end)
+    local ok, n = pcall(callMethod, arr, "GetArrayNum")
     if ok and type(n) == "number" then return n end
     return 0
 end
@@ -255,7 +359,7 @@ end
 --- Object path without the class prefix: GetFullName() = "<Class> <path>" [API§7]. "" when invalid.
 function U.pathOf(obj)
     if not U.ok(obj) then return "" end
-    local ok, full = pcall(function() return obj:GetFullName() end)
+    local ok, full = pcall(callMethod, obj, "GetFullName")
     if not ok or type(full) ~= "string" then return "" end
     local sp = sfind(full, " ", 1, true)
     if sp then return ssub(full, sp + 1) end
@@ -271,6 +375,31 @@ end
 
 ---------------------------------------------------------------------------------------------------- classes / objects
 local classCache, objCache, cdoCache = {}, {}, {}
+-- A cached UObject address can be REUSED: an unloaded BP class / asset is garbage-collected and another object lands
+-- at the same address, still "valid" for U.ok (live 2026-10-18, tester #3: U.class(rewards layout) returned
+-- WBP_Hud_EventLapCounter_C after a few races -> the guest's reward copy was created from the HUD class, "attempt to
+-- call a TrivialObject value (method 'SetVM')", list fallback twice). A cache hit is re-checked by NAME (the path's last
+-- segment) once per world and at most every CACHE_NAME_MS, so hot per-tick callers pay one GetFName rarely.
+local CACHE_NAME_MS = 2000
+local cacheChecked = {}            -- [path] = { gen = world, at = ms }
+local function stillNamed(path, o)
+    if not U.ok(o) then return false end
+    local c = cacheChecked[path]
+    local now = St.nowMs()
+    if c and c.gen == St.worldGen and now - c.at < CACHE_NAME_MS then return true end
+    local want = string.match(path, "[.:]([^.:/]+)$")
+    if want then
+        local ok, nm = pcall(function() return o:GetFName():ToString() end)
+        if ok and type(nm) == "string" and nm ~= want then
+            cacheChecked[path] = nil
+            U.logOnce("stale:" .. path, "util", "cache: %s now points at %s (address reused after a GC): looked up again",
+                path, nm)
+            return false
+        end
+    end
+    cacheChecked[path] = { gen = St.worldGen, at = now }
+    return true
+end
 local loadTried = {}            -- path -> St.nowMs() of the last LoadAsset attempt (throttle)
 local LOAD_RETRY_MS = 5000
 
@@ -295,7 +424,7 @@ local findMissWorld, findMissPhase = nil, nil
 local FIND_MISS_MS = 10000
 local function findObjectCached(path, missTtl)
     local o = findCache[path]
-    if o ~= nil and U.ok(o) then return o end
+    if o ~= nil and U.ok(o) and stillNamed(path, o) then return o end
     findCache[path] = nil
     if findMissWorld ~= St.worldGen or findMissPhase ~= St.phase then
         findMissWorld, findMissPhase, findMissAt = St.worldGen, St.phase, {}
@@ -309,6 +438,43 @@ local function findObjectCached(path, missTtl)
         findMissAt[path] = St.nowMs()
     end
     return o
+end
+
+---------------------------------------------------------------------------------------------------- hot UFunction calls
+-- couch-racegc: `obj:Fn(...)` makes UE4SS build a NEW UFunction wrapper (a finalizable userdata, ~265 bytes) at every
+-- method lookup; the race ticks made thousands a second (IsInputKeyDown alone: ~8 per FAST tick in pause.lua).
+--- pcall(o:<name>(...)) without a new UFunction wrapper per call: ok, results...
+-- LIVE 2026-10-16 (UE4SS 3f4037d2, couch-racegc test launch): the built-in CallFunction REFUSES a UFunction found by
+-- StaticFindObject ("[UFunction::call_ufunction_from_lua] Tried calling function without both UFunction and calling
+-- context": the found object is a plain UObject wrapper, not a LuaType::UFunction - the same failure that makes
+-- KismetSystemLibrary::IsValid "unusable" every session). Instead the wrapper UE4SS returns for `o.<name>` is kept,
+-- per object WRAPPER (weak keys: the entry goes with the wrapper), and called again: a UFunction wrapper carries the
+-- object it was looked up on as its calling context (call_ufunction_from_lua takes func + base from it and discards
+-- the self argument), so `f(o, ...)` IS `o:<name>(...)`. `path` is kept for the callers (documentation only).
+local memberCache = setmetatable({}, { __mode = "k" })
+local memberHits = { hit = 0, miss = 0 }
+function U.pcallFn(o, path, name, ...)
+    local t = memberCache[o]
+    local f = t and t[name]
+    if f == nil then
+        if type(o) ~= "userdata" then return pcall(callMethod, o, name, ...) end
+        local ok, m = pcall(getField, o, name)
+        if not ok or type(m) ~= "userdata" then return pcall(callMethod, o, name, ...) end
+        if not t then t = {}; memberCache[o] = t end
+        t[name], f = m, m
+        memberHits.miss = memberHits.miss + 1
+    else
+        memberHits.hit = memberHits.hit + 1
+    end
+    return pcall(f, o, ...)
+end
+function U.memberCacheStats() return memberHits.hit, memberHits.miss end
+
+local KEYDOWN_FN = "/Script/Engine.PlayerController:IsInputKeyDown"
+--- PlayerController:IsInputKeyDown(FKey) -> true / false (false on any error); key = {KeyName = FName}
+function U.keyDown(pc, key)
+    local ok, v = U.pcallFn(pc, KEYDOWN_FN, "IsInputKeyDown", key)
+    return ok and v == true
 end
 
 --- Cached find-only lookup (never LoadAsset) for per-tick polls; nil while the object is not in memory.
@@ -333,7 +499,12 @@ local function tryLoad(assetPath)
     -- logged once per path even with Debug off: the boot log answers V-CORE-12
     U.logOnce("load:" .. assetPath, "util", "LoadAsset(%s): found=%s loaded=%s",
         assetPath, tostr(found), tostr(loaded))
-    return found == true
+    -- the loaded object too: StaticFindObject matches the package path CASE-SENSITIVELY, and the asset registry (the
+    -- pak listing) does not always spell it like the package (live 2026-10-18, tester #3: ".../Corgi/LOOP_B/..." loads
+    -- ShakedownEventDef ".../Corgi/Loop_B/...", and StaticFindObject("...LOOP_B...") stays nil after the load)
+    local lo = nil
+    if found == true and obj ~= nil and U.ok(obj) then lo = obj end
+    return found == true, lo
 end
 
 --- Resolve a C.CLASS / C.BP key or a full object path to a path string (nil if unknown).
@@ -354,7 +525,7 @@ function U.class(keyOrPath)
         return CreateInvalidObject()
     end
     local c = classCache[path]
-    if c and U.ok(c) then return c end
+    if c and U.ok(c) and stillNamed(path, c) then return c end
     classCache[path] = nil
     c = findObject(path)
     if not c and ssub(path, 1, 6) == "/Game/" and ssub(path, -2) == "_C" then
@@ -386,10 +557,13 @@ function U.obj(keyOrPath)
     local path = (type(keyOrPath) == "string" and C.ASSET[keyOrPath]) or keyOrPath
     if type(path) ~= "string" or path == "" then return CreateInvalidObject() end
     local o = objCache[path]
-    if o and U.ok(o) then return o end
+    if o and U.ok(o) and stillNamed(path, o) then return o end
     objCache[path] = nil
     o = findObject(path)
-    if not o and tryLoad(path) then o = findObject(path) end
+    if not o then
+        local found, lo = tryLoad(path)
+        if found then o = findObject(path) or lo end
+    end
     if o then
         objCache[path] = o
         return o
@@ -418,11 +592,32 @@ function U.isA(o, keyOrPath)
     if not U.ok(o) then return false end
     local cls = U.class(keyOrPath)
     if not U.ok(cls) then return false end
-    local ok, v = pcall(function() return o:IsA(cls) end)
+    local ok, v = pcall(callMethod, o, "IsA", cls)
     return ok and v == true
 end
 
 function U.isVehicle(pawn)        return U.isA(pawn, "VehiclePawn") end
+
+-- couch-racegc: a PC's car (pc.Pawn when it is a VehiclePawn, else nil), read once per loop run (St.loopSeq) and PC:
+-- debugai, viewguard (twice), inputfix each read pc.Pawn every FAST tick (a new wrapper per read). Outside a loop run
+-- (hooks, one-shots) it is read fresh. A cached car is U.ok-checked at every hit.
+local carRun = { seq = nil, byPc = {} }
+function U.carOf(pc)
+    if not U.ok(pc) then return nil end
+    local seq = St.loopSeq
+    local k = U.key(pc)
+    if seq ~= nil and carRun.seq == seq then
+        local c = carRun.byPc[k]
+        if c == false then return nil end
+        if c ~= nil and U.ok(c) then return c end
+    elseif seq ~= nil then
+        carRun.seq, carRun.byPc = seq, {}
+    end
+    local ok, p = pcall(getField, pc, "Pawn")
+    local car = (ok and U.ok(p) and U.isVehicle(p)) and p or nil
+    if seq ~= nil then carRun.byPc[k] = car or false end
+    return car
+end
 function U.isPlayerController(o)  return U.isA(o, "PlayerController") end
 
 ---------------------------------------------------------------------------------------------------- world
@@ -449,18 +644,78 @@ end
 
 --- Local players in GameInstance.LocalPlayers order: array of {lp, pc, ctrlId, index}.
 --- pc may be an invalid object (LocalPlayer without controller); callers test U.ok(e.pc).
+-- PER LOOP RUN CACHE (couch-racefast, live 2026-10-15: one U.localPlayers() allocates ~2.5 KB of UE4SS wrappers -
+-- the GameInstance array, each LocalPlayer, its PlayerController and ControllerId - and the FAST loop's race modules
+-- call it dozens of times per 33 ms tick: a large share of the ~4.5 MB/s of garbage whose GC cycles hitched random
+-- module ticks 10-20 ms). Inside ONE sched.every run (St.loopSeq set by sched's loop wrapper) the list is built once;
+-- each caller gets its own array copy (the entries are shared: read-only by convention). Outside a loop run (hooks,
+-- one-shots) and after a CreatePlayer / RemovePlayer (join.lua: U.localPlayersForget) or a "players" event it is
+-- rebuilt.
+-- couch-racegc: in RACING also kept ACROSS loop runs for LP_TTL_MS inside one world (the list only changes on a
+-- CreatePlayer / RemovePlayer / "players" / "world" / "phase" event, which forget it; couch.lua's pad-id swaps, which
+-- change ControllerId, never run in RACING): each build was ~5 wrappers, twice per FAST + MAIN tick.
+local lpCache = { seq = nil, list = nil, hits = 0, builds = 0, at = nil, world = nil }
+local LP_TTL_MS = 500
+function U.localPlayersForget() lpCache.seq, lpCache.list, lpCache.at = nil, nil, nil end
+function U.localPlayersStats() return { hits = lpCache.hits, builds = lpCache.builds } end
+local localPlayersUncached
 function U.localPlayers()
+    local seq = St.loopSeq
+    if seq ~= nil and lpCache.list and lpCache.seq ~= seq and lpCache.at and lpCache.world == St.worldGen
+        and St.phase == "RACING" and St.nowMs() - lpCache.at < LP_TTL_MS then
+        lpCache.seq = seq                                     -- still fresh: this loop run reuses it
+    end
+    if seq ~= nil and lpCache.seq == seq and lpCache.list then
+        lpCache.hits = lpCache.hits + 1
+        local out, l = {}, lpCache.list
+        for i = 1, #l do out[i] = l[i] end
+        return out
+    end
+    local out = localPlayersUncached()
+    lpCache.builds = lpCache.builds + 1
+    if seq ~= nil then
+        local keep = {}
+        for i = 1, #out do keep[i] = out[i] end
+        lpCache.seq, lpCache.list, lpCache.at, lpCache.world = seq, keep, St.nowMs(), St.worldGen
+    else
+        lpCache.seq, lpCache.list, lpCache.at = nil, nil, nil
+    end
+    return out
+end
+-- couch-fix40: the same list WITHOUT the per-caller copy, for callers that only read it (`for _, lp in
+-- ipairs(U.localPlayersRO())`, U.p1): never modify the returned array or its entries. A rebuild makes a new array, so
+-- an iteration in progress keeps the one it started with.
+function U.localPlayersRO()
+    local seq = St.loopSeq
+    if seq ~= nil and lpCache.list and lpCache.seq ~= seq and lpCache.at and lpCache.world == St.worldGen
+        and St.phase == "RACING" and St.nowMs() - lpCache.at < LP_TTL_MS then
+        lpCache.seq = seq
+    end
+    if seq ~= nil and lpCache.seq == seq and lpCache.list then
+        lpCache.hits = lpCache.hits + 1
+        return lpCache.list
+    end
+    local l = U.localPlayers()                          -- builds (and keeps, inside a loop run) the list
+    if seq ~= nil and lpCache.seq == seq and lpCache.list then return lpCache.list end
+    return l
+end
+pcall(function()
+    St.on("players", "util.lp", function() U.localPlayersForget() end)
+    St.on("world", "util.lp", function() U.localPlayersForget() end)
+    St.on("phase", "util.lp", function() U.localPlayersForget() end)
+end)
+localPlayersUncached = function()
     local out = {}
     local gi = U.gi()
     if not U.ok(gi) then return out end
-    local ok, lps = pcall(function() return gi.LocalPlayers end)   -- TArray<ULocalPlayer*>
+    local ok, lps = pcall(getField, gi, "LocalPlayers")            -- TArray<ULocalPlayer*>
     if not ok then return out end
     local n = U.arrayCount(lps)
     for i = 1, n do
-        local okE, lp = pcall(function() return lps[i] end)
+        local okE, lp = pcall(getField, lps, i)
         if okE and U.ok(lp) then
             local pc = lp.PlayerController                         -- UPlayer.PlayerController
-            local okId, cid = pcall(function() return lp.ControllerId end)   -- ULocalPlayer.ControllerId (Int)
+            local okId, cid = pcall(getField, lp, "ControllerId")          -- ULocalPlayer.ControllerId (Int)
             out[#out + 1] = { lp = lp, pc = pc, ctrlId = (okId and type(cid) == "number") and cid or (i - 1),
                               index = i }
         end
@@ -470,22 +725,83 @@ end
 
 --- P1 = the first local player's controller (ControllerId 0 by design).
 function U.p1()
-    local lps = U.localPlayers()
+    local lps = U.localPlayersRO()                      -- couch-fix40: read only, no copy
     if lps[1] and U.ok(lps[1].pc) then return lps[1].pc end
     return CreateInvalidObject()
 end
 
 --- Current UWorld: P1's world, else the GameInstance's world, else UEHelpers.GetWorld() (FindAllOf inside:
 --- at most once per 2 s).  VERIFY(V-CORE-04)
+-- couch-racegc: cached for ONE loop run (St.loopSeq, like U.localPlayers): a UWorld does not change inside a loop run,
+-- and the race modules asked for it many times per FAST tick (P1's controller + GetWorld = wrappers every time).
+-- In RACING it is also kept across loop runs of the same world (St.worldGen; "world" / "leaving" / "phase" forget it):
+-- no travel happens inside RACING (a travel first leaves the phase).
+local worldRun = { seq = nil, w = nil, gen = nil, gs = nil }
+local worldUncached
+local wsRun = { gen = nil, ws = nil }                -- U.worldSettings (couch-fix40)
+local function worldForget()
+    worldRun.seq, worldRun.w, worldRun.gen, worldRun.gs = nil, nil, nil, nil
+    wsRun.gen, wsRun.ws = nil, nil
+end
 function U.world()
+    local seq = St.loopSeq
+    local w = worldRun.w
+    if seq ~= nil and w ~= nil and (worldRun.seq == seq or (St.phase == "RACING" and worldRun.gen == St.worldGen))
+        and U.ok(w) then
+        worldRun.seq = seq
+        return w
+    end
+    w = worldUncached()
+    if seq ~= nil and U.ok(w) then
+        worldRun.seq, worldRun.w, worldRun.gen, worldRun.gs = seq, w, St.worldGen, nil
+    else
+        worldForget()
+    end
+    return w
+end
+--- couch-fix60 (AUTO-146): the CURRENT UWorld, never the RACING cross-run cache (a seamless travel switches the world
+--- without any hook; the old UWorld can stay IsValid until the GC purges it, so the cache kept handing it out). The
+--- fresh read seeds this loop run's cache: the U.world() calls after it in the same run reuse it.
+function U.worldFresh()
+    local w = worldUncached()
+    local seq = St.loopSeq
+    if seq ~= nil and U.ok(w) then
+        worldRun.seq, worldRun.w, worldRun.gen, worldRun.gs = seq, w, St.worldGen, nil
+    else
+        worldForget()
+    end
+    return w
+end
+-- couch-fix40: the persistent level's WorldSettings, kept per world (St.worldGen; U.ok-checked at every use): wreck.lua
+-- and crashcam.lua read U.world().PersistentLevel.WorldSettings every FAST tick (2 wrappers + a closure each). nil when
+-- unreadable. "world" / "leaving" / "phase" forget it (worldForget).
+function U.worldSettings()
+    local ws = wsRun.ws
+    if ws ~= nil and wsRun.gen == St.worldGen and U.ok(ws) then return ws end
+    wsRun.gen, wsRun.ws = St.worldGen, nil
+    local w = U.world()
+    if not U.ok(w) then return nil end
+    local okL, lvl = pcall(getField, w, "PersistentLevel")
+    if not okL or not U.ok(lvl) then return nil end
+    local okS, s = pcall(getField, lvl, "WorldSettings")
+    if not okS or not U.ok(s) then return nil end
+    wsRun.ws = s
+    return s
+end
+pcall(function()
+    St.on("world", "util.world", worldForget)
+    St.on("leaving", "util.world", worldForget)
+    St.on("phase", "util.world", worldForget)
+end)
+worldUncached = function()
     local p1 = U.p1()
     if U.ok(p1) then
-        local ok, w = pcall(function() return p1:GetWorld() end)
+        local ok, w = pcall(callMethod, p1, "GetWorld")
         if ok and U.ok(w) then return w end
     end
     local gi = U.gi()
     if U.ok(gi) then
-        local ok, w = pcall(function() return gi:GetWorld() end)
+        local ok, w = pcall(callMethod, gi, "GetWorld")
         if ok and U.ok(w) then return w end
     end
     local now = St.nowMs()
@@ -500,7 +816,11 @@ end
 function U.gs()
     local w = U.world()
     if not U.ok(w) then return CreateInvalidObject() end
-    return w.GameState                                           -- UWorld.GameState
+    -- couch-racegc: kept with the cached world (RACING, same world): one wrapper per read otherwise
+    if worldRun.w == w and worldRun.gs ~= nil and U.ok(worldRun.gs) then return worldRun.gs end
+    local gs = w.GameState                                       -- UWorld.GameState
+    if worldRun.w == w and U.ok(gs) then worldRun.gs = gs end
+    return gs
 end
 
 --- AuthorityGameMode (invalid on clients).
@@ -514,7 +834,7 @@ local function kslWorldBool(fnName)
     local w, ksl = U.world(), U.KSL()
     if not U.ok(w) or not U.ok(ksl) then return nil end
     -- KSL:IsServer(Object WorldContextObject)->Bool, KSL:IsStandalone(Object WorldContextObject)->Bool
-    local ok, v = pcall(function() return ksl[fnName](ksl, w) end)
+    local ok, v = pcall(callMethod, ksl, fnName, w)
     if ok and type(v) == "boolean" then return v end
     return nil
 end
@@ -534,7 +854,7 @@ end
 function U.levelName()
     local w, gs = U.world(), U.GS()
     if not U.ok(w) or not U.ok(gs) then return "" end
-    local ok, s = pcall(function() return gs:GetCurrentLevelName(w, true) end)
+    local ok, s = pcall(callMethod, gs, "GetCurrentLevelName", w, true)
     if ok then return U.str(s) end
     return ""
 end
@@ -590,7 +910,7 @@ function U.giSubsystem(classKey)
     if cfg.SubsystemLookup ~= "findfirst" then
         local sbl, cls = U.SBL(), U.class(path)
         if U.ok(sbl) and U.ok(cls) then
-            local ok, o = pcall(function() return sbl:GetGameInstanceSubsystem(gi, cls) end)
+            local ok, o = pcall(callMethod, sbl, "GetGameInstanceSubsystem", gi, cls)
             if ok and U.ok(o) then s = o end
             if not ok then U.logEvery("gisub!" .. path, 10000, "util", "GetGameInstanceSubsystem(%s) threw: %s", path, tostr(o)) end
         end
@@ -618,7 +938,7 @@ function U.worldSubsystem(classKey)
     bucket[path] = nil
     local sbl, cls = U.SBL(), U.class(path)
     if U.ok(sbl) and U.ok(cls) then
-        local ok, o = pcall(function() return sbl:GetWorldSubsystem(w, cls) end)
+        local ok, o = pcall(callMethod, sbl, "GetWorldSubsystem", w, cls)
         if ok and U.ok(o) then s = o end
     end
     if not s and cfg.SubsystemLookup == "findfirst" then s = subFindFirst(path) end
@@ -630,6 +950,8 @@ function U.worldSubsystem(classKey)
 end
 
 ---------------------------------------------------------------------------------------------------- CSM
+local CSM_ACTIVE_FN = "/Script/Griffin.CosmeticStateMachineManager:IsStateActiveByRef"   -- U.pcallFn (couch-racegc)
+U.CSM_ACTIVE_FN = CSM_ACTIVE_FN
 --- Is a cosmetic state active? assetKey = C.ASSET key ("CSM_PostRace", ...).
 --- CosmeticStateMachineManager:IsStateActiveByRef(Object stateAsset)->Bool; fallback
 --- IsStateActive(Name stateName)->Bool with C.STATE_NAME. Returns true/false, or nil if neither works.
@@ -650,7 +972,7 @@ function U.csmActive(assetKey, findOnly)
         asset = U.obj(path)
     end
     if U.ok(asset) then
-        local ok, v = pcall(function() return mgr:IsStateActiveByRef(asset) end)
+        local ok, v = U.pcallFn(mgr, CSM_ACTIVE_FN, "IsStateActiveByRef", asset)
         if ok and type(v) == "boolean" then return v end
     end
     local key = type(assetKey) == "string" and assetKey:gsub("^CSM_", "") or nil

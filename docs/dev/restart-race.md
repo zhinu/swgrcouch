@@ -8,7 +8,7 @@ Static only: the game was not launched, and no install or mod file was modified.
   identical for everything used here: tree, filter lists, bindings, and the statement offsets of
   `work/decoded-pause2/WBP_Pause.disasm.txt`;
 - `DT_DialogData` and the `MenuText` string table, decoded with cue4cli from the Steam paks;
-- the hotfix exe (`~/Games/StarWarsGalacticRacer-SWGRCouch-hotfix/...`), read-only with capstone;
+- the hotfix exe (`<hotfix game copy>/...`), read-only with capstone;
 - the live restart test of 2026-10-10 (`state/runs/20261010-0512-hud-before/UE4SS-051730.log:1275-1425`,
   `restart-0-before.png`, `restart-1-after.png`, `restart-2-prerace.png`);
 - the mod source (0.11.0-dev).

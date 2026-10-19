@@ -278,6 +278,7 @@ local function racers() return U.mod("racers") end         -- 0.10.0 RACERS step
 local function quickM() return U.mod("quick") end           -- 0.13.0 QUICK RACE (PlayMode, the difficulty names)
 
 local function trackKey(track)
+    if not U.ok(track) then return "" end     -- GetFName on a null wrapper is a native AV
     local ok, n = pcall(function() return track:GetFName():ToString() end)
     return ok and n or ""
 end
@@ -293,6 +294,20 @@ end
 
 M.PLANETS = PLANETS
 M.arcadeBg = arcadeBg
+-- 0.16 GALACTIC GRAND PRIX (gppage.lua): a track key's thumbnail: its Arcade event tile, else the planet x class Arcade
+-- tile (classKey nil = the landspeeder; "Plane" for pods), else the planet's select art. Pure (paths only).
+function M.trackArt(key, planetKey, classKey)
+    local tile = TRACK_TILE[key or ""]
+    if tile then return tp("Arcade", "T_UI_Arcade_" .. tile .. "_Tile") end
+    local p = nil
+    for _, e in ipairs(PLANETS) do if e.key == planetKey then p = e end end
+    if not p then return nil end
+    return M.arcadeTile(p, classKey and V.classByKey(classKey) or nil) or p.select
+end
+function M.planetArt(planetKey, hires)
+    for _, e in ipairs(PLANETS) do if e.key == planetKey then return hires and e.hires or e.select end end
+    return nil
+end
 M.trackKey = trackKey
 
 -- 0.12.0 sentence case for the v2 texts: "DEBRIS DUNES" -> "Debris Dunes", "LOOP B · SHORT 2" -> "loop B · short 2"
@@ -1105,8 +1120,10 @@ local function trackSetName()
     return POOL_SETS[s] and s or nil
 end
 
-local function queryTracks(cls, planet)
-    local setName = trackSetName()
+-- setOverride (0.16 GALACTIC GRAND PRIX): a POOL_SETS name used instead of cfg.SetupTrackSet (the Podracing Tour's
+-- pods on speeder circuits are only in "game"); the cache key carries the set, so the setup's own lists are untouched.
+local function queryTracks(cls, planet, setOverride)
+    local setName = (setOverride and POOL_SETS[setOverride]) and setOverride or trackSetName()
     local ck = tostring(setName or "all") .. "|" .. tostring(cls.arch) .. "|" .. planet.key
     if trackCache[ck] then return trackCache[ck] end
     local va, pla = V.archetypeObj(cls), U.obj(planet.path)
@@ -2716,6 +2733,15 @@ function v2.previewMode(m)
     local mv = MODE_V2[m.key] or {}
     local text = mv.text
     if type(text) == "function" then text = text(S.cls) end
+    -- (couch-livefix r2) a GRAND PRIX race with per-player classes: the line says so (the strip under it names them)
+    if m.key == "race" and S.cls then
+        local gpCls = nil
+        pcall(function() gpCls = U.mod("gp").setupClasses(S.cls.key) end)
+        if gpCls then
+            local okT, t = pcall(function() return U.mod("gp").setupModeText(gpCls, S.cls.key) end)
+            if okT and type(t) == "string" then text = t end
+        end
+    end
     local foot = (m.grid == "max" and S.cls) and string.format("Up to %d racers for the %s.", V.maxRacers(S.cls),
         string.lower(S.cls.label)) or ""
     V2.detail.set({ title = m.label, body = text or m.desc, foot = foot })
@@ -2811,14 +2837,23 @@ function v2.renderGrid(m)
         local n = maxGrid and S.grid or V.maxRacers(cls)
         for _ = 1, math.min(12, n) do list[#list + 1] = cls end
     end
+    -- (couch-livefix g) a GRAND PRIX race with per-player classes: each human's own class (icon + sentence)
+    local gpCls = nil
+    if key ~= "mixed" and key ~= "eliminator" and key ~= "fullgrid" and cls then
+        pcall(function() gpCls = U.mod("gp").setupClasses(cls.key) end)
+    end
     local humansLeft = h
     local ink, ai = th.COL.INK, th.alpha(th.COL.INK, 0.32)
     for i = 1, 12 do
         local c = list[i]
         if c then
             local human = humansLeft > 0 and c == cls
-            if human then humansLeft = humansLeft - 1 end
-            th.set(V2.icons[i], { tex = c.icon, colour = human and ink or ai, visible = true })
+            local own = nil
+            if human then
+                own = gpCls and gpCls[h - humansLeft + 1] and V.classByKey(gpCls[h - humansLeft + 1].cls) or nil
+                humansLeft = humansLeft - 1
+            end
+            th.set(V2.icons[i], { tex = (own or c).icon, colour = human and ink or ai, visible = true })
         else
             th.set(V2.icons[i], { visible = false })
         end
@@ -2831,8 +2866,12 @@ function v2.renderGrid(m)
         text = string.format("%s and %d AI in mixed classes.", players, math.max(0, #list - h))
     else
         local nAi = math.max(0, #list - h)
-        text = (nAi > 0) and string.format("%s and %d AI, all in %s.", players, nAi, PLURAL[cls.key] or "the class")
-            or string.format("%s, all in %s.", players, PLURAL[cls.key] or "the class")
+        if gpCls then
+            local okT, t = pcall(function() return U.mod("gp").setupStripText(gpCls, nAi, cls.key) end)
+            if okT and type(t) == "string" then text = t end
+        end
+        text = text or ((nAi > 0) and string.format("%s and %d AI, all in %s.", players, nAi, PLURAL[cls.key] or "the class")
+            or string.format("%s, all in %s.", players, PLURAL[cls.key] or "the class"))
     end
     th.set(V2.stripText, { text = text, visible = S.step == "mode" })
 end
@@ -3567,9 +3606,9 @@ function M.finish(start)
         pcall(function() dormant = U.mod("join").dormantText() end)
         local again = now <= S.startConfirmUntil and (dormant == nil or dormant == S.startDormant)
         if (#waiting > 0 or dormant) and not again then
-            S.startConfirmUntil, S.startDormant = now + 5000, dormant
-            -- 0.12.0 v2: the warn pill, over every other entry for the gate's 5-s window (§6.5, §6.6)
-            status(gateText(waiting, dormant), { warn = true, prio = 3, key = "gate", ms = 5000 })
+            S.startConfirmUntil, S.startDormant = now + U.confirmMs(), dormant
+            -- 0.12.0 v2: the warn pill, over every other entry for the gate's window (§6.5, §6.6)
+            status(gateText(waiting, dormant), { warn = true, prio = 3, key = "gate", ms = U.confirmMs() })
             return
         end
         acceptDormant = dormant ~= nil
@@ -3611,7 +3650,7 @@ end
 -- ui.hasFocus (4 checks) is the fallback when that call errors.
 local function holds(w, p1)
     if not U.ok(w) then return false end
-    local ok, v = pcall(function() return w:HasUserFocusedDescendants(p1) end)
+    local ok, v = pcall(U.callMethod, w, "HasUserFocusedDescendants", p1)
     if ok then return v == true end
     return ui().hasFocus(w, p1)
 end
@@ -3624,7 +3663,7 @@ local function visibleFocusables()
         return out
     end
     for _, w in ipairs(W.focusables) do
-        local ok, vis = pcall(function() return w:IsVisible() end)        -- UWidget::IsVisible() -> Bool
+        local ok, vis = pcall(U.callMethod, w, "IsVisible")        -- UWidget::IsVisible() -> Bool
         if not ok or vis == true then out[#out + 1] = w end
     end
     return out
@@ -3654,7 +3693,7 @@ local function gamepadInput()
         end)
         if not cis then return true end
     end
-    local ok, t = pcall(function() return cis:GetCurrentInputType() end)  -- 0 MouseAndKeyboard, 1 Gamepad
+    local ok, t = pcall(U.callMethod, cis, "GetCurrentInputType")  -- uobj: U.ok(cis) above (or freshly found); 0 MouseAndKeyboard, 1 Gamepad
     if not ok then return true end
     return tonumber(t) ~= 0
 end
@@ -4011,10 +4050,11 @@ function M.debugJump(spec)
 end
 
 -- 0.13.0: the GALAXY RUN's next race on the racer cards (FREE MODE START between run races). true when open there.
+-- 0.16: also the GALACTIC GRAND PRIX's next race; spec.set = the track set its track is in (gp.lua).
 function M.openRun(spec)
     if type(spec) ~= "table" then return false end
     local r = jumpTo({ class = spec.class, planet = spec.planet, track = spec.track, mode = spec.mode or "race",
-                       cond = spec.cond, step = "vehicles" })
+                       cond = spec.cond, step = "vehicles", set = spec.set })
     U.log(TAG, "GALAXY RUN next race: %s", tostring(r))
     return S.active == true and S.step == "vehicles"
 end
@@ -4035,7 +4075,7 @@ jumpTo = function(spec)
         return string.format("debugJump: the setup did not open (page %s, phase %s, launch pending %s)",
             M.available() and "ok" or "unavailable", tostring(St.phase), tostring(St.launch.pending))
     end
-    local tracks = queryTracks(cls, planet)
+    local tracks = queryTracks(cls, planet, spec.set)
     if not tracks or #tracks == 0 then
         return string.format("debugJump: no track for %s on %s (setup open on CLASS)", cls.key, planet.key)
     end

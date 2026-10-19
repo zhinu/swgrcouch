@@ -111,12 +111,14 @@ install_mod() {
     # UE4SS 3.0.1-1160 (the 0.9.0 / 0.9.1 zips) does not boot on the hotfixed game (CL382493)
     if [ -f "$BIN/ue4ss/UE4SS.dll" ] && command -v md5sum > /dev/null \
        && [ "$(md5sum < "$BIN/ue4ss/UE4SS.dll" | cut -c1-32)" = "a7e144e53056aebdee36df778def2473" ]; then
-      echo "WARNING: the installed UE4SS is 3.0.1-1160, which does not boot on the current game. Install from the" >&2
-      echo "         release zip 'with-UE4SS' (it ships the UE4SS Galactic Racer Edition) or set UE4SS_DIR to it." >&2
+      echo "WARNING: the installed UE4SS is 3.0.1-1160, which does not boot on the current game. Install UE4SS" >&2
+      echo "         Galactic Racer Edition by GenerousMods: https://www.nexusmods.com/starwarsgalacticracer/mods/2" >&2
+      echo "         (or use the release zip 'with-UE4SS', or set UE4SS_DIR to an unpacked copy)." >&2
     fi
   else
-    echo "UE4SS not found: use the release zip 'with-UE4SS' (it ships the UE4SS Galactic Racer Edition), or set" >&2
-    echo "UE4SS_DIR to an unpacked UE4SS Galactic Racer Edition (dwmapi.dll + ue4ss/)" >&2
+    echo "UE4SS not found: install UE4SS Galactic Racer Edition by GenerousMods first" >&2
+    echo "  https://www.nexusmods.com/starwarsgalacticracer/mods/2" >&2
+    echo "(or use the release zip 'with-UE4SS', or set UE4SS_DIR to an unpacked copy: dwmapi.dll + ue4ss/)" >&2
     exit 1
   fi
 

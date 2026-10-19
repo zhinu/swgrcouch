@@ -78,6 +78,17 @@ end
 local DLL_NAME = "swgr_inputfilter.dll"
 local CFG_NAME = "swgr_inputfilter.cfg"
 local STATUS_NAME = "swgr_inputfilter.status"
+local PADS_NAME = "swgr_inputfilter.pads"
+-- PAD WATCH (couch-livefix lazy join, DLL header): the DLL notes the up -> down edges of these keys per Slate UserIndex
+-- for EVERY pad, including pads that have no LocalPlayer. slot -> FKey name; the cfg names them by FName comparison index.
+-- couch-scaccept: slot 3 = the VIEW button (Gamepad_Special_Left: IA_UI_PlayerMenu, "VIEW BUILD"). The DLL has 4 slots
+-- since its first pad-watch build, so the running DLL takes it with the next cfg rewrite (no game restart). menubridge
+-- reads P1's PHYSICAL pad's A / B / VIEW edges from here on guest-owned shared screens (any pad type: the edges come
+-- from the Slate event stream before any LocalPlayer / CommonUI routing, by Slate UserIndex = the pad's own id).
+-- Renamed from WATCH_KEYS / WATCH_FIELD: a hot reload carries old module locals BY NAME into the new code.
+local PAD_WATCH_KEYS = { [0] = "Gamepad_FaceButton_Bottom", [1] = "Gamepad_Special_Right", [2] = "Gamepad_FaceButton_Right",
+                     [3] = "Gamepad_Special_Left" }
+local PAD_WATCH_FIELD = { [0] = "a", [1] = "start", [2] = "b", [3] = "view" }
 
 -- private state (diag reads it through M.diagLines)
 St.inputfix = St.inputfix or {}
@@ -102,7 +113,7 @@ end
 
 local function weakGet(v)
     if v == nil then return nil end
-    local ok, o = pcall(function() return v:Get() end)
+    local ok, o = pcall(U.callMethod, v, "Get")
     if ok and o ~= nil then return o end
     return v
 end
@@ -245,7 +256,7 @@ end
 --- FRONTEND (game thread): give every edited raw subsystem its original mapping contexts back.
 function M.restoreContexts()
     local live = {}
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         pcall(function()
             local sub = e.pc.RawInputSubsystem
             if U.ok(sub) then live[U.key(sub)] = sub end
@@ -384,9 +395,85 @@ local function nativeActive()
     return S.native.loaded and S.native.status.installed == "1"
 end
 
+-- garagenative: the DLL filter runs (each raw subsystem hears only its own pad id)
+function M.nativeOn() return nativeActive() == true end
+
 local function nativeWanted()
     local m = mode()
     return m == "auto" or m == "native"
+end
+
+---------------------------------------------------------------------------------------------------- pad watch
+-- couch-livefix lazy join (join.lua: a guest LocalPlayer only when his pad JOINS). The FName comparison index of a
+-- watched key (UE4SS FName:GetComparisonIndex), nil when this UE4SS cannot give it (the pad watch is then off).
+S.watchIdx = S.watchIdx or {}
+function M.watchIndex(slot)
+    local name = PAD_WATCH_KEYS[slot]
+    if not name then return nil end
+    local v = S.watchIdx[slot]
+    if v == nil then
+        v = false
+        pcall(function()
+            local n = U.fname(name)
+            local i = n:GetComparisonIndex()
+            if math.type(i) == "integer" and i > 0 then v = i end
+        end)
+        S.watchIdx[slot] = v
+        if v then U.log(TAG, "pad watch: %s = FName index %d", name, v)
+        else U.logOnce("inputfix.watchidx", TAG, "pad watch off: FName:GetComparisonIndex unavailable for %s", name) end
+    end
+    return v or nil
+end
+
+-- pure: the DLL's pads file text -> { [userIndex] = { down = mask, a = seq, start = seq, b = seq } }, nil when the text
+-- is not a complete pads file (no "padwatch=1" header or no final "end": a torn read)
+function M.parsePads(text)
+    if type(text) ~= "string" or text:sub(1, 11) ~= "padwatch=1\n" then return nil end
+    local out, done = {}, false
+    for line in text:gmatch("[^\n]+") do
+        if line == "end" then done = true
+        elseif line:sub(1, 2) == "u " then
+            local f = {}
+            for num in line:sub(3):gmatch("%d+") do f[#f + 1] = math.tointeger(tonumber(num)) end
+            if #f >= 2 + 2 then
+                local e = { down = f[2] or 0 }
+                for slot = 0, 3 do e[PAD_WATCH_FIELD[slot]] = f[3 + slot] or 0 end
+                out[f[1]] = e
+            end
+        end
+    end
+    return done and out or nil
+end
+
+-- true when the DLL reports every pad's A / Start / B (status padwatch=1 + both indices known): join.lua then creates
+-- a guest only when his pad joins. Re-reads the status at most every 2 s until it says so.
+function M.padWatch()
+    if not (S.native.loaded and M.watchIndex(0) and M.watchIndex(1)) then return false end
+    local st = S.native.status or {}
+    if st.padwatch ~= "1" then
+        local now = St.nowMs()
+        if now - (S.padStAt or -1e12) >= 2000 then
+            S.padStAt = now
+            st = readNativeStatus()
+        end
+    end
+    return st.installed == "1" and st.padwatch == "1"
+end
+
+-- the pads file, re-read at most every 60 ms -> table (M.parsePads) or nil. A torn / missing file keeps the last one.
+function M.padPresses()
+    local now = St.nowMs()
+    if S.pads and now - (S.padsAt or -1e12) < 60 then return S.pads end
+    S.padsAt = now
+    local dir = nativeDir()
+    if not dir then return S.pads end
+    local f = io.open(dir .. "/" .. PADS_NAME, "r")
+    if not f then return S.pads or {} end
+    local text = f:read("a")
+    f:close()
+    local t = M.parsePads(text)
+    if t then S.pads = t end
+    return S.pads or {}
 end
 
 -- Owner table + switches for the DLL. enabled only in race phases unless InputFixNativeScope = "always".
@@ -396,7 +483,12 @@ end
 -- false, computed by bindAll), enabled=0. VERIFY(V-INP-01): "native filter held off" never stays in the log; if it
 -- does, the bind does not work in this build: use InputFixMode = "off".
 local function buildNativeCfg(players)
-    local on = nativeWanted() and (opt("InputFixNativeScope", "race") == "always" or isRacePhase())
+    local couchWalk = false                -- 0.15 COUCH CAMPAIGN: the paddock walker reads P1's raw input only
+    if St.phase == "OTHER" then
+        local okC, c = pcall(function() return U.mod("couch").active() end)
+        couchWalk = okC and c == true
+    end
+    local on = nativeWanted() and (opt("InputFixNativeScope", "race") == "always" or isRacePhase() or couchWalk)
     if on and isRacePhase() and S.allBound == false then on = false end
     if on and S.photo == true then on = false end      -- photo mode: every processor records every device again
     local lines = {
@@ -405,9 +497,22 @@ local function buildNativeCfg(players)
         "offset=" .. (padOffset() and "1" or "0"),
         "seq=" .. tostring(S.native.seq),
     }
+    -- couch-4p: each subsystem keeps its player's ORIGINAL pad id while couch.lua swaps the ids for a shared screen
+    -- (the paddock walker reads P1's subsystem: only P1's physical pad, whichever PC carries it now)
+    local cm = package.loaded["couch"]
     for _, p in ipairs(players) do
         local a = U.key(p.sub)
-        if a ~= 0 then lines[#lines + 1] = string.format("p %d 0x%x", p.ctrlId, a) end
+        local id = p.ctrlId
+        if type(cm) == "table" and type(cm.originalIdOf) == "function" then
+            local okO, o = pcall(cm.originalIdOf, p.pc)
+            if okO and type(o) == "number" then id = o end
+        end
+        if a ~= 0 then lines[#lines + 1] = string.format("p %d 0x%x", id, a) end
+    end
+    -- couch-livefix lazy join: the DLL's pad watch (A / Start / B edges of every pad, joined or not)
+    for slot = 0, 3 do
+        local idx = M.watchIndex(slot)
+        if idx then lines[#lines + 1] = string.format("watch %d %d", slot, idx) end
     end
     for _, w in pairs(S.native.writes) do
         -- 0.10.0: a car destroyed before the DLL applied its copy would leave a write into freed memory
@@ -417,6 +522,7 @@ local function buildNativeCfg(players)
     end
     return table.concat(lines, "\n") .. "\n"
 end
+M.nativeCfgText = buildNativeCfg            -- offline tests (tools/test_couch4p.lua)
 
 -- Loads the DLL once per Lua state (a reload calls loadlib again: same module, DllMain does not run twice).
 -- VERIFY(V-INP-05)
@@ -459,11 +565,27 @@ end
 -- Local players with a PC: { ctrlId, pc, sub (its UGfnRawInputSubsystem), car (VehiclePawn or nil) }.
 local function localPlayers()
     local out = {}
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         if U.ok(e.pc) then
-            local sub
-            pcall(function() sub = e.pc.RawInputSubsystem end)              -- AGfnPlayerController +0x8d8
-            sub = weakGet(sub)   -- the property is a TWeakObjectPtr: unwrap to the UObject (live run 2026-10-07)
+            -- couch-racegc: the PC's raw input subsystem (a LocalPlayer subsystem: it lives as long as its player)
+            -- re-read at most every 2 s; each read was 2 wrappers per player per FAST tick
+            S.subCache = S.subCache or {}
+            local pcK = U.key(e.pc)
+            local sc = S.subCache[pcK]
+            local nowS = St.nowMs()
+            local sub, subKey
+            if sc and U.ok(sc.sub) and nowS - sc.at < 2000 then
+                sub, subKey = sc.sub, sc.subKey                -- couch-fix40: its address kept with it (addrOf = 2 wrappers)
+            else
+                local okS, raw = pcall(U.getField, e.pc, "RawInputSubsystem")  -- AGfnPlayerController +0x8d8
+                sub = weakGet(okS and raw or nil)   -- a TWeakObjectPtr: unwrap to the UObject (live run 2026-10-07)
+                if U.ok(sub) then
+                    subKey = addrOf(sub)
+                    S.subCache[pcK] = { sub = sub, at = nowS, subKey = subKey }
+                else
+                    S.subCache[pcK] = nil
+                end
+            end
             if not U.ok(sub) then
                 -- fallback: the LocalPlayer's own subsystem
                 pcall(function()
@@ -485,16 +607,30 @@ local function localPlayers()
                 lpSubKey = addrOf(lpSub)
                 if lpSubKey ~= 0 then S.lpSubCache[pk] = lpSubKey end
             end
-            local car
-            pcall(function()
-                local pawn = e.pc.Pawn
-                if U.ok(pawn) and U.isVehicle(pawn) then car = pawn end
-            end)
-            out[#out + 1] = { ctrlId = e.ctrlId, pc = e.pc, sub = U.ok(sub) and sub or nil, car = car,
-                              subKey = addrOf(sub), lpSubKey = lpSubKey or 0, index = e.index }
+            local car = U.carOf(e.pc)                              -- couch-racegc: one pc.Pawn read per loop run
+            if subKey == nil or not U.ok(sub) then subKey = addrOf(sub) end
+            -- couch-fix40: one entry table per PC, refilled on every call (a new ~250 B table per player per FAST
+            -- tick before); the entries are only used inside the call that got them
+            S.lpEntries = S.lpEntries or {}
+            local en = S.lpEntries[pcK]
+            if not en then en = {}; S.lpEntries[pcK] = en end
+            en.ctrlId, en.pc, en.sub, en.car = e.ctrlId, e.pc, U.ok(sub) and sub or nil, car
+            en.subKey, en.lpSubKey, en.index = subKey, lpSubKey or 0, e.index
+            out[#out + 1] = en
         end
     end
     return out
+end
+
+-- Loads the DLL now (front end, one local player: the lazy join needs it before any guest exists). -> loaded
+function M.ensureNative(why)
+    if mode() == "off" or not nativeWanted() then return false end
+    if not S.native.tried then
+        U.log(TAG, "native filter loaded early (%s): the pad watch", tostring(why))
+        loadNative(localPlayers())
+    end
+    if S.native.loaded then writeNativeCfg(buildNativeCfg(localPlayers())) end
+    return S.native.loaded == true
 end
 
 ---------------------------------------------------------------------------------------------------- bind
@@ -509,12 +645,16 @@ end
 
 local function bindCar(p)
     if not p.car or not p.sub then return "n/a" end
-    local comp
-    pcall(function() comp = p.car.PlayerInputComponent end)
-    if not U.ok(comp) then return "n/a" end
     local carKey = U.key(p.car)
     local rec = S.cars[carKey] or {}
     S.cars[carKey] = rec
+    -- couch-racegc: the car's input component is the car's own (kept per car, U.ok-checked each tick)
+    local comp = rec.comp
+    if comp == nil or rec.compGen ~= St.worldGen or rec.compCar ~= p.car or not U.ok(comp) then
+        local okC, c = pcall(U.getField, p.car, "PlayerInputComponent")
+        if not okC or not U.ok(c) then rec.comp = nil; return "n/a" end
+        comp, rec.comp, rec.compGen, rec.compCar = c, c, St.worldGen, p.car
+    end
     local cur = comp.RawInputSubsystem
     local curA = addrOf(cur)
     if isOwnAddr(p, curA) then
@@ -675,21 +815,43 @@ local function eiMode()
     return opt("InputFixGuestEnhanced", "add") == "off" and "off" or "add"
 end
 
-local function eiSub(pc)
+-- couch-fix40: a PC's Enhanced Input subsystem (a LocalPlayer subsystem: it lives as long as its player, like the raw
+-- one above) kept per PC and world, U.ok-checked at every use and looked up again every 2 s (p1UiGuard asked 4 times a
+-- second per player: 2 wrappers + a closure each)
+local eiSubCache = { gen = nil, byPc = {} }
+local function eiSubLookup(pc)
     local sub
     pcall(function() sub = U.SBL():GetLocalPlayerSubSystemFromPlayerController(pc, U.class(EI_CLASS)) end)
     return U.ok(sub) and sub or nil
 end
+local function eiSub(pc)
+    if eiSubCache.gen ~= St.worldGen then eiSubCache.gen, eiSubCache.byPc = St.worldGen, {} end
+    local pk, now = U.key(pc), St.nowMs()
+    local c = eiSubCache.byPc[pk]
+    if c and now - c.at < 2000 and U.ok(c.sub) then return c.sub end
+    local sub = eiSubLookup(pc)
+    eiSubCache.byPc[pk] = sub and { sub = sub, at = now } or nil
+    return sub
+end
 
+-- STUTTER FIX (live 2026-10-14 23:25, tick profiler): p1UiGuard's guardOne ran every 250 ms per racing player with
+-- FOUR raw StaticFindObject calls (IMC_UI + 3 vehicle IMCs, ~2.5 ms each in a race world: memory note
+-- gr-staticfindobject-slow): 24 ms spikes (max 29) four times a second = micro-stutters. Cached find-only lookups now
+-- (U.findLoaded: one real lookup, re-validated, a miss retried after its TTL).
 local function imcByName(name)
-    local ok, o = pcall(StaticFindObject, IMC_DIR .. name .. "." .. name)
-    return (ok and U.ok(o)) and o or nil
+    local o = U.findLoaded(IMC_DIR .. name .. "." .. name)
+    return U.ok(o) and o or nil
 end
 
 -- HasMappingContext(imc, out int32 OutFoundPriority) -> true|false, priority; nil, nil, err when not callable.
+local EI_OUT = (St.outParams or function(t) return t end)({})          -- one out table for every call (state.lua: the UE4SS out-param leak)
 local function eiHas(sub, imc)
-    local out = {}
-    local ok, r = pcall(function() return sub:HasMappingContext(imc, out) end)
+    local out = EI_OUT
+    out.OutFoundPriority = nil
+    -- couch-fix40: the kept UFunction wrapper of the kept subsystem (U.pcallFn): no method lookup per call
+    local ok, r = U.pcallFn(sub, "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem:HasMappingContext",
+        "HasMappingContext", imc, out)
+    if St.dropOutRefs then St.dropOutRefs(out) end
     if not ok then return nil, nil, tostring(r):match("^[^\n]*") end
     if type(r) ~= "boolean" then return nil, nil, "returned " .. type(r) end
     return r, math.tointeger(tonumber(out.OutFoundPriority))
@@ -712,8 +874,8 @@ local P1_VEH_IMCS = { "IMC_Vehicle_Default", "IMC_Vehicle_Alternative", "IMC_Veh
 local P1G = { raised = {}, checked = false, nextMs = 0 }
 
 local function imcUi()
-    local ok, o = pcall(StaticFindObject, IMC_UI_PATH)
-    return (ok and U.ok(o)) and o or nil
+    local o = U.findLoaded(IMC_UI_PATH)            -- cached (see imcByName)
+    return U.ok(o) and o or nil
 end
 
 -- 0.13.0 (task #35, P1 wrecked first): the guard covers EVERY local player still racing, not only P1. Once P1 is out,
@@ -721,7 +883,7 @@ end
 -- (the LAST local PC: P2 in 2P), so the guest that still races can get the same IMC_UI-over-vehicle takeover P1 had.
 -- A wrecked/finished player (IsStillRacing false) is left alone: its pad drives the spectate/results UI.
 -- Back to the priorities the vehicle IMCs had before we raised them (every player).
-local function racerComp(pc)
+local function racerCompUncached(pc)
     local comp
     pcall(function()
         local ps = pc.PlayerState
@@ -735,17 +897,28 @@ local function racerComp(pc)
     return U.ok(comp) and comp or nil
 end
 
-local function stillRacing(pc)
-    local comp = racerComp(pc)
+-- couch-fix40: wreck.lua's kept racer identity (the same racer PlayerState rule: takeover.racerPSFor, else
+-- pc.PlayerState) instead of 3 wrappers + a closure per player 4 times a second; IsStillRacing through U.pcallFn
+local function racerComp(pc, index)
+    local okW, wr = pcall(U.mod, "wreck")
+    if okW and type(wr) == "table" and type(wr.racerRecFor) == "function" then
+        local ok, rec = pcall(wr.racerRecFor, pc, index)
+        if ok then return U.ok(rec) and rec or nil end
+    end
+    return racerCompUncached(pc)
+end
+
+local function stillRacing(pc, index)
+    local comp = racerComp(pc, index)
     if not comp then return true end          -- unknown: guard it (a guard on a non-racer only costs priority)
-    local ok, r = pcall(function() return comp:IsStillRacing() end)
+    local ok, r = U.pcallFn(comp, "/Script/Griffin.PlayerRaceEventComponent:IsStillRacing", "IsStillRacing")
     return not ok or r ~= false
 end
 
 function M.p1UiRelease(why)
     if next(P1G.raised) == nil then return end
     local subs = {}
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         if U.ok(e.pc) then subs[e.index] = eiSub(e.pc) end
     end
     local parts = {}
@@ -759,21 +932,21 @@ function M.p1UiRelease(why)
 end
 
 -- One player: vehicle IMCs just above its IMC_UI. Returns the "IMC ..." summary for the first-check log.
-local function guardOne(pnum, pc)
+local function guardOne(pnum, pc, wantSummary)
     local sub = eiSub(pc)
     local ui = imcUi()
     if not (sub and ui) then return nil end
     local hasUi, uiPrio = eiHas(sub, ui)
     if hasUi == nil then return nil end
     uiPrio = hasUi and (uiPrio or 0) or nil
-    local seen = {}
+    local seen = wantSummary and {} or nil      -- couch-fix40: the summary is only built for the first-check log
     for _, name in ipairs(P1_VEH_IMCS) do
         local imc = imcByName(name)
         local has, prio = nil, nil
         if imc then has, prio = eiHas(sub, imc) end
         if has then
             prio = prio or 0
-            seen[#seen + 1] = string.format("%s %d", name, prio)
+            if seen then seen[#seen + 1] = string.format("%s %d", name, prio) end
             if uiPrio and prio <= uiPrio then
                 local key = pnum .. ":" .. name
                 local r = P1G.raised[key]
@@ -785,6 +958,7 @@ local function guardOne(pnum, pc)
             end
         end
     end
+    if not seen then return true end
     return string.format("IMC_UI %s, vehicle %s", uiPrio and tostring(uiPrio) or "absent",
         #seen > 0 and table.concat(seen, ", ") or "none")
 end
@@ -795,7 +969,8 @@ function M.p1UiGuard()
     local racing = St.phase == "RACING"
     local lps = {}
     if racing then
-        pcall(function() lps = U.localPlayers() end)
+        local okL, l = pcall(U.localPlayersRO)          -- couch-fix40: read only, no copy / closure
+        if okL and type(l) == "table" then lps = l end
         racing = #lps >= 2
     end
     local paused = false
@@ -817,8 +992,8 @@ function M.p1UiGuard()
     P1G.checkedP = P1G.checkedP or {}
     for _, e in ipairs(lps) do
         local pnum = e.index
-        if U.ok(e.pc) and stillRacing(e.pc) then
-            local okG, summary = pcall(guardOne, pnum, e.pc)
+        if U.ok(e.pc) and stillRacing(e.pc, e.index) then
+            local okG, summary = pcall(guardOne, pnum, e.pc, not P1G.checkedP[pnum])
             if okG and summary and not P1G.checkedP[pnum] then
                 P1G.checkedP[pnum] = true
                 U.log(TAG, "P%d racing: %s (V-INP-09)", pnum, summary)
@@ -995,7 +1170,7 @@ function M.dropSpectator(why)
     end
     if #imcs == 0 then return 0 end
     local n = 0
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         local sub = U.ok(e.pc) and eiSub(e.pc) or nil
         if sub then
             for _, imc in ipairs(imcs) do
@@ -1013,7 +1188,7 @@ function M.eiRestore()
     if opt("InputFixDropSpectator", true) ~= false then U.try(TAG, function() M.dropSpectator("front end") end) end
     if opt("InputFixGuestEnhancedRemove", true) == false then S.ei = {}; return end
     local live = {}
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         if U.ok(e.pc) then
             local s = eiSub(e.pc)
             if s then live[U.key(s)] = s end
@@ -1049,19 +1224,18 @@ local lastTickMs = -1e12
 -- nothing to protect then and stays as the scope says). Returns true when allBound changed.
 bindAll = function(players)
     local all, cars, bad = true, 0, nil
-    local desc = {}
     for _, p in ipairs(players) do
         if p.car then
             cars = cars + 1
             local r = bindCar(p)
-            local rec = S.cars[U.key(p.car)] or {}
-            S.cars[U.key(p.car)] = rec
+            local ck = U.key(p.car)
+            local rec = S.cars[ck] or {}
+            S.cars[ck] = rec
             rec.ctrlId, rec.last = p.ctrlId, r
             if r ~= "own" and r ~= "bound" then
                 all = false
                 if r ~= "pending" then bad = bad or p end
             end
-            desc[#desc + 1] = string.format("ctrl %d %s", p.ctrlId, r)
         end
     end
     local new = (cars > 0) and all or nil
@@ -1072,6 +1246,14 @@ bindAll = function(players)
     end
     local changed = (new ~= S.allBound)
     if changed and (new == true or S.allBound == true) then
+        -- couch-fix40: the per-car summary is only built for this log line (a string per car per FAST tick before)
+        local desc = {}
+        for _, p in ipairs(players) do
+            if p.car then
+                local rec = S.cars[U.key(p.car)]
+                desc[#desc + 1] = string.format("ctrl %d %s", p.ctrlId, tostring(rec and rec.last))
+            end
+        end
         -- VERIFY(V-INP-01): "every local car reads its own raw input" within ~1 s of the cars spawning
         U.log(TAG, "%s (%s)", new == true and "every local car reads its own raw input: native filter + contexts on"
             or "a local car lost its own raw input: native filter held off", table.concat(desc, ", "))
@@ -1094,7 +1276,7 @@ local function photoEdge(players)
         local pm = U.worldSubsystem("/Script/PhotoMode.PhotoModeManager")
         for _, p in ipairs(players or {}) do
             local pn, hud = "?", "?"
-            pcall(function() pn = nm(p.pc.Pawn and p.pc.Pawn:GetClass()) end)
+            pcall(function() local pawn = p.pc.Pawn; if U.ok(pawn) then pn = nm(pawn:GetClass()) end end)   -- U.ok: null pawn = native AV
             -- UPhotoModeManager:GetHudWidgetForPlayer(Object pc) -> Object (reflect-func-all 2026-10-07)
             pcall(function()
                 local w = pm:GetHudWidgetForPlayer(p.pc)
@@ -1177,7 +1359,8 @@ function M.diagLines()
         pcall(function()
             local e = p.sub.EnhancedPlayerInput
             epi = nm(e)
-            epiOwner = (addrOf(e:GetOuter()) == U.key(p.pc)) and "own pc" or ("outer " .. nm(e:GetOuter()))
+            local o = U.outerOf(e)               -- e may be a null wrapper (no EnhancedPlayerInput): GetOuter = AV
+            epiOwner = (addrOf(o) == U.key(p.pc)) and "own pc" or ("outer " .. nm(o))
         end)
         local carRaw, verdict = "n/a", "no car"
         if p.car then

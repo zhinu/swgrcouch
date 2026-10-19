@@ -1,5 +1,6 @@
 -- nametags.lua (G5): colour and label the vehicle markers of human players in every HUD we host.
---   local humans: their player colour (consts.COLOURS[pnum]) and the label "P<n>";
+--   local humans: their player colour (consts.COLOURS[pnum]) and the label "P<n>" (or the slot's custom name,
+--     settings Name1..Name4 from FREE MODE > OPTIONS > PLAYER NAMES; M.labelFor / M.displayName);
 --   remote humans: neutral consts.COLOURS.Remote, the game's own name kept.               [ARCH 1.6, HUD 5]
 -- Static facts (reflect.tsv, exports/hud/*.props.txt, 2026-10-06):
 --   UVehicleMarkerContainer.Canvas (FuseCanvasPanel); PanelWidget:GetChildrenCount() -> Int, GetChildAt(Int) ->
@@ -59,16 +60,16 @@ end
 -- allocation is retained on every call (and its elements are RemoteUnrealParams into that buffer) [G5 review].
 local function children(panel)
     local out = {}
-    local okc, cnt = pcall(function() return panel:GetChildrenCount() end)
+    local okc, cnt = pcall(U.callMethod, panel, "GetChildrenCount")
     if okc and type(cnt) == "number" then
         for i = 0, cnt - 1 do
-            local okA, ch = pcall(function() return panel:GetChildAt(i) end)
+            local okA, ch = pcall(U.callMethod, panel, "GetChildAt", i)
             if okA and U.ok(ch) then out[#out + 1] = ch end
         end
         return out
     end
     U.logOnce("tags.allchildren", TAG, "GetChildrenCount unreadable on the marker canvas; using GetAllChildren")
-    local ok, arr = pcall(function() return panel:GetAllChildren() end) -- VERIFY(V-CORE-08): array return
+    local ok, arr = pcall(U.callMethod, panel, "GetAllChildren") -- VERIFY(V-CORE-08): array return
     if ok and arr ~= nil then
         local ok2, t = pcall(U.arrayToTable, arr)
         if ok2 and type(t) == "table" then out = t end
@@ -93,7 +94,7 @@ local function writeRealName(m)
     local ps = U.ok(vm) and vm.PlayerState or nil
     local t = tagTextOf(m)
     if t and ps and U.ok(ps) then
-        local ok, name = pcall(function() return ps:GetPlayerName() end) -- APlayerState:GetPlayerName() -> Str
+        local ok, name = pcall(U.callMethod, ps, "GetPlayerName") -- APlayerState:GetPlayerName() -> Str
         if ok then t:SetText(U.ftext(U.str(name))) end
     end
 end
@@ -120,7 +121,7 @@ end
 local function carTagsCvar()
     local ksl = U.KSL()
     if not U.ok(ksl) then return nil end
-    local ok, v = pcall(function() return ksl:GetConsoleVariableBoolValue(CARTAGS_CVAR) end)
+    local ok, v = pcall(U.callMethod, ksl, "GetConsoleVariableBoolValue", CARTAGS_CVAR)
     if ok and type(v) == "boolean" then return v end
     return nil
 end
@@ -227,6 +228,8 @@ end
 function M.modRace()
     if St.race.singleView == true then return false end
     if St.race.launchedByUs == true then return true end
+    local okC, couch = pcall(function() return U.mod("couch").active() end)
+    if okC and couch == true then return true end
     if (tonumber(St.race.localViews) or 1) >= 2 then return true end
     return St.net.wantConnected == true and U.netMode() == "client"
 end
@@ -291,9 +294,23 @@ end
 -- cfg.GuestNameMethod = "auto" walks rpc -> gamemode -> direct while the name does not stick. Re-checked every second
 -- (seamless travel copies PlayerName into the new PlayerState; the game may also rewrite it from the profile).
 local DEFAULT_GUEST_NAMES = { "Player 2", "Player 3", "Player 4" }
-local names = { lastMs = nil, st = {} }
+local names = { lastMs = nil, st = {}, p1Orig = nil, p1Set = nil }
 
-function M.guestName(pnum)
+-- Custom name of slot pnum (1..4): settings Name<pnum> (FREE MODE OPTIONS > PLAYER NAMES, settings.txt,
+-- 'couch set Name2 Jules'), cleaned like settings.lua stores it; nil = none (the default applies).
+function M.customName(pnum)
+    local n = math.tointeger(tonumber(pnum))
+    if not n or n < 1 or n > 4 then return nil end
+    local ok, v = pcall(settings.get, "Name" .. n)
+    if not ok or type(v) ~= "string" then return nil end
+    v = settings.cleanName(v)
+    if v == "" then return nil end
+    return v
+end
+
+-- The default name of a guest slot (cfg.GuestNames[pnum - 1], else "Player <n>"); P1's default is its own profile
+-- name (read from its PlayerState, displayName).
+function M.defaultGuestName(pnum)
     local list = cfg.GuestNames
     if type(list) ~= "table" then list = DEFAULT_GUEST_NAMES end
     local n = list[(tonumber(pnum) or 2) - 1]
@@ -301,14 +318,39 @@ function M.guestName(pnum)
     return "Player " .. tostring(pnum)
 end
 
--- Tag label of a local human (cfg.NameTagLabel: "pnum" (default, "P2") | "name" ("Player 2") | "both").
+-- The name a guest PlayerState gets: the slot's custom name, else the default.
+function M.guestName(pnum)
+    return M.customName(pnum) or M.defaultGuestName(pnum)
+end
+
+-- The name of slot pnum as the player sees it: custom, else (P1) the PlayerState's / (guests) the default. ps optional.
+function M.displayName(pnum, ps)
+    local c = M.customName(pnum)
+    if c then return c end
+    if tonumber(pnum) == 1 then
+        local name = nil
+        if U.ok(ps) then
+            local ok, s = pcall(U.callMethod, ps, "GetPlayerName")
+            name = ok and U.str(s) or nil
+        end
+        if name and name ~= "" then return name end
+        return "Player 1"
+    end
+    return M.defaultGuestName(pnum)
+end
+
+-- Tag label of a local human (cfg.NameTagLabel: "pnum" (default: "P2", or the slot's custom name when one is set) |
+-- "name" ("Player 2") | "both" ("P2 Player 2")).
 function M.labelFor(pnum, ps)
     local mode = cfg.NameTagLabel
-    if mode ~= "name" and mode ~= "both" then return "P" .. pnum end
+    if mode ~= "name" and mode ~= "both" then return M.customName(pnum) or ("P" .. pnum) end
     local name
     if pnum == 1 then
-        local ok, s = pcall(function() return ps:GetPlayerName() end)
-        name = ok and U.str(s) or nil
+        name = M.customName(1)
+        if not name and U.ok(ps) then
+            local ok, s = pcall(U.callMethod, ps, "GetPlayerName")
+            name = ok and U.str(s) or nil
+        end
     else
         name = M.guestName(pnum)
     end
@@ -318,7 +360,7 @@ function M.labelFor(pnum, ps)
 end
 
 local function playerNameOf(ps)
-    local ok, s = pcall(function() return ps:GetPlayerName() end) -- APlayerState:GetPlayerName() -> Str
+    local ok, s = pcall(U.callMethod, ps, "GetPlayerName") -- APlayerState:GetPlayerName() -> Str
     if ok then return U.str(s) end
     return nil
 end
@@ -374,15 +416,46 @@ local function ensureName(pc, ps, want, pnum)
     end
 end
 
+-- P1's custom name (Name1, cfg.PlayerNameP1): its PlayerState is renamed only in this mod's races (modRace; not in
+-- the front end, whose PlayerState is the online identity the game's own menus show) and gets its profile name back
+-- in the front end, in a race of the game's own and when Name1 is cleared. names.p1Orig = the name before our rename,
+-- names.p1Set = the name we set. VERIFY(V-NAM-04): P1's results row / position list show Name1 in a split race and
+-- the profile name again on the Multiplayer tab.
+local function p1NameTick()
+    local p1 = U.p1()
+    if not U.ok(p1) then return end
+    local ps = p1.PlayerState
+    if not U.ok(ps) then return end
+    local want = (cfg.PlayerNameP1 ~= false) and M.customName(1) or nil
+    local ph = St.phase
+    local inRace = ph ~= "FRONTEND" and ph ~= "BOOT" and ph ~= "LEAVING" and M.modRace()
+    local cur = playerNameOf(ps)
+    if want and inRace then
+        if names.p1Orig == nil and cur and cur ~= "" and cur ~= want and cur ~= names.p1Set then names.p1Orig = cur end
+        names.p1Set = want
+        ensureName(p1, ps, want, 1)
+        return
+    end
+    if not names.p1Set then return end
+    -- give the profile name back (only over our own name: a name the game wrote since is the game's)
+    if names.p1Orig and cur == names.p1Set then
+        ensureName(p1, ps, names.p1Orig, 1)
+        return
+    end
+    if cur == names.p1Orig then U.log(TAG, "P1 has its own name '%s' back", tostring(cur)) end
+    names.p1Orig, names.p1Set = nil, nil
+end
+
 -- MAIN loop, every phase (front end included: the lobby and the next race read the same PlayerState chain).
 function M.namesTick()
-    if cfg.GuestNameMode == "off" then return end
     local now = St.nowMs()
     if names.lastMs and now - names.lastMs < 1000 then return end
     names.lastMs = now
+    U.try(TAG, p1NameTick)
+    if cfg.GuestNameMode == "off" then return end
     local join = lazy("join")
     local tko = lazy("takeover")
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if lp.index >= 2 and U.ok(lp.pc) then
             U.try(TAG, function()
                 local pnum
@@ -410,6 +483,10 @@ end
 -- Not in ARCHITECTURE's main init list: nametags needs no hooks. The "leaving" cleanup that §1.7 asks for is
 -- registered here once at require time (event listener only, no game call).
 St.on("leaving", TAG, function() M.clear() end)
+-- a Name<n> change (OPTIONS > PLAYER NAMES, couch set): the next namesTick renames at once (no 1 s wait)
+St.on("settings", TAG, function(key)
+    if settings.NAME_KEYS and settings.NAME_KEYS[key] then names.lastMs = nil end
+end)
 St.on("phase", TAG, function(new)
     if new == "LAUNCHING" or new == "LOADING" or new == "PRERACE" then
         U.try(TAG, forceCvar)

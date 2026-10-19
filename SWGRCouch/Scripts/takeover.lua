@@ -90,7 +90,7 @@ local function nameOf(o)
 end
 
 local function isLocal(pc)
-    local ok, res = pcall(function() return pc:IsLocalController() end)
+    local ok, res = pcall(U.callMethod, pc, "IsLocalController")
     return ok and res == true
 end
 
@@ -121,7 +121,7 @@ end
 -- Read a WeakObject property as a UObject (FWeakObjectPtr:Get()), tolerating a plain object.
 local function weakGet(v)
     if v == nil then return nil end
-    local ok, o = pcall(function() return v:Get() end)
+    local ok, o = pcall(U.callMethod, v, "Get")
     if ok and o ~= nil then return o end
     return v
 end
@@ -159,15 +159,12 @@ function M.racerPSFor(pc)
     local rec = M.recordFor(pc)
     if rec and U.ok(rec.aiPS) then return rec.aiPS end
     if cfg.RacerPSSource ~= "controller" and U.ok(pc) then
-        local ok, ps = pcall(function()
-            local pawn = pc.Pawn
-            if U.isVehicle(pawn) then
-                local p = pawn.PlayerState               -- APawn.PlayerState (replicated)
-                if U.ok(p) then return p end
-            end
-            return nil
-        end)
-        if ok and ps ~= nil then return ps end
+        -- couch-racegc: the car from U.carOf (one pc.Pawn read per loop run), no closure per call
+        local car = U.carOf(pc)
+        if car then
+            local ok, p = pcall(U.getField, car, "PlayerState")   -- APawn.PlayerState (replicated)
+            if ok and U.ok(p) then return p end
+        end
     end
     return pc.PlayerState                              -- invalid object when pc is invalid: safe to chain
 end
@@ -180,7 +177,7 @@ function M.pickCar(gs)
     if not server() then return nil end
     if not U.ok(gs) or not U.isA(gs, "RacingGameState") then return nil end
     local cars = gs.Vehicles                           -- ARacingGameState.Vehicles (never FindAllOf: cinematic cars exist)
-    local okn, n = pcall(function() return cars:GetArrayNum() end)
+    local okn, n = pcall(U.callMethod, cars, "GetArrayNum")
     if not okn or type(n) ~= "number" then return nil end
     local best, bestPos = nil, -math.huge
     local test = aiCarTest()
@@ -255,6 +252,16 @@ end
 
 -- Each numbered step runs in its own U.try and is logged, so the first runtime session shows which step
 -- the game needs and which one fails (V-TKO-01).
+-- COUCH CAMPAIGN: the reason no takeover may happen in this world (couch.takeoverBlocked: a campaign race), or nil.
+-- The ONE guard of every path that hands a human an AI car (tick, forceAll / Ctrl+F6, join's mid-race F6 -> takeOver):
+-- possessing a campaign AI car crashes the game natively (exe+0x641579 null+0xdf0, live 2026-10-14 twice).
+local function blockedHere()
+    local ok, why = pcall(function() return U.mod("couch").takeoverBlocked() end)
+    if ok and type(why) == "string" then return why end
+    return nil
+end
+M.blockedHere = blockedHere
+
 local function step(rec, label, fn)
     local ok = U.try(TAG, fn)
     U.dbg(TAG, "  step %s %s", label, ok and "ok" or "FAILED")
@@ -276,6 +283,12 @@ function M.takeOver(pc, car)
         return nil
     end
     if St.takeoversByCar[U.key(car)] then U.warn(TAG, "takeOver: car %s already taken", nameOf(car)); return nil end
+    local blocked = blockedHere()
+    if blocked then
+        U.logEvery("tko_blocked_" .. tostring(U.key(pc)), 30000, TAG,
+            "takeOver %s refused: %s (no AI takeover there: the game crashes natively; he spectates)", nameOf(pc), blocked)
+        return nil
+    end
 
     local rec = {
         pc = pc, car = car, aiPS = car.PlayerState, aiCtrl = car.Controller, ownPS = pc.PlayerState,
@@ -842,7 +855,13 @@ function M.tick()
     local roster = U.mod("roster")
     for _, pc in ipairs(roster.humanPCs()) do
         local ok, why = eligible(pc, gs, startRef, false)
-        if ok then
+        -- COUCH CAMPAIGN: a guest left without a car means the grid patch missed him; taking over a campaign AI car
+        -- crashes the game natively (exe+0x641579 null+0xdf0, live 2026-10-14 twice). Spectating beats a crash.
+        local blocked = ok and blockedHere() or nil
+        if blocked then
+            U.logEvery("tko_couch", 30000, TAG, "%s: %s has no car, no AI takeover (spectates)", blocked, nameOf(pc))
+            return
+        elseif ok then
             local car = M.pickCar(gs)
             if car then M.takeOver(pc, car) end
             return
@@ -865,6 +884,12 @@ function M.forceAll()
     local gs = raceGS()
     if not gs then
         St.emit("status", "TAKEOVER: NO RACE GRID YET")
+        return
+    end
+    local blocked = blockedHere()
+    if blocked then
+        U.log(TAG, "forceAll: refused in a %s (possessing a campaign AI car crashes the game)", blocked)
+        St.emit("status", "TAKEOVER: OFF IN CAMPAIGN RACES")
         return
     end
     sweep()

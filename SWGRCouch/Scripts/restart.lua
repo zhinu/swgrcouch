@@ -78,7 +78,7 @@ end
 -- "P2" for a local PlayerController, "?" when unknown
 local function pnumDesc(pc)
     if not U.ok(pc) then return "?" end
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.key(lp.pc) == U.key(pc) then return "P" .. lp.index end
     end
     return "other"
@@ -608,7 +608,7 @@ local function twiceTick(st, now)
     if not sel then return end
     pcall(function() b:SetIsSelected(false, false) end)
     local by = controllerDesc()
-    local win = math.floor(opt("PauseRestartConfirmMs", 3000))
+    local win = math.floor(opt("PauseRestartConfirmMs", 5000))
     if st.armedUntil and now <= st.armedUntil then
         st.armedUntil = nil
         request(st, by, "second press within " .. win .. " ms")

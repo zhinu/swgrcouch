@@ -27,6 +27,17 @@
  *
  * Build: build.sh (clang --target=x86_64-pc-windows-msvc, no CRT, imports kernel32 only).
  *
+ * PAD WATCH (couch-livefix lazy join, 2026-10-16). A pad that is plugged in but has no LocalPlayer has no PlayerInput:
+ * its A could only be read by creating a (permanent: RemovePlayer crashes) LocalPlayer for it - the "dormant guest"
+ * that got split views / screens / the skip prompt live. Every Slate pad event still passes the GfnRawInput
+ * pre-processor of P1's subsystem (pre-processors see all input, whatever the user), so the wrappers note the rising
+ * edges of up to 4 watched keys per Slate UserIndex BEFORE the filter decision:
+ *     cfg line   watch <slot 0..3> <FName ComparisonIndex of the key>   (FKeyEvent::Key.KeyName at +0x28)
+ * One event reaches every processor (one per local player): a key counts as pressed only on its up -> down edge, so N
+ * processors give one press. The reload thread writes swgr_inputfilter.pads (every 50 ms when something changed):
+ *     padwatch=1 / writes=<n> / u <UserIndex> <down mask> <seq slot 0> <seq 1> <seq 2> <seq 3> / end
+ * (Lua ignores a file without the final "end": a torn read). Status line padwatch=1 tells Lua this DLL has it.
+ *
  * GAME BUILDS (2026-10-09). SWGR-Win64-Shipping.exe has a fixed image base 0x140000000 (no DYNAMIC_BASE), so every
  * address is hard-coded, once per known build, in the BUILDS table below:
  *     CL381121  488,290,328 bytes  (input-isolation.md)
@@ -78,6 +89,7 @@ __declspec(dllimport) void __stdcall Sleep(u32);
 #define EV_USERINDEX   0x0c            /* FInputEvent::UserIndex (KismetInputLibrary::GetUserIndex thunk)   */
 #define KEV_CHARCODE   0x40            /* FKeyEvent::CharacterCode (Key at 0x28, 0x18 bytes)               */
 #define KEV_KEYCODE    0x44            /* FKeyEvent::KeyCode; both 0 for gamepad buttons                   */
+#define KEV_KEYNAME    0x28            /* FKeyEvent::Key.KeyName.ComparisonIndex (FName, no case-preserving) */
 #define OBJ_INDEX      0x0c            /* UObjectBase::InternalIndex                                       */
 #define ITEM_STRIDE    24              /* FUObjectItem: Object +8, SerialNumber +0x10                      */
 #define DEBUGNAME_SLOT 11              /* IInputProcessor::GetDebugName, returns L"GfnRawInput"            */
@@ -133,7 +145,18 @@ static u64 g_reloads, g_tornRetries;
 static int g_tornTries;
 static const char *g_reason = "not loaded";
 static u64 g_wTag, g_wOk, g_wFail;              /* 'w' command: last applied tag, counters */
-static u16 g_cfgPath[600], g_statusPath[600];
+static u16 g_cfgPath[600], g_statusPath[600], g_padsPath[600];
+
+/* pad watch (header): written by the game's input thread only, read by the reload thread (a stale read only delays
+ * the next pads file by one period) */
+#define PADW_USERS 8
+#define PADW_KEYS  4
+#define PADS_MS    50
+static volatile u32 g_wKey[PADW_KEYS];                 /* watched FName comparison indices; 0 = slot unused        */
+static volatile u32 g_padDown[PADW_USERS];             /* bit k = watched key k is down for that UserIndex         */
+static volatile u32 g_padSeq[PADW_USERS][PADW_KEYS];   /* up -> down edges                                         */
+static volatile u32 g_padDirty;
+static u64 g_padWrites;
 
 /* ---- small helpers (no CRT) ---- */
 static int readable(u64 a, u64 n) {
@@ -229,6 +252,9 @@ static void writeStatus(void) {
     n = sappend(b, n, cap, "\nreload_ms="); n = uappend(b, n, cap, RELOAD_MS, 0);
     n = sappend(b, n, cap, "\nreloads="); n = uappend(b, n, cap, g_reloads, 0);
     n = sappend(b, n, cap, "\ntorn_retries="); n = uappend(b, n, cap, g_tornRetries, 0);
+    n = sappend(b, n, cap, "\npadwatch=1\nwatch=");
+    for (int k = 0; k < PADW_KEYS; k++) { if (k) n = sappend(b, n, cap, ","); n = uappend(b, n, cap, (u64)g_wKey[k], 0); }
+    n = sappend(b, n, cap, "\npad_writes="); n = uappend(b, n, cap, g_padWrites, 0);
     for (int i = 0; i < g_nown; i++) {
         Owner *o = &g_own[i];
         n = sappend(b, n, cap, "\no ctrl="); n = uappend(b, n, cap, (u64)o->ctrl, 0);
@@ -274,6 +300,7 @@ static void applyCfg(const char *b, int missing) {
     Owner keep[MAXOWN]; int nkeep = g_nown;
     for (int i = 0; i < nkeep; i++) keep[i] = g_own[i];
     g_nown = 0; g_enabled = 0; g_offset = 0;
+    u32 watch[PADW_KEYS] = { 0, 0, 0, 0 };          /* every cfg text lists the watched keys again (none = off) */
     /* 'w'/'wo' lines are applied once per tag. wSeen = the highest tag applied from an EARLIER cfg text: every line of
      * this text above it is applied, whatever the line order (verification 2026-10-09: inputfix.lua lists its pending
      * writes in pairs() order, so a 4-player race start can list tag 3 before tags 1 and 2; comparing each line with
@@ -340,14 +367,62 @@ static void applyCfg(const char *b, int missing) {
                 } else g_wFail++;
                 if (tag > g_wTag) g_wTag = tag;
             }
+        } else if (prefix(line, "watch ")) {
+            const char *q = line + 6; u64 slot = parseNum(&q), idx = parseNum(&q);
+            if (slot < PADW_KEYS && idx <= 0xffffffffULL) watch[slot] = (u32)idx;
         } else if (prefix(line, "enabled=")) { const char *q = line + 8; g_enabled = (int)parseNum(&q); }
         else if (prefix(line, "offset=")) { const char *q = line + 7; g_offset = (int)parseNum(&q); }
         else if (prefix(line, "seq=")) { const char *q = line + 4; g_seq = parseNum(&q); }
+    }
+    for (int k = 0; k < PADW_KEYS; k++) {
+        if (g_wKey[k] != watch[k]) {                  /* another key in this slot: its old down bits mean nothing */
+            for (int u = 0; u < PADW_USERS; u++) g_padDown[u] &= ~(1u << k);
+            g_wKey[k] = watch[k];
+            g_padDirty = 1;
+        }
     }
     resolve();
     g_lastResolve = GetTickCount64();
     unlockOwners();
     writeStatus();
+}
+
+/* ---- pad watch ---- */
+/* Called by the wrappers for pad key events (game input thread), before the filter decision. */
+static void padNote(const u8 *ev, int down) {
+    u32 user = *(const u32 *)(ev + EV_USERINDEX);
+    if (user >= PADW_USERS) return;
+    u32 name = *(const u32 *)(ev + KEV_KEYNAME);
+    if (!name) return;
+    for (int k = 0; k < PADW_KEYS; k++) {
+        if (g_wKey[k] != name) continue;
+        u32 bit = 1u << k;
+        if (down) {
+            if (!(g_padDown[user] & bit)) { g_padDown[user] |= bit; g_padSeq[user][k]++; g_padDirty = 1; }
+        } else if (g_padDown[user] & bit) {
+            g_padDown[user] &= ~bit; g_padDirty = 1;
+        }
+    }
+}
+
+/* swgr_inputfilter.pads: every UserIndex that ever pressed a watched key (header). Reload thread only. */
+static void writePads(void) {
+    static char b[1024]; int n = 0, cap = sizeof b;
+    g_padDirty = 0;
+    g_padWrites++;
+    n = sappend(b, n, cap, "padwatch=1\nwrites="); n = uappend(b, n, cap, g_padWrites, 0);
+    for (u32 u = 0; u < PADW_USERS; u++) {
+        u32 any = g_padDown[u];
+        for (int k = 0; k < PADW_KEYS; k++) any |= g_padSeq[u][k];
+        if (!any) continue;
+        n = sappend(b, n, cap, "\nu "); n = uappend(b, n, cap, u, 0);
+        n = sappend(b, n, cap, " "); n = uappend(b, n, cap, g_padDown[u], 0);
+        for (int k = 0; k < PADW_KEYS; k++) { n = sappend(b, n, cap, " "); n = uappend(b, n, cap, g_padSeq[u][k], 0); }
+    }
+    n = sappend(b, n, cap, "\nend\n");
+    HANDLE h = CreateFileW(g_padsPath, 0x40000000 /*GENERIC_WRITE*/, 1 | 2, 0, 2 /*CREATE_ALWAYS*/, 0x80, 0);
+    if (h == INVALID_HANDLE) { g_padDirty = 1; return; }
+    u32 w = 0; WriteFile(h, b, (u32)n, &w, 0); CloseHandle(h);
 }
 
 /* Re-reads the cfg when its write time or size changed (force = always). fromThread = called by the reload thread;
@@ -359,6 +434,7 @@ static void maybeReload(int fromThread, int force) {
     u64 now = GetTickCount64();
     if (fromThread || force || now - g_lastCheck >= RELOAD_MS) {
         g_lastCheck = now;
+        if (!g_threadOn && g_padDirty) writePads();   /* no reload thread: the input path writes the pads file */
         FILEATTR fa;
         int have = GetFileAttributesExW(g_cfgPath, 0, &fa) != 0;
         u64 t = have ? (((u64)fa.w_hi << 32) | fa.w_lo) : 0;
@@ -382,7 +458,13 @@ static void maybeReload(int fromThread, int force) {
  * input event arrives. Started from DllMain; it runs until the process exits (the module is pinned). */
 static u32 __stdcall reloadThread(void *arg) {
     (void)arg;
-    for (;;) { Sleep(RELOAD_MS); maybeReload(1, 0); }
+    u32 waited = 0;
+    for (;;) {
+        Sleep(PADS_MS);                               /* pad watch: a press reaches Lua within ~50 ms + its poll */
+        if (g_padDirty) writePads();
+        waited += PADS_MS;
+        if (waited >= RELOAD_MS) { waited = 0; maybeReload(1, 0); }
+    }
     return 0;
 }
 
@@ -419,7 +501,11 @@ static int keyIsPad(const u8 *ev) {
     return *(const u32 *)(ev + KEV_CHARCODE) == 0 && *(const u32 *)(ev + KEV_KEYCODE) == 0;
 }
 
-static u8 W_KeyDown(void *s, void *a, const u8 *e) { return allow(s, e, keyIsPad(e)) ? g_orig[K_DOWN](s, a, e) : 0; }
+static u8 W_KeyDown(void *s, void *a, const u8 *e) {
+    int pad = keyIsPad(e);
+    if (pad) padNote(e, 1);                           /* pad watch: before the filter (every user, joined or not) */
+    return allow(s, e, pad) ? g_orig[K_DOWN](s, a, e) : 0;
+}
 /* Releases of the KEYBOARD and MOUSE always pass: a key held while the filter switches on (cfg rewritten at a phase
  * change, owner table or offset changed) was recorded as down by every processor, and dropping its release would
  * leave it down for the non-owners for the rest of the race (a guest cannot send that keyboard key itself: stuck
@@ -428,6 +514,7 @@ static u8 W_KeyDown(void *s, void *a, const u8 *e) { return allow(s, e, keyIsPad
  * (a pad key stuck on a guest is cleared by the guest's own press/release of it). */
 static u8 W_KeyUp(void *s, void *a, const u8 *e) {
     if (!keyIsPad(e)) { maybeReload(0, 0); return g_orig[K_UP](s, a, e); }
+    padNote(e, 0);
     return allow(s, e, 1) ? g_orig[K_UP](s, a, e) : 0;
 }
 static u8 W_Analog(void *s, void *a, const u8 *e)  { return allow(s, e, 1) ? g_orig[K_ANALOG](s, a, e) : 0; }
@@ -509,8 +596,14 @@ static void install(void) {
 static void makePaths(void *self) {
     u32 n = GetModuleFileNameW(self, g_cfgPath, 500);
     while (n && g_cfgPath[n - 1] != '\\' && g_cfgPath[n - 1] != '/') n--;
-    static const char cfgName[] = "swgr_inputfilter.cfg", stName[] = "swgr_inputfilter.status";
-    for (u32 i = 0; i < n; i++) g_statusPath[i] = g_cfgPath[i];
+    static const char cfgName[] = "swgr_inputfilter.cfg", stName[] = "swgr_inputfilter.status",
+                      padsName[] = "swgr_inputfilter.pads";
+    for (u32 i = 0; i < n; i++) g_statusPath[i] = g_padsPath[i] = g_cfgPath[i];
+    {
+        u32 k = 0;
+        for (; padsName[k]; k++) g_padsPath[n + k] = (u16)padsName[k];
+        g_padsPath[n + k] = 0;
+    }
     u32 k = 0;
     for (; cfgName[k]; k++) g_cfgPath[n + k] = (u16)cfgName[k];
     g_cfgPath[n + k] = 0;

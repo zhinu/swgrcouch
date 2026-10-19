@@ -65,7 +65,7 @@ local function hasClass(o, classKey)
             tostring(C.CLASS[classKey] or classKey), classKey)
         return true
     end
-    local ok, v = pcall(function() return o:IsA(cls) end)
+    local ok, v = pcall(U.callMethod, o, "IsA", cls)
     return ok and v == true
 end
 
@@ -177,6 +177,7 @@ local function trackFitsClass(c)
         -- UE4SS __eq compares the same pointer U.key reads). Pods: 9 pod TrackDefs have no VehicleTypeTag, so they
         -- are only in the speeder lists of their planet (notes/research/track-whitelist.md §2).
         local function fname(o)
+            if not U.ok(o) then return "" end   -- GetFName on a null wrapper is a native AV
             local ok, n = pcall(function() return o:GetFName():ToString() end)
             return ok and n or ""
         end

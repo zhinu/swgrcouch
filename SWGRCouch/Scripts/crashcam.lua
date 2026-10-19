@@ -66,6 +66,11 @@ local C = require("consts")
 local cfg = require("config")
 local St = require("state")
 local U = require("util")
+-- couch-racegc: constant option lists (a literal in the call built a new table every call)
+local OPTS_CrashCamGuest = { "auto", "car", "keep", "off" }
+local OPTS_CrashCamPlayers = { "guests", "all" }
+local OPTS_WreckSlowMo = { "off", "last", "game" }
+local OPTS_CrashCamWreckHold = { "proven", "never", "always" }
 
 local M = {}
 local TAG = "crashcam"
@@ -92,9 +97,9 @@ local function num(v, d)
 end
 -- 0.6.0 (run G, F4a): the default is "car" (see the header: a guest crash camera can render BLACK while every
 -- check passes, so "auto" cannot tell a black one from a working one).
-local function guestMode() return opt(cfg.CrashCamGuest, { "auto", "car", "keep", "off" }, "auto") end
-local function playersMode() return opt(cfg.CrashCamPlayers, { "guests", "all" }, "guests") end
-local function slowMoMode() return opt(cfg.WreckSlowMo, { "off", "last", "game" }, "game") end
+local function guestMode() return opt(cfg.CrashCamGuest, OPTS_CrashCamGuest, "auto") end
+local function playersMode() return opt(cfg.CrashCamPlayers, OPTS_CrashCamPlayers, "guests") end
+local function slowMoMode() return opt(cfg.WreckSlowMo, OPTS_WreckSlowMo, "game") end
 
 ---------------------------------------------------------------------------------------------------- state
 -- St.crashcam per world; learned[pnum] (crash camera proved unusable) and the fade registration survive worlds.
@@ -125,14 +130,14 @@ end
 
 local function field(o, name)
     if o == nil then return nil end
-    local ok, v = pcall(function() return o[name] end)
+    local ok, v = pcall(U.getField, o, name)
     if ok then return v end
     return nil
 end
 
 local function call0(o, fn)
     if o == nil then return nil end
-    local ok, v = pcall(function() return o[fn](o) end)
+    local ok, v = pcall(U.callMethod, o, fn)
     if ok then return v end
     return nil
 end
@@ -176,11 +181,8 @@ local function photoMode()
     return false
 end
 
-local function worldSettings()
-    local ok, ws = pcall(function() return U.world().PersistentLevel.WorldSettings end)
-    if ok and U.ok(ws) then return ws end
-    return nil
-end
+-- couch-fix40: U.worldSettings (kept per world, U.ok-checked; the chain read was 2 wrappers + a closure per FAST tick)
+local function worldSettings() return U.worldSettings() end
 
 local function dilation()
     local ws = worldSettings()
@@ -195,7 +197,7 @@ local function localRacers()
         if ok and type(lrs) == "table" then return lrs end
     end
     local out = {}
-    for _, lp in ipairs(U.localPlayers()) do
+    for _, lp in ipairs(U.localPlayersRO()) do
         if U.ok(lp.pc) then
             local ps = field(lp.pc, "PlayerState")
             local rec = U.ok(ps) and field(ps, "RaceEventComponent") or nil
@@ -210,35 +212,61 @@ local function localRacers()
 end
 
 -- The player's car: its racer PlayerState's pawn, else the PC's pawn; a VehiclePawn only (photo mode pawn: nil).
-local function carOf(s, e)
-    for _, p in ipairs({ field(e.ps, "PawnPrivate"), call0(e.pc, "K2_GetPawn") }) do
-        if U.ok(p) then
-            local k = U.key(p)
-            local v = s.comp[k]
-            if v == nil then
-                v = { veh = U.isVehicle(p) }
-                s.comp[k] = v
-            end
-            if v.veh then return p, v end
-        end
+-- couch-fix40: K2_GetPawn only when PawnPrivate is no vehicle (same order and result; the candidate table and the
+-- second call were made every FAST tick per player)
+local function vehEntry(s, p)
+    if not U.ok(p) then return nil end
+    local k = U.key(p)
+    local v = s.comp[k]
+    if v == nil then
+        v = { veh = U.isVehicle(p) }
+        s.comp[k] = v
     end
+    if v.veh then return v end
+    return nil
+end
+local K2_GETPAWN = "/Script/Engine.Controller:K2_GetPawn"
+local function carOf(s, e)
+    local p = field(e.ps, "PawnPrivate")
+    if p == nil then return nil, nil end              -- (the old candidate list stopped at a nil first entry too)
+    local v = vehEntry(s, p)
+    if v then return p, v end
+    local ok, p2 = U.pcallFn(e.pc, K2_GETPAWN, "K2_GetPawn")
+    v = ok and vehEntry(s, p2) or nil
+    if v then return p2, v end
     return nil, nil
 end
 
 -- The car's crash camera actor (VehicleCrashCamComponent.CrashCam @0x108; spawned at the first crash, then reused).
-local function crashCamOf(car, cache)
+local CAM_REREAD_MS, CAM_NONE_MS = 1000, 250
+local function crashCamOf(car, cache, vtKey, carKey, force)
     if not cache.cc or not U.ok(cache.cc) then
         local now = St.nowMs()
         if now < (cache.ccRetryAt or 0) then return nil end          -- no component: looked up again every 2 s
         cache.ccRetryAt = now + 2000
         local cls = U.class("/Script/Griffin.VehicleCrashCamComponent")
         if not U.ok(cls) then return nil end
-        local ok, comp = pcall(function() return car:GetComponentByClass(cls) end)
+        local ok, comp = pcall(U.callMethod, car, "GetComponentByClass", cls)
         if not ok or not U.ok(comp) then return nil end
         cache.cc = comp
     end
-    local cam = field(cache.cc, "CrashCam")
-    if U.ok(cam) then return cam end
+    -- couch-fix40: the camera actor is kept per car once seen (U.ok-checked at every use) and read again when the
+    -- view target is neither the car nor that actor (a new crash camera), else every CAM_REREAD_MS; while the car has
+    -- none yet (before its first crash) it is read every FAST tick while the view is not on the car, else every
+    -- CAM_NONE_MS (nothing uses it then: the view is the car)
+    local now = St.nowMs()
+    local cam = cache.cam
+    local camOk = cam ~= nil and U.ok(cam)
+    local vk = vtKey or 0
+    local fresh = (vk ~= 0 and vk ~= (carKey or 0) and (not camOk or vk ~= cache.camKey))
+        or now >= (cache.camReadAt or 0) or force == true
+    if fresh then
+        cam = field(cache.cc, "CrashCam")
+        camOk = U.ok(cam)
+        cache.cam, cache.camKey = camOk and cam or nil, camOk and U.key(cam) or 0
+        cache.camReadAt = now + (camOk and CAM_REREAD_MS or CAM_NONE_MS)
+    end
+    if camOk then return cam end
     return nil
 end
 
@@ -270,13 +298,14 @@ local function fixLetterbox(cam, pnum)
     -- included) and the game's crash shots render in the guest's half. The flag is still cleared as well.
     for _, comp in ipairs(list) do
         if U.ok(comp) then
-            local okW, w = pcall(function() return comp.PostProcessBlendWeight end)
+            local okW, w = pcall(U.getField, comp, "PostProcessBlendWeight")
             if okW and type(w) == "number" and w > 0 then
                 pcall(function() comp.PostProcessBlendWeight = 0.0 end)
                 U.log(TAG, "P%d crash camera post-process weight %.2f -> 0 (%s): no letterbox in a guest view (V-GCB-03)",
                     pnum or 0, w, comp:GetFName():ToString())
             end
-            local okR, on = pcall(function() return comp:GetConstraintAspectRatioUsingPostProcess() end)
+            local okR, on = U.pcallFn(comp, "/Script/Engine.CameraComponent:GetConstraintAspectRatioUsingPostProcess",
+                "GetConstraintAspectRatioUsingPostProcess")      -- couch-fix40: kept UFunction wrapper
             if okR and on == true then
                 pcall(function() comp:SetConstrainAspectRatioUsingPostProcess(false) end)
                 fixLogged[k] = (fixLogged[k] or 0) + 1
@@ -339,7 +368,7 @@ local function camInfo(cam)
         local m = field(comp, "InitialCameraMode")
         if U.ok(m) then modeReadOk = true end
         im = U.ok(m) and objName(m) or (m ~= nil and "NONE" or "?")
-        local ok, n = pcall(function() return comp:GetActiveStackName() end)
+        local ok, n = pcall(U.callMethod, comp, "GetActiveStackName")
         stack = ok and U.str(n) or "?"
         cl = locS(vec3(call0(comp, "K2_GetComponentLocation")))
     end
@@ -604,6 +633,8 @@ local function endCrash(s, e, pr, car, now, why)
         c.why and (": " .. c.why) or "")
 end
 
+local GET_VIEW_TARGET = "/Script/Engine.PlayerController:GetViewTarget"
+local VS_REREAD_MS = 1000
 -- FAST, per local human of a split race.
 local function stepPlayer(s, e, lrs, now, dil)
     local pr = s.p[e.key]
@@ -620,12 +651,20 @@ local function stepPlayer(s, e, lrs, now, dil)
         return
     end
     if not car then return end
-    local vt = call0(e.pc, "GetViewTarget")
-    local cam = crashCamOf(car, cache)
+    local okV, vt = U.pcallFn(e.pc, GET_VIEW_TARGET, "GetViewTarget")   -- couch-fix40: kept UFunction wrapper
+    if not okV then vt = nil end
+    local vtK = U.key(vt)
+    local cam = crashCamOf(car, cache, vtK, U.key(car))
     if cam and e.pnum ~= 1 and cfg.CrashCamLetterboxFix ~= false then fixLetterbox(cam, e.pnum) end
     local camKey = U.key(cam)
-    local onCam = camKey ~= 0 and U.key(vt) == camKey
-    local vs = field(car, "VehicleState")
+    local onCam = camKey ~= 0 and vtK == camKey
+    -- couch-fix40: the car's VehicleState object kept per car (U.ok-checked; read again when it is not valid, and every
+    -- VS_REREAD_MS in case the car points at another one)
+    local vs = cache.vs
+    if vs == nil or not U.ok(vs) or now >= (cache.vsReadAt or 0) then
+        vs = field(car, "VehicleState")
+        cache.vs, cache.vsReadAt = U.ok(vs) and vs or nil, now + VS_REREAD_MS
+    end
     -- the crash timer counts only while it CHANGES (a value left > 0 after a crash must not read as a crash forever)
     local rem = U.ok(vs) and tonumber(field(vs, "CrashTimeRemaining")) or nil
     local remWas = pr.rem
@@ -715,12 +754,12 @@ function M.crashCamBad(pc)
     -- unusable in the second view (H-CC1). "proven" (default): the wreck camera is held only for a guest whose crash
     -- camera was seen working in an earlier crash; "never": guests never get the hold; "always": only a known-bad one
     -- is skipped (the 0.5.0 behaviour + learned verdicts).
-    local wh = opt(cfg.CrashCamWreckHold, { "proven", "never", "always" }, "proven")
+    local wh = opt(cfg.CrashCamWreckHold, OPTS_CrashCamWreckHold, "proven")
     if wh == "never" then return true, "CrashCamWreckHold never" end
     if wh == "proven" then
         local pnum = pr and pr.pnum or nil
         if not pnum then
-            for _, lp in ipairs(U.localPlayers()) do
+            for _, lp in ipairs(U.localPlayersRO()) do
                 if U.key(lp.pc) == U.key(pc) then pnum = lp.index end
             end
         end
@@ -754,7 +793,7 @@ function M.dump()
     for _, e in ipairs(localRacers()) do
         local pr = s.p[e.key]
         local car, cache = carOf(s, e)
-        local cam = car and crashCamOf(car, cache) or nil
+        local cam = car and crashCamOf(car, cache, nil, nil, true) or nil
         local c = pr and pr.crash or { since = St.nowMs(), cam = cam, camKey = U.key(cam), phase = "-" }
         probe(s, e, c, car, pr and pr.crash and "F9 (in crash)" or "F9")
     end

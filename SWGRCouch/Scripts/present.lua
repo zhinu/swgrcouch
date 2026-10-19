@@ -81,13 +81,27 @@ end
 
 ---------------------------------------------------------------------------------------------------- CSM queries
 -- Find-only (never LoadAsset from the MAIN poll): a state asset that is not in memory cannot be active.
-local assetCache = {}
+-- Race smoothness (2026-10-15: present.tick spikes in the countdown): a state asset NOT in memory was looked up again
+-- on every call (raw StaticFindObject, ~2.5 ms in a race world), several per MAIN tick while decide() walks the rules
+-- down to the pre-race states. A miss is now trusted for MISS_TTL_MS (per world), and at most MISS_FINDS_PER_TICK
+-- earlier misses are looked up again per MAIN tick (the others wait: not in memory = inactive). A name never looked
+-- up in this world is always looked up (no budget: a loaded state is never reported inactive by the budget).
+local MISS_TTL_MS, MISS_FINDS_PER_TICK = 1000, 1
+local assetCache, missAt, missWorld = {}, {}, nil
+local findBudget = MISS_FINDS_PER_TICK
 local function stateAsset(name)
     local o = assetCache[name]
     if o and U.ok(o) then return o end
-    local ok, f = pcall(StaticFindObject, rf(name))
-    if ok and U.ok(f) then assetCache[name] = f; return f end
     assetCache[name] = nil
+    if missWorld ~= St.worldGen then missWorld, missAt = St.worldGen, {} end
+    local at = missAt[name]
+    if at then
+        if St.nowMs() - at < MISS_TTL_MS or findBudget <= 0 then return nil end
+        findBudget = findBudget - 1
+    end
+    local ok, f = pcall(StaticFindObject, rf(name))
+    if ok and U.ok(f) then assetCache[name] = f; missAt[name] = nil; return f end
+    missAt[name] = St.nowMs()
     return nil
 end
 
@@ -97,7 +111,8 @@ local function stateActive(name)
     if not U.ok(mgr) then return nil end
     local a = stateAsset(name)
     if not a then return false end
-    local ok, v = pcall(function() return mgr:IsStateActiveByRef(a) end) -- IsStateActiveByRef(Object) -> Bool
+    -- IsStateActiveByRef(Object) -> Bool, through the cached UFunction (couch-racegc: no wrapper per call)
+    local ok, v = U.pcallFn(mgr, U.CSM_ACTIVE_FN or "", "IsStateActiveByRef", a)
     if ok and type(v) == "boolean" then return v end
     return nil
 end
@@ -197,49 +212,112 @@ function M.clearIgnition()
     if ig then U.try(TAG, ig.clear) end
 end
 
----------------------------------------------------------------------------------------------------- podium hologram
--- 0.13.0 (Jules 2026-10-12: "in the hologram of the race finish screens, three characters get multiplied"): the race
--- outro spawns one BP_PodiumHolo_C per local player, all at the same spot (live: 4 at one location in a 4-player race,
--- plus the class template at the origin), so the podium figures overlap 4 times. POSTRACE: of the holograms at one
--- location the first (by name) stays, the others are hidden (SetActorHiddenInGame). Find-only, throttled.
-local holoMs, holoWorld, holoHidden, holoKept = -1e12, nil, 0, {}
-local function podiumTick()
+---------------------------------------------------------------------------------------------------- outro duplicates
+-- Same cause, the whole results-droid assembly (Jules 2026-10-14, every split mode: "the droid is doubled", then "the
+-- disc still has a duplicate"): the outro plays LS_ResultDroid_Common once per local player (live: two
+-- LevelSequenceActors 4.2 s apart in a 2P race) and EACH spawns its own droid (SkeletalMeshActor SK_Pistachio_01),
+-- projector disc (StaticMeshActor SM_CIN_HandheldProjector_A_01), SpotLight, hologram FX (NiagaraActor), podium
+-- hologram (BP_PodiumHolo_C) and CineCameraActor at the same spot, animated 4 s apart. POSTRACE: per class, the
+-- runtime-spawned actors (age > 0: level / sequence templates report 0) are grouped by spot (+ mesh for the mesh
+-- actors); the OLDEST of a group stays (the set already on screen, the same set for every class), the others are
+-- hidden. This replaces the 0.13.0 podium-only pass (it kept the first NAME, i.e. a hologram of the other set).
+local OUTRO_CLASSES = { "SkeletalMeshActor", "StaticMeshActor", "SpotLight", "NiagaraActor", "BP_PodiumHolo_C" }
+                                         -- exact classes (U.className), never subclasses such as level meshes
+-- COST: every FindAllOf walks the whole object array (several ms in a race world, ~30 ms live; Jules saw the stutters
+-- of a 500 ms version live). So: three passes per results visit (the sequences spawn their sets ~4 s apart), at
+-- POSTRACE + 3 / 8 / 14 s, then nothing; each pass is spread over the MAIN ticks, ONE walk per tick (2026-10-15: the
+-- 6 walks of a pass in one tick made a ~100 ms present.tick hitch): the sequences, then one class per tick, then the
+-- grouping. Ages read on a later tick are taken back to the sequences' tick (game time ~ our clock).
+local OUTRO_PASSES_MS = { 3000, 8000, 14000 }
+local outWorld, outKept, outHidden, outStart, outNext, outPass = nil, {}, 0, nil, 1, nil
+local walkedThisTick = false                       -- one FindAllOf per MAIN tick for the whole POSTRACE work
+local function outroDedupeTick()
     if cfg.PresentPodiumDedupe == false then return end
     local now = St.nowMs()
-    if now - holoMs < 500 then return end
-    holoMs = now
-    if holoWorld ~= St.worldGen then holoWorld, holoHidden, holoKept = St.worldGen, 0, {} end
-    local all = FindAllOf("BP_PodiumHolo_C")
-    if not all then return end
-    local groups = {}
-    for _, a in ipairs(all) do
-        pcall(function()
-            if not U.ok(a) then return end
-            local l = a:K2_GetActorLocation()
-            if math.abs(l.X) + math.abs(l.Y) + math.abs(l.Z) < 1 then return end      -- the template at the origin
-            local k = string.format("%d:%d:%d", math.floor(l.X / 10), math.floor(l.Y / 10), math.floor(l.Z / 10))
-            groups[k] = groups[k] or {}
-            table.insert(groups[k], { a = a, name = a:GetFName():ToString() })
-        end)
+    if outWorld ~= St.worldGen then
+        outWorld, outKept, outHidden, outStart, outNext, outPass = St.worldGen, {}, 0, now, 1, nil
     end
-    for k, g in pairs(groups) do
+    if not outPass then
+        local at = OUTRO_PASSES_MS[outNext]
+        if not at or now - outStart < at then return end
+        outNext = outNext + 1
+        outPass = { step = 0, groups = {} }
+    end
+    local ps = outPass
+    if ps.step == 0 then
+        -- only what the result sequences spawned: no older than the oldest LS_ResultDroid* sequence actor (+1 s). Live
+        -- 2026-10-14 the first version also hid level geometry (BP_GfnStaticMeshActor_C pipes placed twice in L_Husky_P2P).
+        local seqAge = nil
+        walkedThisTick = true
+        for _, sa in ipairs(FindAllOf("LevelSequenceActor") or {}) do
+            if U.ok(sa) then
+                pcall(function()
+                    local seq = sa.LevelSequenceAsset
+                    if U.ok(seq) and U.objName(seq):find("^LS_ResultDroid") then
+                        local age = tonumber(sa:GetGameTimeSinceCreation()) or 0
+                        if seqAge == nil or age > seqAge then seqAge = age end
+                    end
+                end)
+            end
+        end
+        if seqAge == nil then outPass = nil; return end
+        ps.seqAge, ps.t0, ps.step = seqAge, now, 1
+        return
+    end
+    local cls = OUTRO_CLASSES[ps.step]
+    if cls then
+        ps.step = ps.step + 1
+        local late = (now - ps.t0) / 1000                -- seconds since the sequences' ages were read
+        local groups = ps.groups
+        walkedThisTick = true
+        for _, a in ipairs(FindAllOf(cls) or {}) do
+            if U.ok(a) and U.className(a) == cls then
+                pcall(function()
+                    local age = tonumber(a:GetGameTimeSinceCreation()) or 0
+                    if age <= 0 or age - late > ps.seqAge + 1 then return end
+                    local mesh = ""
+                    if cls == "SkeletalMeshActor" then
+                        pcall(function() mesh = U.objName(a.SkeletalMeshComponent.SkeletalMesh) end)
+                    elseif cls == "StaticMeshActor" then
+                        pcall(function() mesh = U.objName(a.StaticMeshComponent.StaticMesh) end)
+                    end
+                    local l = a:K2_GetActorLocation()
+                    if math.abs(l.X) + math.abs(l.Y) + math.abs(l.Z) < 1 then return end
+                    local k = string.format("%s/%s@%d:%d:%d", U.className(a), mesh, math.floor(l.X / 10),
+                        math.floor(l.Y / 10), math.floor(l.Z / 10))
+                    groups[k] = groups[k] or {}
+                    table.insert(groups[k], { a = a, name = U.objName(a), age = age })
+                end)
+            end
+        end
+        return
+    end
+    outPass = nil
+    for k, g in pairs(ps.groups) do
+        local live = {}
+        for _, x in ipairs(g) do if U.ok(x.a) then live[#live + 1] = x end end
+        g = live
         if #g > 1 then
-            -- the first one seen at this spot stays (they spawn one by one: never hide the one already shown)
-            local kept = holoKept[k]
+            local kept = outKept[k]
             table.sort(g, function(x, y)
                 if x.name == kept then return true elseif y.name == kept then return false end
-                return x.name < y.name
+                return x.age > y.age                 -- oldest first
             end)
-            holoKept[k] = g[1].name
+            outKept[k] = g[1].name
             for i = 2, #g do
                 local hid = false
                 pcall(function() hid = g[i].a.bHidden == true end)
                 if not hid then
                     pcall(function() g[i].a:SetActorHiddenInGame(true) end)
-                    holoHidden = holoHidden + 1
-                    U.log(TAG, "podium hologram %s hidden: %d at this spot, %s kept (V-PRE-POD)", g[i].name, #g, g[1].name)
+                    outHidden = outHidden + 1
+                    U.log(TAG, "outro duplicate %s hidden: %d at this spot (%s), %s kept (V-PRE-POD)", g[i].name, #g,
+                        k:match("^[^@]+") or "?", g[1].name)
                 end
             end
+            -- a copy the older pass hid in THIS set is shown again (the kept one is the oldest now)
+            local hid1 = false
+            pcall(function() hid1 = g[1].a.bHidden == true end)
+            if hid1 then pcall(function() g[1].a:SetActorHiddenInGame(false) end) end
         end
     end
 end
@@ -247,9 +325,19 @@ end
 -- 0.13.0 (Jules: "FINISHED · You came 4th" on the full-screen outro, P1 had won): in the one full-screen view of the
 -- post-race phase every player's WBP_Hud_Race_C is still in the viewport, stacked: the last one (P4's) covers P1's.
 -- POSTRACE + one view: the guests' race HUDs go transparent (render opacity 0; the race is over, nothing restores them).
+-- COST (race smoothness 2026-10-15): the FindAllOf ran every MAIN tick of the full-screen outro (present.tick spikes
+-- all through POSTRACE). The guests' HUDs are all there when the outro starts and nothing shows them again, so: a few
+-- passes per world, at HUD_PASSES_MS after the one view is first seen in POSTRACE, then nothing.
+local HUD_PASSES_MS = { 0, 1000, 3000, 8000 }
 local hudWorld = nil
+local hudPassWorld, hudPassStart, hudPassNext = nil, nil, 1
 local function guestHudTick()
-    if cfg.PresentOutroP1Hud == false or not M.isSingleView() then return end
+    if cfg.PresentOutroP1Hud == false or not M.isSingleView() or walkedThisTick then return end
+    local now = St.nowMs()
+    if hudPassWorld ~= St.worldGen then hudPassWorld, hudPassStart, hudPassNext = St.worldGen, now, 1 end
+    local at = HUD_PASSES_MS[hudPassNext]
+    if not at or now - hudPassStart < at then return end
+    hudPassNext = hudPassNext + 1
     local p1 = U.p1()
     if not U.ok(p1) then return end
     local n = 0
@@ -276,8 +364,9 @@ function M.tick()
     if St.race.singleView == true then return end -- join's race_enter guard: one view by design (split.lua)
     local lps = U.localPlayers()
     if #lps < 2 then return end
+    findBudget, walkedThisTick = MISS_FINDS_PER_TICK, false
     U.try(TAG, viewTick)
-    if St.phase == "POSTRACE" then U.try(TAG, podiumTick); U.try(TAG, guestHudTick) end
+    if St.phase == "POSTRACE" then U.try(TAG, outroDedupeTick); U.try(TAG, guestHudTick) end
     local ig = ignitionMod()
     if ig then U.try(TAG, ig.tick, lps) end
 end

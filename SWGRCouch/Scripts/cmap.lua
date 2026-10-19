@@ -313,7 +313,7 @@ local function unlockButtons()
     local arr = P.sel.Buttons                             -- TArray<WBP_Diegetic_MapOverview_Btn_C>
     local n = U.arrayCount(arr)
     for i = 1, n do                                       -- never past #arr (reading past the end grows it)
-        local okB, b = pcall(function() return arr[i] end)
+        local okB, b = pcall(U.getField, arr, i)
         if okB and U.ok(b) then
             pcall(function() b:SetAvailable(true) end)    -- every planet bright, no scanlines
             pcall(function() b:SetCurrentPlanet(false) end) -- no ship icon
@@ -322,7 +322,7 @@ local function unlockButtons()
     end
     P.firstBtn = 0
     if n > 0 then
-        local okB, b = pcall(function() return arr[1] end)
+        local okB, b = pcall(U.getField, arr, 1)
         if okB then P.firstBtn = U.key(b) end
     end
     return n

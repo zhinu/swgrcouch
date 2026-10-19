@@ -9,7 +9,7 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION = "0.13.2"
+C.VERSION = "1.0.0"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
 C.TAB_LABEL = "FREE MODE"     -- 0.11.0: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 
@@ -195,6 +195,10 @@ C.FN = {
     -- PlayAnimation(Object InAnimation, Float StartAtTime, Int NumLoopsToPlay, Byte PlayMode, Float PlaybackSpeed,
     --   Bool bRestoreState) -> Struct<WidgetAnimationHandle>
     PlayAnimation         = "/Script/UMG.UserWidget:PlayAnimation",
+    -- PlayAnimationForward(Object InAnimation, Float PlaybackSpeed, Bool bRestoreState): #94, the last call of a
+    --   WBP_Hud_GameFeed_Message's Initialise (decoded: SetText, SetText, PlayAnimationForward(Anim_TextReveal));
+    --   WBP_Hud_Message's Initialise ends with PlayAnimation(Anim_In)
+    PlayAnimationForward  = "/Script/UMG.UserWidget:PlayAnimationForward",
     -- GetFullScreenEffectsEnabled() -> Bool, flags 0x54020401 (BlueprintPure const; BP_VehicleState's Tick reads it)
     FullScreenFx          = "/Script/Griffin.GfnUserSettings:GetFullScreenEffectsEnabled",
 }
@@ -204,32 +208,33 @@ C.FN = {
 -- MinimumDisplayTime (s), repost = a plain AddMessage post the game removes for EVERY player (RemoveMessage by id /
 -- FlushMessageContainer): re-posted for the players that still hold it; global = no player (shown in every HUD);
 -- perHud = posted by EVERY HUD instance (WBP_HUD_EliminationInfo2): the first post goes to every HUD, the duplicates
--- within 1.5 s are hidden.
+-- within 1.5 s are hidden. prio = Row.Priority (#94: each container shows its queued messages by priority, then
+-- oldest; a full container BUMPS a strictly lower shown one back into its queue).
 C.MSG_CONTAINERS = { "HUD_Notification_Container", "Hud_Notification_GameFeed", "Hud_Notification_CrashFeed" }
 local FEED, CENTER, CRASH = "Hud_Notification_GameFeed", "HUD_Notification_Container", "Hud_Notification_CrashFeed"
 C.MSG = {
-    Vulnerable                 = { c = FEED,   text = "System Malfunction",        min = 0,    repost = true },
-    VulnerableDueToStatus      = { c = FEED,   text = "{Status}",                  min = 0 },
-    VulnerableDueToChoked      = { c = FEED,   text = "{Status}",                  min = 0 },
-    PerfectLanding             = { c = FEED,   text = "Perfect Landing",           min = 5 },
-    Takedown                   = { c = FEED,   text = "{Player} Taken down",       min = 5 },
-    ShieldBroken               = { c = FEED,   text = "SHIELD BROKEN",             min = 3 },
-    SurgeExtended              = { c = FEED,   text = "Surge extended ({Reason})", min = 1.5 },
-    SurgeEnded                 = { c = FEED,   text = "Surge ended ({Reason})",    min = 3 },
-    WrongWay                   = { c = CENTER, text = "Wrong Way",                 min = 0,    repost = true },
-    OutOfBounds                = { c = CENTER, text = "Out of Bounds",             min = 0,    repost = true },
-    AffixDamaged               = { c = CENTER, text = "{Affix} damaged",           min = 3 },
-    AutopilotActive            = { c = CENTER, text = "Autopilot Active",          min = 0 },
-    AutopilotEnding            = { c = CENTER, text = "Autopilot Ending",          min = 0 },
-    DisruptorTarget            = { c = CENTER, text = "Targeted by {player}",      min = 0 },
-    RacerEliminated            = { c = CENTER, text = "{Player} eliminated",       min = 2,    perHud = true },
-    RacerKnockedOut            = { c = CENTER, text = "Knocked Out",               min = 2,    perHud = true },
-    TakendownBy                = { c = CRASH,  text = "Taken down by {Player}",    min = 0 },
-    BurningExploded            = { c = CRASH,  text = "Burning Explosion!",        min = 0,    repost = true },
-    CorrosionExploded          = { c = CRASH,  text = "Vehicle Corroded!",         min = 0,    repost = true },
-    RamjetExploded             = { c = CRASH,  text = "Ramjet Exploded!",          min = 0,    repost = true },
-    RaceEndingTimer            = { c = FEED,   text = "Race ending in {seconds}",  min = 1.75, global = true },
-    RaceEndingTimerLongDisplay = { c = FEED,   text = "Race ending in {seconds}",  min = 5,    global = true },
+    Vulnerable                 = { c = FEED,   text = "System Malfunction",        min = 0,    repost = true, prio = 205 },
+    VulnerableDueToStatus      = { c = FEED,   text = "{Status}",                  min = 0, prio = 210 },
+    VulnerableDueToChoked      = { c = FEED,   text = "{Status}",                  min = 0, prio = 207 },
+    PerfectLanding             = { c = FEED,   text = "Perfect Landing",           min = 5, prio = 200 },
+    Takedown                   = { c = FEED,   text = "{Player} Taken down",       min = 5, prio = 200 },
+    ShieldBroken               = { c = FEED,   text = "SHIELD BROKEN",             min = 3, prio = 0 },
+    SurgeExtended              = { c = FEED,   text = "Surge extended ({Reason})", min = 1.5, prio = 100 },
+    SurgeEnded                 = { c = FEED,   text = "Surge ended ({Reason})",    min = 3, prio = 0 },
+    WrongWay                   = { c = CENTER, text = "Wrong Way",                 min = 0,    repost = true, prio = 225 },
+    OutOfBounds                = { c = CENTER, text = "Out of Bounds",             min = 0,    repost = true, prio = 230 },
+    AffixDamaged               = { c = CENTER, text = "{Affix} damaged",           min = 3, prio = 100 },
+    AutopilotActive            = { c = CENTER, text = "Autopilot Active",          min = 0, prio = 250 },
+    AutopilotEnding            = { c = CENTER, text = "Autopilot Ending",          min = 0, prio = 250 },
+    DisruptorTarget            = { c = CENTER, text = "Targeted by {player}",      min = 0, prio = 202 },
+    RacerEliminated            = { c = CENTER, text = "{Player} eliminated",       min = 2,    perHud = true, prio = 280 },
+    RacerKnockedOut            = { c = CENTER, text = "Knocked Out",               min = 2,    perHud = true, prio = 281 },
+    TakendownBy                = { c = CRASH,  text = "Taken down by {Player}",    min = 0, prio = 350 },
+    BurningExploded            = { c = CRASH,  text = "Burning Explosion!",        min = 0,    repost = true, prio = 0 },
+    CorrosionExploded          = { c = CRASH,  text = "Vehicle Corroded!",         min = 0,    repost = true, prio = 0 },
+    RamjetExploded             = { c = CRASH,  text = "Ramjet Exploded!",          min = 0,    repost = true, prio = 0 },
+    RaceEndingTimer            = { c = FEED,   text = "Race ending in {seconds}",  min = 1.75, global = true, prio = 500 },
+    RaceEndingTimerLongDisplay = { c = FEED,   text = "Race ending in {seconds}",  min = 5,    global = true, prio = 500 },
 }
 
 -- 0.7.0 uxsplit.lua colours (FLinearColor, linear RGB; notes/research/ux-split-visuals.md §1.1, §4.3-4.5).

@@ -1,22 +1,24 @@
--- run.lua: GALAXY RUN, a rogue-style career for 1-4 couch players (0.13.0, Jules 2026-10-11: "Think about creating a
--- career mode for 2 to 4 players. Rogue multiplayer would be awesome.").
+-- run.lua: GALAXY RUN v3 "LEAGUE RUN" - the game's real rogue mode (the campaign "Run") rebuilt for 1-4 couch
+-- players (design notes/design/galaxy-run-v3.md; research notes/research/rogue-mode/00-ANALYSIS.md).
 --
 -- Mod-owned: the run lives in Mods/SWGRCouch/run.txt (+ run-history.txt). It never opens, continues or abandons the
--- game's CAMPAIGN / tour and never writes the game's save. It rides on FREE MODE's own paths:
---   * start: OPTIONS > Galaxy run = 4 / 6 / 9 races; the next race launched from FREE MODE is race 1 (any track the
---     players chose). Everyone starts on a STARTER build (the pilot's kit with 2 abilities, every level 0, no parts,
---     no traits): growing it is the run.
---   * launch.start -> M.prelaunch(choice): a run race gets each player's run build (the cards' build, kept to what the
---     player owns and to the level cap) and the AI tier of the race number (TIER 1 -> 6 over the run, speeders).
---   * POSTRACE edge -> snapshot of every racer's place (RacingGameState.Racers + RaceEventComponent); FRONTEND ->
---     settle: points 25/18/15/12/10/8/6/4/2/1 per human, the TEAM TARGET (a human in the top 5 early, top 3 in the
---     middle, 1st in the final) or the team loses a hull point (3 at the start; 0 = RUN LOST), +1 level cap, and a
---     REWARD offer per player: 3 real perks (ability / crash, part, trait or +1 level cap), 4 for the last human.
---   * between races the FREE MODE START opens RACE SETUP right on the racer cards for the run's next race (planet /
---     track / condition / mode picked by the run, never the same track twice); each card opens its reward picker first,
---     PERKS pickers list owned perks only, L/R on perks and the KIT row are locked, levels stop at the cap.
---   * a race left before its end (EXIT TO MAIN MENU) or restarted does not count: the same race again.
--- Every game read is pcall-guarded; the module never touches a front-end widget (lobby / setup / racers render).
+-- game's CAMPAIGN / tour and never writes the game's save. The CONTENT is the campaign's, baked into rundata.lua
+-- (generated from the decoded assets by galactic-racer/scripts/gen-rundata.py):
+--   * presets = the real Acts: QUALIFIER (Act I planets, Championship vs Sebulba), LEAGUE (Act II, Gauntlet +
+--     Championship vs Kestar), KESTAR'S LEAGUE (Act III, podracer finale), SPRINT (short Act I cut);
+--   * per planet a seeded NODE MAP (the campaign's map-gen rules: 3 starting paths, per-column path joins, weighted
+--     activities with the real no-repeat list); the team picks the next node (the picker cycles with RIGHT);
+--   * node kinds v3.0: RACE (standard), ELIMINATOR (high risk: best human top 3 or -1 token), FIELD TEST
+--     (humans-only, everybody finishes), PODRACER TEST (Act III pods interlude, token on a miss) and the boss
+--     events GALACTIC GAUNTLET / CHAMPIONSHIP RACE (must-win: -1 token and the same event again);
+--   * LEAGUE TOKENS are the lives (the campaign's strikes; R.hull keeps its name for the consumers): lost on a
+--     missed eliminator / plane target, a lost boss event and a race every human wrecked out of; 0 = RUN LOST;
+--   * CREDITS use the real payout tables (position x planet depth, eliminators pay one planet ahead, skipping a
+--     reward pays the real skip bonus) and the real shop prices; a wreck turns a part FAULTY (repair = real price);
+--   * rewards are rarity-rolled with the real per-planet ramp, mapped onto the mod's perk grades (real affixes are
+--     the v3.3 research item).
+-- The launch/result plumbing is unchanged (prelaunch <- launch.lua, snapshot <- POSTRACE edge, settle <- FRONTEND);
+-- every game read is pcall-guarded; the module never touches a front-end widget (lobby / setup / racers render).
 local U = require("util")
 local St = require("state")
 local cfg = require("config")
@@ -25,8 +27,11 @@ local settings = require("settings")
 local TAG = "run"
 local M = {}
 
+local okD, D = pcall(require, "rundata")
+if not okD or type(D) ~= "table" then D = nil end
+
 local POINTS = { 25, 18, 15, 12, 10, 8, 6, 4, 2, 1 }
-local HULL_START = 3
+local RIVAL_BONUS = 500
 local FILE, HISTORY = "run.txt", "run-history.txt"
 
 local R = nil            -- the run (persisted); nil = none
@@ -97,10 +102,12 @@ local function loadFile()
     local chunk = load(text, "run.txt", "t", {})
     if not chunk then U.warn(TAG, "run.txt unreadable: the run starts over"); return end
     local ok, t = pcall(chunk)
-    if ok and type(t) == "table" and t.v == 1 and type(t.players) == "table" then
+    if ok and type(t) == "table" and t.v == 3 and type(t.players) == "table" then
         R = t
-        U.log(TAG, "run loaded: %s, race %d of %d, hull %d, %d player(s)", tostring(R.status), R.race or 0,
-            R.length or 0, R.hull or 0, M.playerCount())
+        U.log(TAG, "run loaded: %s (%s), race %d of %d, tokens %d, %d player(s)", tostring(R.status),
+            tostring(R.preset), R.race or 0, R.length or 0, R.hull or 0, M.playerCount())
+    elseif ok and type(t) == "table" and t.v ~= nil then
+        U.warn(TAG, "run.txt is a v%s run (this build plays v3): ignored, a new run starts fresh", tostring(t.v))
     end
 end
 
@@ -114,9 +121,49 @@ local function archive(outcome)
     table.sort(list, function(a, b) if a.pts ~= b.pts then return a.pts > b.pts end return a.name < b.name end)
     local parts = {}
     for _, e in ipairs(list) do parts[#parts + 1] = string.format("%s %d pts", e.name, e.pts) end
-    f:write(string.format("%s  %s  %s  races %d/%d  hull %d  %s\n", os.date("%Y-%m-%d %H:%M"), outcome,
-        tostring(R.classKey), math.min(R.race - 1, R.length), R.length, R.hull, table.concat(parts, ", ")))
+    f:write(string.format("%s  %s  %s %s  races %d/%d  tokens %d  %s\n", os.date("%Y-%m-%d %H:%M"), outcome,
+        tostring(R.preset), tostring(R.classKey), math.min(R.race - 1, R.length), R.length, R.hull,
+        table.concat(parts, ", ")))
     f:close()
+end
+
+---------------------------------------------------------------------------------------------------- presets / data
+-- v3.0 node kinds the map generator may roll (blackmarket / mystery nodes are v3.1; their weight is simply ignored).
+local SUPPORTED = { standard = true, highrisk = true, fieldtest = true }
+
+local function presetOf(key) return D and D.presets and D.presets[key] or nil end
+
+local function days()
+    local n = math.floor(tonumber(opt("RunDays", 3)) or 3)
+    return math.max(2, math.min(5, n))
+end
+
+-- total events of a preset at the current RunDays
+local function lengthOf(pre) return days() * #pre.planets + #pre.boss end
+
+-- ordered preset list for the lobby cycle: key, label, races
+local PRESET_ORDER = { "qualifier", "league", "kestar", "sprint" }
+function M.presets()
+    local out = {}
+    for _, k in ipairs(PRESET_ORDER) do
+        local pre = presetOf(k)
+        if pre then out[#out + 1] = { key = k, label = pre.label, races = lengthOf(pre) } end
+    end
+    return out
+end
+
+function M.presetLabel(key)
+    local pre = presetOf(key)
+    if not pre then return string.upper(tostring(key or "?")) end
+    return string.format("%s (%d RACES)", pre.label, lengthOf(pre))
+end
+
+-- a SHORT name for narrow texts (the poster kicker fits ~515 su; the full act titles do not)
+local SHORT = { qualifier = "THE QUALIFIER", league = "THE LEAGUE", kestar = "KESTAR'S LEAGUE", sprint = "SPRINT" }
+function M.presetName(key)
+    if SHORT[key] then return SHORT[key] end
+    local pre = presetOf(key)
+    return pre and pre.label or string.upper(tostring(key or "?"))
 end
 
 ---------------------------------------------------------------------------------------------------- queries
@@ -129,29 +176,13 @@ function M.state() ensureLoaded(); return R end
 function M.active() ensureLoaded(); return R ~= nil and R.status == "on" end
 function M.inFlight() return M.active() and R.flight ~= nil end
 function M.betweenRaces() return M.active() and R.flight == nil and R.race > 1 end
+
+-- OPTIONS > Galaxy run: the armed preset key ("qualifier" | "league" | "kestar" | "sprint"), nil = off/unknown.
 function M.lengthSetting()
     local v = tostring(settings.get("RunLength") or "off")
-    local n = tonumber(v)
-    return (n and n >= 2) and math.floor(n) or nil
+    if presetOf(v) then return v end
+    return nil
 end
-
--- The team target of race i: the best human must place this high (or better).
--- 0.13.0 (live: a solo run was LOST at race 3, every target missed): the targets loosen with fewer players (one of
--- four placing well is likelier than one of one): slack 2 places solo, 1 with two players, 0 with 3-4; the final:
--- top 2 solo, else a win. n = humans of the race (nil = the run's last launch).
-function M.slack(n)
-    n = math.max(1, math.floor(tonumber(n) or (R and R.lastHumans) or 4))
-    return math.max(0, 3 - n)
-end
-
-function M.targetFor(i, len, n)
-    local sl = M.slack(n)
-    if i >= len then return 1 + math.floor(sl / 2) end
-    if i <= math.max(1, math.floor(len / 3)) then return 5 + sl end
-    return 3 + sl
-end
-
-function M.lapTarget(n) return 3 + M.slack(n) end
 
 -- AI tier of race i (speeders; 1 = the zero base): TIER 1 at the start, TIER 6 at the final.
 function M.tierFor(i, len)
@@ -165,16 +196,56 @@ local function ordinal(n)
     return tostring(n) .. s
 end
 
--- One status line for the FREE MODE pill / the racer cards: "GALAXY RUN · RACE 2 / 6 · HULL 2 · TARGET TOP 3".
+---------------------------------------------------------------------------------------------------- events
+-- v3: the campaign's node kinds. Every node is still a normal race scored by the mod per player (the game's own
+-- challenge modes track ONE player, 04-mod-surface.md); rank "place" | "time" decides the human ranking.
+local EVENT = {
+    standard    = { name = "RACE",              mode = "race",       rank = "place",
+                    rule = "Finish as high as you can: the payout follows your place." },
+    highrisk    = { name = "ELIMINATOR",        mode = "eliminator", rank = "place", speeders = true, target = "TOP 3",
+                    rule = "The best player must finish in the top three or the team loses a League Token." },
+    fieldtest   = { name = "FIELD TEST",        mode = "race",       rank = "time",  humansOnly = true,
+                    rule = "No AI: the fastest race time wins. Finish it for the payout." },
+    planesprint = { name = "PODRACER TEST",     mode = "race",       rank = "time",  humansOnly = true,
+                    classOver = "Plane", target = "EVERYBODY FINISHES",
+                    rule = "A podracer time trial. Everybody finishes, or the team loses a League Token." },
+    knockout    = { name = "GALACTIC GAUNTLET", mode = "fullgrid",   rank = "place", mustWin = true, target = "WIN",
+                    rule = "Full grid, must-win: lose it and it costs a League Token to try again." },
+    champion    = { name = "CHAMPIONSHIP RACE", mode = "fullgrid",   rank = "place", mustWin = true, target = "WIN",
+                    rule = "The boss race, must-win: lose it and it costs a League Token to try again." },
+}
+M.EVENT = EVENT
+
+function M.eventOf(kind)
+    local ev = EVENT[kind or "standard"] or EVENT.standard
+    if D and D.strings and D.strings.kinds and D.strings.kinds[kind] then
+        -- real player-facing names from the game's localization
+        ev = setmetatable({ name = D.strings.kinds[kind] }, { __index = ev })
+    end
+    return ev
+end
+
+-- "TOP 3" / "EVERYBODY FINISHES" / "WIN" for the next event; nil = no team target (standard / field test).
+function M.targetText(kind)
+    return (EVENT[kind or "standard"] or EVENT.standard).target
+end
+
+-- One status line for the FREE MODE pill / the racer cards.
 function M.statusText()
     ensureLoaded()
     if not R then return nil end
     if R.status == "won" then return "GALAXY RUN WON! " .. M.leaderText() end
-    if R.status == "lost" then return string.format("GALAXY RUN LOST AT RACE %d · %s", R.race - 1, M.leaderText()) end
-    local kind = (R.next and R.next.kind) or (R.flight and R.flight.kind) or "race"
-    if R.race == 1 then kind = "race" end
-    return string.format("GALAXY RUN · RACE %d / %d · %s · HULL %d · TARGET %s", R.race, R.length,
-        M.eventOf(kind).name, R.hull, M.targetText(kind, R.race, R.length))
+    if R.status == "lost" then
+        return string.format("GALAXY RUN LOST AT RACE %d (%s) · %s", R.race - 1,
+            (D and D.strings and D.strings.outOfTokens) or "OUT OF LEAGUE TOKENS", M.leaderText())
+    end
+    local kind = (R.next and R.next.kind) or (R.flight and R.flight.kind) or "standard"
+    if R.race == 1 then kind = "standard" end
+    local parts = { string.format("GALAXY RUN · RACE %d / %d", R.race, R.length), M.eventOf(kind).name,
+                    "TOKENS " .. tostring(R.hull) }
+    local t = M.targetText(kind)
+    if t then parts[#parts + 1] = "TARGET " .. t end
+    return table.concat(parts, " · ")
 end
 
 function M.leaderText()
@@ -185,7 +256,7 @@ function M.leaderText()
     return best and string.format("MVP %s %d PTS", tostring(best.name or "?"), bp) or ""
 end
 
--- Standings for the lobby's RACE card: "P1 43 · P2 31 · HULL 2" (points order; nil without a run).
+-- Standings for the lobby's GALAXY RUN card: "P1 43 · P2 31 · TOKENS 2" (points order; nil without a run).
 function M.standingsText()
     ensureLoaded()
     if not R or M.playerCount() == 0 then return nil end
@@ -197,11 +268,29 @@ function M.standingsText()
     end)
     local parts = {}
     for _, p in ipairs(list) do parts[#parts + 1] = string.format("%s %d", tostring(p.name or "?"), p.points or 0) end
-    if R.status == "on" then parts[#parts + 1] = "HULL " .. tostring(R.hull) end
+    if R.status == "on" then parts[#parts + 1] = "TOKENS " .. tostring(R.hull) end
     return table.concat(parts, " · ")
 end
 
--- Card line: "RUN 43 PTS · 2ND" (nil without a run player).
+-- Per-player rows for the GALAXY RUN page (points order; pending = a reward or shop pick waits on the card).
+function M.standingsRows()
+    ensureLoaded()
+    if not R then return {} end
+    local list = {}
+    for _, p in pairs(R.players) do
+        list[#list + 1] = { name = tostring(p.name or "?"), points = p.points or 0, credits = p.credits or 0,
+                            cap = p.cap or 1,
+                            pending = (type(p.offer) == "table" and #p.offer > 0) or p.offerPending == true
+                                or p.shopPending == true }
+    end
+    table.sort(list, function(a, b)
+        if a.points ~= b.points then return a.points > b.points end
+        return a.name < b.name
+    end)
+    return list
+end
+
+-- Card line: "RUN 43 PTS · 2ND · 1250 CREDITS · CAP 3" (nil without a run player).
 function M.cardLine(ctrlId)
     if not M.active() then return nil end
     local p = R.players[ctrlId]
@@ -209,6 +298,83 @@ function M.cardLine(ctrlId)
     local rank = 1
     for c, o in pairs(R.players) do if c ~= ctrlId and (o.points or 0) > (p.points or 0) then rank = rank + 1 end end
     return string.format("RUN %d PTS · %s · %d CREDITS · CAP %d", p.points or 0, ordinal(rank), p.credits or 0, p.cap or 1)
+end
+
+---------------------------------------------------------------------------------------------------- map generation
+-- The campaign's per-planet node graph (02-data-assets.md §2), reimplemented on the real rules from rundata:
+-- width starts at startingPaths (3) and shrinks by the per-column join chance; node kinds are rolled from the act's
+-- weighted activity tables (first node of planet / first planet / default) with the real no-repeat list. v3.0 keeps
+-- the race-type kinds only (SUPPORTED); blackmarket / mystery weights are ignored until v3.1. Act III planets may
+-- roll PODRACER TEST (a pods interlude for any run class). Seeded by R.seed: the same run file = the same maps.
+local function actRules(act)
+    local a = D and D.mapgen and D.mapgen.acts and D.mapgen.acts[act] or nil
+    return a or { joins = { 0, 25, 50, 75, 100 }, noRepeat = {}, weights = {} }
+end
+
+local function rollKind(weights, act, prevKind)
+    local rules = actRules(act)
+    local noRep = {}
+    for _, k in ipairs(rules.noRepeat or {}) do noRep[k] = true end
+    local function roll(exclude)
+        local pool, total = {}, 0
+        for k, w in pairs(weights or {}) do
+            local okKind = SUPPORTED[k] or (k == "planesprint" and act == 3)
+            if okKind and k ~= exclude and (tonumber(w) or 0) > 0 then
+                pool[#pool + 1] = { k = k, w = tonumber(w) }
+                total = total + tonumber(w)
+            end
+        end
+        if total <= 0 then return "standard" end
+        local r = math.random() * total
+        for _, e in ipairs(pool) do
+            r = r - e.w
+            if r <= 0 then return e.k end
+        end
+        return pool[#pool].k
+    end
+    local kind = roll(nil)
+    if prevKind and kind == prevKind and noRep[kind] then kind = roll(kind) end
+    return kind
+end
+
+-- one planet's map: { days = N, cols = { [c] = { "standard", ... } } } (cols[c][i] = the node kind)
+local function genPlanetMap(act, planetIdx, firstPlanet)
+    local rules = actRules(act)
+    local d = days()
+    local w = math.max(1, math.min(3, math.floor(tonumber(D and D.mapgen and D.mapgen.startingPaths) or 3)))
+    local map = { days = d, cols = {} }
+    for c = 1, d do
+        if c > 1 and w > 1 then
+            local joins = rules.joins or {}
+            local chance = tonumber(joins[math.min(c, #joins)] or 0) or 0
+            if math.random() * 100 < chance then w = w - 1 end
+        end
+        local tbl = (c == 1) and (rules.weights.firstNodeOfPlanet or rules.weights.default)
+            or (firstPlanet and (rules.weights.firstPlanet or rules.weights.default))
+            or rules.weights.default
+        map.cols[c] = {}
+        for i = 1, w do
+            local prev = nil
+            if c > 1 then
+                local pw = #map.cols[c - 1]
+                prev = map.cols[c - 1][math.max(1, math.min(pw, i))]
+            end
+            local kind
+            if planetIdx == 1 and c == 1 then
+                kind = "standard"                      -- the campaign's FirstNodeOfTour table is standard-only
+            else
+                kind = rollKind(tbl, act, prev)
+            end
+            map.cols[c][i] = kind
+        end
+    end
+    return map
+end
+
+local function genMaps(pre)
+    local maps = {}
+    for p = 1, #pre.planets do maps[p] = genPlanetMap(pre.act, p, p == 1) end
+    return maps
 end
 
 ---------------------------------------------------------------------------------------------------- builds
@@ -246,7 +412,7 @@ function M.sanitize(lo, p, arch, style)
     for n = 1, 4 do if lo.ab[n] and not o.ab[lo.ab[n]] then lo.ab[n] = false end end
     if lo.crash and not o.crash[lo.crash] then lo.crash = false end
     for i, id in pairs(lo.parts or {}) do
-        if id and (not o.part[id] or (p.broken or {})[id]) then lo.parts[i] = false end   -- v2: broken = unusable
+        if id and (not o.part[id] or (p.broken or {})[id]) then lo.parts[i] = false end   -- faulty = unusable
     end
     for i, id in pairs(lo.traits or {}) do if id and not o.trait[id] then lo.traits[i] = false end end
     local cap = p.cap or 1
@@ -283,7 +449,7 @@ function M.filterFor(ctrlId)
         if id == false or id == nil then return true end
         local set = o[kind]
         if set == nil then return true end           -- styles: free
-        if kind == "part" and (p.broken or {})[id] then return false end   -- v2: broken until repaired
+        if kind == "part" and (p.broken or {})[id] then return false end   -- faulty until repaired
         return set[id] == true
     end
 end
@@ -296,7 +462,7 @@ local function ensurePlayer(ctrlId, pnum, pilotId, name)
         local owned = emptyOwned()
         addOwned(owned, lo)
         p = { pnum = pnum, name = name or ("P" .. tostring(pnum)), points = 0, cap = 1, lo = lo, owned = owned,
-              offer = nil, wins = 0, joinedAt = R.race, credits = 200 }   -- v2: starting credits
+              offer = nil, wins = 0, joinedAt = R.race, credits = 0 }
         R.players[ctrlId] = p
         if R.race > 1 then p.offerPending = true end   -- a late joiner gets one free pick
         U.log(TAG, "P%s joins the run on a starter build (%s)", tostring(pnum), tostring(lo.kit))
@@ -343,37 +509,97 @@ local function pickFrom(list, owned, taken)
     return it
 end
 
+-- The campaign's rarity ramp mapped onto the mod's perk grades (v3.0 adaptation; real affixes = v3.3):
+-- grade 1 (Common) = level/pips 1 items, 2 (Rare) = level/pips 2 or a trait, 3 (Epic) = level/pips 3 or a crash
+-- ability, 4 (Legendary) = a trait / crash / the level-cap upgrade.
+local function gradeOf(it)
+    if it.rkind == "ab" then return math.max(1, math.min(3, tonumber(it.lvl) or 1)) end
+    if it.rkind == "part" then return math.max(1, math.min(3, tonumber(it.pips) or 1)) end
+    if it.rkind == "crash" then return 3 end
+    if it.rkind == "trait" then return 2 end
+    if it.rkind == "upgrade" then return 4 end
+    return 1
+end
+
+-- planet slot of the current/last node (1..5; the boss events use the slot after the last planet, clamped).
+local function slotOf(p, boss)
+    if not R then return 1 end
+    local n = boss and (#(presetOf(R.preset) or { planets = {} }).planets + 1) or (p or (R.cursor and R.cursor.p) or 1)
+    return math.max(1, math.min(5, n))
+end
+
+local function rarityRoll(slot, pool)
+    local tbl = D and D.rarity and D.rarity[pool or "event"] or nil
+    local w = tbl and (tbl[math.min(slot, #tbl)] or tbl[#tbl]) or { 60, 25, 10, 5 }
+    local total = 0
+    for i = 1, 4 do total = total + (tonumber(w[i]) or 0) end
+    if total <= 0 then return 1 end
+    local r = math.random() * total
+    for i = 1, 4 do
+        r = r - (tonumber(w[i]) or 0)
+        if r <= 0 then return i end
+    end
+    return 1
+end
+
 local function upgradeRow()
     return { id = "upgrade", name = "UPGRADE: LEVEL CAP +1", rkind = "upgrade", slot = "tun0", iconKind = "glyph" }
 end
 
--- 0.13.0 design §5: a rare team reward while the hull is damaged (one player's pick repairs it for everyone)
-local function repairRow()
-    return { id = "repair", name = "TEAM REPAIR: HULL +1", rkind = "repair", slot = "tun2", iconKind = "glyph" }
+-- a rare team reward while tokens are missing (one player's pick buys one back for everyone)
+local function tokenRow()
+    return { id = "repair", name = "LEAGUE TOKEN +1", rkind = "repair", slot = "tun2", iconKind = "glyph" }
 end
-local REPAIR_CHANCE = 0.15
+local TOKEN_CHANCE = 0.15
 
--- 3 offers (4 for the last human): an ability or crash ability, a part, a trait or an upgrade (+ one more).
+local function skipRow(slot)
+    local skipT = D and D.payouts and D.payouts.skip or { 1000, 2000, 3000, 4000, 5000 }
+    local cr = math.floor((tonumber(skipT[math.min(slot, #skipT)]) or 1000) * (tonumber(opt("RunPayoutScale", 1)) or 1))
+    return { id = "skip", name = string.format("SKIP: +%d CR", cr), rkind = "skip", slot = "tun1",
+             iconKind = "glyph", credits = cr }
+end
+
+-- grade-biased pick: items of the rolled grade first, a neighbour grade next, anything last.
+local function pickGraded(cat, o, taken, grade)
+    local kinds = { "ab", "part", "trait" }
+    if grade >= 3 and #cat.crash > 0 then kinds[#kinds + 1] = "crash" end
+    for _, pass in ipairs({ 0, 1, 99 }) do
+        local ks = { kinds[math.random(#kinds)], kinds[math.random(#kinds)], "ab", "part", "trait", "crash" }
+        for _, k in ipairs(ks) do
+            local list = {}
+            for _, it in ipairs(cat[k] or {}) do
+                if math.abs(gradeOf(it) - grade) <= pass then list[#list + 1] = it end
+            end
+            local it = pickFrom(list, o[k] or {}, taken)
+            if it then return it end
+        end
+    end
+    return nil
+end
+
+-- The reward offer after a node (3 rows, 4 for the last human) + the SKIP row: rarities rolled with the real
+-- per-planet ramp; a Legendary roll may be the level-cap upgrade; a missing token may replace the last row.
 function M.makeOffer(p, n)
     local cat = catalog(R.arch)
+    local slot = slotOf(R.lastSlot, false)
+    local pool = (R.lastKind == "highrisk") and "highrisk" or "event"
     local o, taken, out = p.owned or emptyOwned(), {}, {}
-    local function add(it) if it then out[#out + 1] = it end end
-    local abList = (math.random() < 0.25 and #cat.crash > 0) and cat.crash or cat.ab
-    add(pickFrom(abList, o[abList == cat.crash and "crash" or "ab"], taken))
-    add(pickFrom(cat.part, o.part, taken))
-    if math.random() < 0.6 then add(pickFrom(cat.trait, o.trait, taken)) else add(upgradeRow()) end
-    while #out < n do
-        local kinds = { "ab", "part", "trait" }
-        local k = kinds[math.random(#kinds)]
-        local it = pickFrom(cat[k], o[k], taken)
+    for _ = 1, n do
+        local g = rarityRoll(slot, pool)
+        local it = nil
+        if g == 4 and math.random() < 0.5 then it = upgradeRow() end
+        it = it or pickGraded(cat, o, taken, g)
         if not it then it = upgradeRow() end
-        add(it)
-        if #out >= n then break end
+        local dup = false
+        for _, e in ipairs(out) do if e.rkind == it.rkind and e.id == it.id and it.rkind == "upgrade" then dup = true end end
+        if not dup then out[#out + 1] = it end
     end
     if #out == 0 then out[1] = upgradeRow() end
-    if R.hull < HULL_START and math.random() < (tonumber(opt("RunRepairChance", REPAIR_CHANCE)) or REPAIR_CHANCE) then
-        out[#out] = repairRow()                       -- replaces the last offer
+    if R.hull < (R.tokensMax or R.hull) and
+        math.random() < (tonumber(opt("RunRepairChance", TOKEN_CHANCE)) or TOKEN_CHANCE) then
+        out[#out] = tokenRow()                       -- replaces the last offer
     end
+    out[#out + 1] = skipRow(slot)
     return out
 end
 
@@ -401,9 +627,13 @@ function M.claim(ctrlId, item, arch, style)
         p.cap = (p.cap or 1) + 1
         toastText = "LEVEL CAP " .. p.cap
     elseif item.rkind == "repair" then
-        R.hull = math.min(HULL_START, R.hull + 1)
-        toastText = "TEAM HULL " .. R.hull
-        St.emit("status", string.format("P%s REPAIRED THE TEAM HULL: %d", tostring(p.pnum), R.hull))
+        R.hull = math.min(R.tokensMax or R.hull + 1, R.hull + 1)
+        toastText = "LEAGUE TOKENS " .. R.hull
+        St.emit("status", string.format("P%s BOUGHT A LEAGUE TOKEN BACK: %d", tostring(p.pnum), R.hull))
+    elseif item.rkind == "skip" then
+        local cr = math.floor(tonumber(item.credits) or 0)
+        p.credits = (p.credits or 0) + cr
+        toastText = string.format("REWARD SKIPPED: +%d CR", cr)
     else
         p.owned[item.rkind] = p.owned[item.rkind] or {}
         p.owned[item.rkind][item.id] = true
@@ -435,106 +665,139 @@ local function tierPath(arch, i)
     return list[i].path
 end
 
----------------------------------------------------------------------------------------------------- events (v2)
--- 0.13.0 v2: every run event is a normal race scored by the mod per player (the game's own TimeTrial / Takedowns /
--- RamjetDistance / Precision modes track ONE player and have no AI grid). rank: how the humans are ranked;
--- mode: the setup mode key (GMV); humansOnly: the grid is the humans alone (no AI).
-local EVENT = {
-    race       = { name = "RACE",            mode = "race",       rank = "place",
-                   rule = "Finish as high as you can." },
-    eliminator = { name = "ELIMINATOR",      mode = "eliminator", rank = "place", speeders = true,
-                   rule = "The last racer is out at every elimination." },
-    final      = { name = "FINAL",           mode = "fullgrid",   rank = "place",
-                   rule = "Full grid. Win it to win the run." },
-    timetrial  = { name = "TIME TRIAL",      mode = "race",       rank = "time",  humansOnly = true,
-                   rule = "No AI: the fastest race time wins. Everybody must finish." },
-    hotlap     = { name = "HOT LAP",         mode = "race",       rank = "lap",
-                   rule = "The best single lap wins. Set a lap in the top 3 of the field." },
-    boost      = { name = "BOOST CHALLENGE", mode = "race",       rank = "boost",
-                   rule = "Most seconds on boost wins: afterburner burning, ramjet counts double." },
-    takedown   = { name = "TAKEDOWN HUNT",   mode = "fullgrid",   rank = "takedown",
-                   rule = "Full grid: most takedowns wins." },
-}
-M.EVENT = EVENT
-local CHALLENGES = { "timetrial", "hotlap", "boost", "takedown" }
-local CREDITS = { 300, 220, 160, 120 }          -- by rank among the humans
-local RISKY_MULT = 1.5
-local RIVAL_BONUS = 100
-local BOOST_TARGET_S = 45                        -- team boost target: seconds per player (ramjet counts double)
-local START_CREDITS = 200
-
-function M.eventOf(kind) return EVENT[kind or "race"] or EVENT.race end
-
--- "TOP 3" / "EVERYBODY FINISHES" / "36 S OF BOOST" ... for the next event (n = humans in the run)
-function M.targetText(kind, race, len, n)
-    local ev = M.eventOf(kind)
-    n = math.max(1, n or (R and R.lastHumans) or M.playerCount())
-    if ev.rank == "place" then
-        local t = M.targetFor(race, len, n)
-        return t == 1 and "WIN" or ("TOP " .. t)
-    elseif ev.rank == "time" then return "EVERYBODY FINISHES"
-    elseif ev.rank == "lap" then return string.format("A TOP-%d LAP", M.lapTarget(n))
-    elseif ev.rank == "boost" then return string.format("%d S OF BOOST", BOOST_TARGET_S * n)
-    elseif ev.rank == "takedown" then return string.format("%d TAKEDOWN%s", n, n == 1 and "" or "S") end
-    return "?"
-end
-
-local function candidates()
+local function candidates(classKey)
     local setup = U.mod("setup")
     if type(setup.runCandidates) ~= "function" then return {} end
-    local ok, cands = pcall(setup.runCandidates, R.classKey)
+    local ok, cands = pcall(setup.runCandidates, classKey or R.classKey)
     return (ok and type(cands) == "table") and cands or {}
 end
 
--- One next event of a kind: a planet / track not raced yet (another planet than the last race) that offers the
--- kind's mode, a random condition. -> {class, planet, track, cond, mode, kind, name, planetName} or nil.
-function M.pickEvent(kind, avoidPath)
-    local ev = M.eventOf(kind)
-    local cands = candidates()
-    if #cands == 0 then return nil end
-    local function fits(c, strict)
-        local modes = {}
-        for _, m in ipairs(c.modes or { "race" }) do modes[m] = true end
-        if not modes[ev.mode] then return false end
-        if c.path == avoidPath then return false end
-        if strict and ((R.used or {})[c.path] or c.planet == R.lastPlanet) then return false end
-        if not strict and (R.used or {})[c.path] then return false end
-        return true
+-- the launch mode of an event on a candidate track (eliminator needs track support; pods have no eliminator)
+local function modeFor(ev, cand)
+    local modes = {}
+    for _, m in ipairs(cand.modes or { "race" }) do modes[m] = true end
+    if ev.mode == "eliminator" and (tonumber(R.arch) == 1 or not modes.eliminator) then
+        return modes.fullgrid and "fullgrid" or "race"
     end
-    local pool = {}
-    for _, c in ipairs(cands) do if fits(c, true) then pool[#pool + 1] = c end end
-    if #pool == 0 then for _, c in ipairs(cands) do if fits(c, false) then pool[#pool + 1] = c end end end
-    if #pool == 0 then
-        if kind ~= "race" then return M.pickEvent("race", avoidPath) end
-        pool = cands
-    end
-    local c = pool[math.random(#pool)]
-    local conds = c.conds or {}
-    return { class = R.classKey, planet = c.planet, track = c.track, mode = ev.mode, kind = kind, path = c.path,
-             name = c.name, planetName = c.planetName,
-             cond = (#conds > 0) and conds[math.random(#conds)] or "" }
+    if modes[ev.mode] then return ev.mode end
+    if ev.mode == "fullgrid" and modes.race then return "race" end
+    return (cand.modes or {})[1] or "race"
 end
 
--- Route choice (v2): two next events, A = the safe one (race; the scheduled eliminator), B = a challenge for x1.5
--- credits; the final has one route. R.choice picks one; R.next is the chosen spec.
-function M.makeOptions()
-    local opts = {}
-    if R.race >= R.length then
-        opts[1] = M.pickEvent("final")
-    else
-        local safeKind = (R.race == R.elimRace and not (tonumber(R.arch) == 1)) and "eliminator" or "race"
-        opts[1] = M.pickEvent(safeKind)
+-- A track for a node on a planet: the campaign's weighted track table for that planet (rundata tracks, matched into
+-- the candidate's TrackDef full name) over the class's real candidates; unused tracks first, the planet first.
+local function trackFor(planetKey, ev, classKey)
+    local cands = candidates(classKey)
+    if #cands == 0 then return nil end
+    local act = (presetOf(R.preset) or {}).act or 1
+    local wtab = D and D.tracks and D.tracks[act] and D.tracks[act][planetKey] or nil
+    local function weight(c)
+        if wtab then
+            for _, e in ipairs(wtab) do
+                if type(c.path) == "string" and c.path:find(e.name, 1, true) then return tonumber(e.w) or 1 end
+            end
+        end
+        return 0.25                                     -- not in the campaign's table: possible, rare
+    end
+    local function pickWeighted(pool)
+        local total = 0
+        for _, e in ipairs(pool) do total = total + e.w end
+        if total <= 0 then return pool[math.random(#pool)].c end
+        local r = math.random() * total
+        for _, e in ipairs(pool) do
+            r = r - e.w
+            if r <= 0 then return e.c end
+        end
+        return pool[#pool].c
+    end
+    local passes = {
+        function(c) return c.planet == planetKey and not (R.used or {})[c.path] end,
+        function(c) return c.planet == planetKey end,
+        function(c) return not (R.used or {})[c.path] end,
+        function(c) return true end,
+    }
+    for _, fits in ipairs(passes) do
         local pool = {}
-        for _, k in ipairs(CHALLENGES) do if k ~= R.lastKind then pool[#pool + 1] = k end end
-        local b = M.pickEvent(pool[math.random(#pool)], opts[1] and opts[1].path or nil)
-        if b then b.risky = true; opts[2] = b end
+        for _, c in ipairs(cands) do
+            if fits(c) then pool[#pool + 1] = { c = c, w = weight(c) } end
+        end
+        if #pool > 0 then return pickWeighted(pool) end
+    end
+    return nil
+end
+
+-- The spec of a map node / boss event: what setup.openRun and prelaunch consume.
+-- node = { p, c, i, kind } (map node) or { boss = n, kind, planet, classOver } (boss event).
+local function specFor(node)
+    local pre = presetOf(R.preset)
+    if not pre then return nil end
+    local ev = M.eventOf(node.kind)
+    local planetKey = node.boss and pre.boss[node.boss].planet or pre.planets[node.p]
+    local classOver = node.boss and pre.boss[node.boss].classOverride or ev.classOver
+    local classKey = classOver or R.classKey
+    local cand = trackFor(planetKey, ev, classKey)
+    if not cand then return nil end
+    local conds = cand.conds or {}
+    return { class = classKey, classOver = classOver, planet = cand.planet, track = cand.track,
+             mode = modeFor(ev, cand), kind = node.kind, path = cand.path, name = cand.name,
+             planetName = cand.planetName, cond = (#conds > 0) and conds[math.random(#conds)] or "",
+             p = node.p, c = node.c, i = node.i, boss = node.boss,
+             away = (cand.planet ~= planetKey) or nil }                 -- no track of this class on the map planet
+end
+
+-- The reachable next nodes from the cursor (the map choice): up to 3 specs. Boss events are a single option.
+function M.makeOptions()
+    local pre = presetOf(R.preset)
+    if not pre then R.options, R.next = {}, nil; return {} end
+    local opts = {}
+    if R.bossIdx then
+        local b = pre.boss[R.bossIdx]
+        if b then
+            local s = specFor({ boss = R.bossIdx, kind = b.kind })
+            if s then opts[1] = s end
+        end
+    else
+        local cur = R.cursor
+        local map = R.maps[cur.p]
+        if map and cur.c < map.days then
+            local nextCol = map.cols[cur.c + 1]
+            -- a narrower next column: rescale the path index first, or an edge path would reach only one node
+            local w1, w2 = #map.cols[cur.c], #nextCol
+            local base = cur.i
+            if w1 > 1 and w2 ~= w1 then base = math.floor((cur.i - 1) * (w2 - 1) / (w1 - 1) + 0.5) + 1 end
+            local idxs, seen = {}, {}
+            for _, j in ipairs({ base - 1, base, base + 1 }) do
+                local jj = math.max(1, math.min(w2, j))
+                if not seen[jj] then seen[jj] = true; idxs[#idxs + 1] = jj end
+            end
+            for _, j in ipairs(idxs) do
+                local s = specFor({ p = cur.p, c = cur.c + 1, i = j, kind = nextCol[j] })
+                if s then opts[#opts + 1] = s end
+            end
+        elseif R.maps[cur.p + 1] then
+            local col = R.maps[cur.p + 1].cols[1]
+            for j = 1, #col do
+                local s = specFor({ p = cur.p + 1, c = 1, i = j, kind = col[j] })
+                if s then opts[#opts + 1] = s end
+            end
+        else
+            R.bossIdx = 1
+            return M.makeOptions()
+        end
+    end
+    -- antagonist invasion (the real per-act chance): the chosen race gets a stronger grid and the rival label
+    local ant = pre.antagonist or {}
+    if (tonumber(ant.invasionPct) or 0) > 0 then
+        for _, s in ipairs(opts) do
+            if not s.boss and math.random() * 100 < tonumber(ant.invasionPct) then s.invaded = true end
+        end
     end
     R.options, R.choice = opts, 1
     R.next = opts[1]
     return opts
 end
 
--- kept for v1 callers / tests
+-- kept for tests / callers that only want the chosen spec
 function M.pickNext()
     M.makeOptions()
     return R.next
@@ -542,10 +805,10 @@ end
 
 function M.nextSpec() return M.active() and R.next or nil end
 
--- RACE card between run races: switch the route (A <-> B). Returns the new spec.
+-- The GALAXY RUN poster's RIGHT between races: cycle the reachable nodes. Returns the new spec (nil = one option).
 function M.switchRoute()
     if not M.betweenRaces() or not R.options or #R.options < 2 then return nil end
-    R.choice = (R.choice == 1) and 2 or 1
+    R.choice = (R.choice % #R.options) + 1
     R.next = R.options[R.choice]
     save()
     St.emit("status", M.routeText())
@@ -556,116 +819,149 @@ function M.routeText()
     if not (R and R.next) then return nil end
     local n = R.next
     local ev = M.eventOf(n.kind)
-    local tag = (R.options and #R.options > 1) and ((R.choice == 1) and "ROUTE A" or "ROUTE B") or "LAST RACE"
-    return string.format("%s: %s%s · %s", tag, ev.name, n.risky and " (CREDITS x1.5)" or "",
-        tostring(n.planetName or n.planet or "?"))
+    local tag = (R.options and #R.options > 1) and string.format("NODE %d / %d", R.choice or 1, #R.options)
+        or (n.boss and "BOSS" or "NEXT")
+    local inv = n.invaded and (" · " .. tostring((presetOf(R.preset) or {}).antagonist
+        and presetOf(R.preset).antagonist.name or "RIVAL") .. " INVADES") or ""
+    return string.format("%s: %s · %s%s", tag, ev.name, tostring(n.planetName or n.planet or "?"), inv)
 end
 
--- the RACE card between run races: {planet, caption, track, footer}
+-- the GALAXY RUN card between run races: {planet, caption, track, footer}
 function M.cardView()
     if not (M.betweenRaces() and R.next) then return nil end
     local n = R.next
     local ev = M.eventOf(n.kind)
-    local cap = ev.name .. (n.risky and " · CREDITS x1.5" or "")
-    if R.options and #R.options > 1 then cap = ((R.choice == 1) and "ROUTE A · " or "ROUTE B · ") .. cap end
+    local cap
+    if n.boss then
+        cap = "BOSS · " .. ev.name
+    else
+        cap = string.format("DAY %d / %d · %s", n.c or 1, ((R.maps or {})[n.p or 1] or {}).days or days(), ev.name)
+    end
+    if R.options and #R.options > 1 then cap = string.format("NODE %d/%d · ", R.choice or 1, #R.options) .. cap end
+    if n.invaded then cap = cap .. " · INVADED" end
     return { planet = tostring(n.planetName or n.planet or ""), caption = cap, track = tostring(n.name or n.track or ""),
              footer = M.standingsText() or "" }
 end
 
--- launch.start: a run race gets the run builds and the race's AI tier; a new run starts here (RunLength set).
+-- starting League Tokens: "couch" = 1 + 1 per player beyond the first, "real" = the campaign's BaseStartingStrikes
+-- (1), a number = that many.
+local function startTokens(humans)
+    local v = opt("RunTokens", "couch")
+    if tonumber(v) then return math.max(1, math.floor(tonumber(v))) end
+    if tostring(v) == "real" then return 1 end
+    return 1 + math.max(0, (humans or 1) - 1)
+end
+
+-- launch.start: a run race gets the run builds and the race's AI tier; a new run starts here (an armed preset).
 -- c = St.race.choice, plan = launch.plan(c) (players / arch / cls / aiTierPath / grid / maxRacers; plan.players is
 -- the table the launch applies, modified in place). Returns true when the race is a run race.
 function M.prelaunch(c, plan)
     ensureLoaded()
+    -- 0.16: the GALACTIC GRAND PRIX replaced the GALAXY RUN on the FREE MODE poster; while a GP is on it owns launches
+    local okG, gpOn = pcall(function() return U.mod("gp").active() end)
+    if okG and gpOn == true then return false end
     if type(c) ~= "table" or type(plan) ~= "table" or type(plan.players) ~= "table" or plan.arch == nil then
         return false
     end
     local classKey = plan.cls and plan.cls.key or nil
+    local humans = 0
+    for _, pick in pairs(plan.players) do
+        if type(pick) == "table" and pick.ctrlId ~= nil then humans = humans + 1 end
+    end
     local starting = false
     if not M.active() then
-        local len = M.lengthSetting()
-        if not len then return false end
-        R = { v = 1, status = "on", length = len, race = 1, hull = HULL_START, arch = plan.arch,
-              classKey = classKey, players = {}, used = {}, history = {},
-              elimRace = (len >= 4) and math.random(2, len - 1) or nil, startedAt = os.date("%Y-%m-%d %H:%M") }
+        local preKey = M.lengthSetting()
+        local pre = preKey and presetOf(preKey) or nil
+        if not pre then return false end
+        if not D then U.warn(TAG, "rundata.lua missing: GALAXY RUN cannot start"); return false end
+        local seed = math.floor((os.time() % 1000000) * 7 + (St.nowMs() or 0) % 7919)
+        math.randomseed(seed)
+        R = { v = 3, status = "on", preset = preKey, race = 1, arch = plan.arch, classKey = classKey,
+              players = {}, used = {}, history = {}, seed = seed, hull = startTokens(humans),
+              startedAt = os.date("%Y-%m-%d %H:%M") }
+        R.tokensMax = R.hull
+        R.maps = genMaps(pre)
+        R.length = lengthOf(pre)
+        R.cursor = { p = 1, c = 1, i = math.random(#R.maps[1].cols[1]) }
         starting = true
-        U.log(TAG, "GALAXY RUN started: %s, %d races, hull %d", tostring(R.classKey), len, R.hull)
+        U.log(TAG, "GALAXY RUN started: %s (%s), %d events, %d token(s), seed %d", pre.label,
+            tostring(R.classKey), R.length, R.hull, seed)
     end
-    if tonumber(plan.arch) ~= tonumber(R.arch) then
+    local over = (not starting) and R.next and R.next.classOver or nil
+    if over then
+        if tostring(classKey) ~= tostring(over) then
+            St.emit("status", "GALAXY RUN: THIS EVENT RACES IN " .. string.upper(tostring(over)))
+            U.warn(TAG, "override event needs class %s (launched %s): played outside the run", tostring(over),
+                tostring(classKey))
+            return false
+        end
+    elseif tonumber(plan.arch) ~= tonumber(R.arch) then
         St.emit("status", "GALAXY RUN: RACE IN " .. tostring(R.classKey) .. " (OPTIONS > GALAXY RUN: OFF TO LEAVE)")
         U.warn(TAG, "run race in another class (%s, run %s): played outside the run", tostring(classKey),
             tostring(R.classKey))
         return false
     end
     local Km = K()
-    local humans = 0
     for pnum, pick in pairs(plan.players) do
         if type(pick) == "table" and pick.ctrlId ~= nil then
-            humans = humans + 1
             local name = (pnum == 1) and "P1" or ("P" .. tostring(pnum))
             local p = ensurePlayer(pick.ctrlId, pnum, pick.pilotId, name)
-            local style = styleOf(pick.pilotId, R.arch)
-            local lo
-            if starting or type(pick.loadout) ~= "table" then
-                lo = Km.copy(p.lo)
-            else
-                lo = Km.copy(pick.loadout)             -- the card's edit (owned perks, capped levels)
+            if not over then
+                -- pods/override interludes race on the cards' own builds; run races get the run build
+                local style = styleOf(pick.pilotId, R.arch)
+                local lo
+                if starting or type(pick.loadout) ~= "table" then
+                    lo = Km.copy(p.lo)
+                else
+                    lo = Km.copy(pick.loadout)             -- the card's edit (owned perks, capped levels)
+                end
+                lo = M.sanitize(lo, p, R.arch, style)
+                p.lo = Km.copy(lo)
+                pick.loadout, pick.code = lo, nil
             end
-            lo = M.sanitize(lo, p, R.arch, style)
-            p.lo = Km.copy(lo)
-            pick.loadout, pick.code = lo, nil
         end
     end
     R.lastHumans = humans
-    local kind = (not starting and R.next and R.next.kind) or "race"
+    local kind = (not starting and R.next and R.next.kind) or "standard"
     local ev = M.eventOf(kind)
-    if ev.humansOnly then                           -- time trial: the grid is the humans alone
+    if ev.humansOnly then                           -- field / pod test: the grid is the humans alone
         plan.grid, plan.maxRacers = "max", math.max(1, humans)   -- the plan only: the stored choice keeps its grid
     end
-    plan.aiTierPath = tierPath(R.arch, M.tierFor(R.race, R.length))
-    -- pods have no tier build: the run's tier goes into the AI pods' own builds (perkapply.applyAI)
+    local tier = M.tierFor(R.race, R.length)
+    if not starting and R.next and R.next.invaded then tier = math.min(6, tier + 1) end
+    plan.aiTierPath = tierPath(over and 1 or R.arch, tier)
+    -- pods have no tier build: the tier goes into the AI pods' own builds (perkapply.applyAI)
     plan.aiLoadout = nil
-    if tonumber(R.arch) == 1 and M.tierFor(R.race, R.length) > 1 then
-        pcall(function() plan.aiLoadout = U.mod("perkapply").tierLoadout(M.tierFor(R.race, R.length), R.arch) end)
+    if (tonumber(R.arch) == 1 or over) and tier > 1 then
+        pcall(function() plan.aiLoadout = U.mod("perkapply").tierLoadout(tier, 1) end)
     end
-    R.flight = { race = R.race, label = tostring(c.label or "?"), planet = R.next and R.next.planet or nil,
-                 kind = kind, risky = (not starting and R.next and R.next.risky) or nil, stats = {} }
+    local node = starting and { p = R.cursor.p, c = R.cursor.c, i = R.cursor.i } or R.next or {}
+    R.flight = { race = R.race, label = tostring(c.label or "?"), planet = node.planet, kind = kind,
+                 over = over, invaded = (not starting) and R.next and R.next.invaded or nil,
+                 p = node.p, c = node.c, i = node.i, boss = node.boss,
+                 slot = slotOf(node.p, node.boss ~= nil), stats = {} }
     pcall(function() R.flight.track = c.track:GetFullName() end)
     save()
     St.emit("status", M.statusText())
-    U.log(TAG, "run race %d / %d launched (%s, %s%s): AI %s, %d player(s)", R.race, R.length, ev.name,
-        R.flight.label, R.flight.risky and ", risky route" or "",
-        (plan.aiTierPath or plan.aiLoadout) and ("tier " .. M.tierFor(R.race, R.length)) or "base build (tier 1)",
-        M.playerCount())
+    U.log(TAG, "run race %d / %d launched (%s, %s%s): AI tier %d, %d player(s)", R.race, R.length, ev.name,
+        R.flight.label, R.flight.invaded and ", INVADED" or "", tier, M.playerCount())
     return true
 end
 
----------------------------------------------------------------------------------------------------- in-race counters
-local function ctrlOfPnum(pnum)
-    for _, e in ipairs(U.localPlayers()) do
-        local okN, n = pcall(function() return U.mod("join").displayNumForPC(e.pc) end)
-        if (okN and n == pnum) or (not okN and e.index == pnum) then return e.ctrlId end
-    end
-    return nil
-end
-
+---------------------------------------------------------------------------------------------------- in-race
 local function stat(ctrlId)
     local st = R.flight.stats
-    st[ctrlId] = st[ctrlId] or { boost = 0, takedowns = 0 }
+    st[ctrlId] = st[ctrlId] or {}
     return st[ctrlId]
 end
 
-local lastBoostMs = nil
-local lastEnergy = {}
--- FAST loop (main.lua, race phases): boost seconds per local car in a boost challenge. EBoostState is only the selected
--- boost (live: 2 = Afterburner even standing still), so: afterburner seconds = AfterburnerEnergy falling since the
--- last sample; ramjet seconds (IsRamjetting) count double. Paused races do not count.
+-- FAST loop (main.lua, race phases): wreck watch for the fault rule (any player count / WreckMode).
 local lastWreckPoll = 0
 local function pollWrecks(now)
     if now - lastWreckPoll < 250 then return end
     lastWreckPoll = now
     local tko = U.mod("takeover")
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         pcall(function()
             local ps = e.pc.PlayerState
             if tko and type(tko.racerPSFor) == "function" then
@@ -678,58 +974,23 @@ local function pollWrecks(now)
 end
 
 function M.fastTick()
-    if R and R.flight and St.phase == "RACING" then pcall(pollWrecks, St.nowMs()) end   -- any player count / WreckMode
-    if not (R and R.flight and R.flight.kind == "boost" and St.phase == "RACING") then
-        lastBoostMs, lastEnergy = nil, {}
-        return
-    end
-    local now = St.nowMs()
-    if lastBoostMs and now - lastBoostMs < 100 then return end
-    local dt = lastBoostMs and math.min(0.5, (now - lastBoostMs) / 1000) or 0
-    lastBoostMs = now
-    local okP, paused = pcall(U.csmPaused)
-    if okP and paused == true then return end
-    for _, e in ipairs(U.localPlayers()) do
-        pcall(function()
-            local car = e.pc.Pawn
-            if not U.ok(car) or not U.isVehicle(car) then return end
-            local vs = car.VehicleState
-            local ram = false
-            pcall(function() ram = vs:IsRamjetting() == true end)
-            local en = tonumber(vs.AfterburnerEnergy)
-            local prev = lastEnergy[e.ctrlId]
-            lastEnergy[e.ctrlId] = en
-            if dt <= 0 then return end
-            local burning = en ~= nil and prev ~= nil and en < prev - 1e-4
-            if ram then stat(e.ctrlId).boost = stat(e.ctrlId).boost + 2 * dt
-            elseif burning then stat(e.ctrlId).boost = stat(e.ctrlId).boost + dt end
-        end)
-    end
+    if R and R.flight and St.phase == "RACING" then pcall(pollWrecks, St.nowMs()) end
 end
 
--- The live line next to a player's race timer (hud.fastChallenge): the challenge counter, else the rival.
+-- The live line next to a player's race timer (hud.fastChallenge): the event, else the rival.
 -- bestLap = that player's RaceEventComponent.BestLapTime (seconds, -1 = none yet).
 function M.liveText(ctrlId, bestLap)
     if not (R and R.flight and St.phase == "RACING") then return nil end
-    local kind = R.flight.kind or "race"
-    local s = (R.flight.stats or {})[ctrlId] or { boost = 0, takedowns = 0 }
-    if kind == "boost" then return string.format("BOOST %d S", math.floor(s.boost or 0)) end
-    if kind == "takedown" then return string.format("TAKEDOWNS %d", s.takedowns or 0) end
-    if kind == "hotlap" then
-        local b = tonumber(bestLap) or -1
-        return b > 0 and string.format("BEST LAP %.2f", b) or "HOT LAP"
+    local kind = R.flight.kind or "standard"
+    if kind == "fieldtest" then return "FIELD TEST" end
+    if kind == "planesprint" then return "POD TEST" end
+    if R.flight.boss then return M.eventOf(kind).name end
+    if R.flight.invaded then
+        local ant = (presetOf(R.preset) or {}).antagonist
+        return "RIVAL " .. string.upper(tostring(ant and ant.name or R.rival or "?"))
     end
-    if kind == "timetrial" then return "TIME TRIAL" end
     if R.rival then return "RIVAL " .. string.upper(tostring(R.rival)) end
     return nil
-end
-
--- uxsplit's per-player HUD messages: "Takedown" = that player took a racer down (split races)
-local function onHudMsg(pnum, id)
-    if not (R and R.flight and St.phase == "RACING") then return end
-    if id ~= "Takedown" then return end
-    local c = ctrlOfPnum(pnum)
-    if c ~= nil then stat(c).takedowns = stat(c).takedowns + 1 end
 end
 
 -- the rival (the AI that placed best last race) marked for the game's HUD (bIsRival / RacingGameState.Rival)
@@ -751,7 +1012,7 @@ local function markRival()
 end
 
 -- POSTRACE edge (and "leaving"): every racer's place / time / best lap; the local humans by their racing
--- PlayerState; the challenge counters of this race.
+-- PlayerState.
 local function snapshot()
     if not (R and R.flight) then return end
     local gs = U.gs()
@@ -760,7 +1021,7 @@ local function snapshot()
     pcall(function() finished = gs.bIsRaceFinished == true end)
     local humans, keyToCtrl, all = {}, {}, {}
     local tko = U.mod("takeover")
-    for _, e in ipairs(U.localPlayers()) do
+    for _, e in ipairs(U.localPlayersRO()) do
         if U.ok(e.pc) then
             local ps = e.pc.PlayerState
             if tko and type(tko.racerPSFor) == "function" then
@@ -789,26 +1050,19 @@ local function snapshot()
                 local c = keyToCtrl[U.key(ps)]
                 all[#all + 1] = { name = name, pos = pos, lap = lap, bot = c == nil }
                 if c ~= nil then
-                    local s = R.flight.stats[c] or { boost = 0, takedowns = 0 }
-                    humans[c] = { pos = pos, dnf = (ft < 0), time = ft, lap = lap, wrecked = wrecked or s.wrecked == true,
-                                  boost = s.boost or 0, takedowns = s.takedowns or 0 }
+                    local s = R.flight.stats[c] or {}
+                    humans[c] = { pos = pos, dnf = (ft < 0), time = ft, lap = lap,
+                                  wrecked = wrecked or s.wrecked == true }
                 end
             end
         end
     end)
     if next(humans) == nil then return end
-    -- solo takedowns: the global race VM follows P1 (split races count through uxsplit's messages)
-    if M.playerCount() <= 1 and R.flight.kind == "takedown" then
-        pcall(function()
-            local vm = U.giSubsystem("ViewModelSubsystem"):GetRaceEventVM()
-            for c, h in pairs(humans) do h.takedowns = math.max(h.takedowns, tonumber(vm.NumberOfTakedowns) or 0) end
-        end)
-    end
     R.flight.snap = { n = n, humans = humans, all = all, finished = finished }
     local parts = {}
     for c, h in pairs(humans) do
-        parts[#parts + 1] = string.format("c%d %s%s lap %.2f boost %.1f td %d", c, ordinal(h.pos), h.dnf and " DNF" or "",
-            h.lap, h.boost, h.takedowns)
+        parts[#parts + 1] = string.format("c%d %s%s%s", c, ordinal(h.pos), h.dnf and " DNF" or "",
+            h.wrecked and " WRECKED" or "")
     end
     U.log(TAG, "race %d (%s) result: %s of %d racers (race finished %s)", R.flight.race, tostring(R.flight.kind),
         table.concat(parts, ", "), n, tostring(finished))
@@ -816,7 +1070,8 @@ end
 M._snapshot = snapshot
 
 ---------------------------------------------------------------------------------------------------- economy
--- a wreck breaks a random equipped part: unequipped and locked (owned, not usable) until repaired in the shop
+-- a wreck turns a random equipped part FAULTY ("Critical Malfunction Error"): unequipped and locked (owned, not
+-- usable) until repaired in the shop for the campaign's repair price
 local function breakPart(p)
     local equipped = {}
     for _, id in pairs(p.lo and p.lo.parts or {}) do if id then equipped[#equipped + 1] = id end end
@@ -828,22 +1083,53 @@ local function breakPart(p)
     return id
 end
 
+-- the campaign's prices (ECO_Campaign; rundata.prices); abilities by level, repair = the affix-repair price
 local function priceOf(it)
-    if it.rkind == "ab" then return 60 + 40 * (tonumber(it.lvl) or 1) end
-    if it.rkind == "crash" then return 140 end
-    if it.rkind == "part" then return 60 + 40 * (tonumber(it.pips) or 1) end
-    if it.rkind == "trait" then return 150 end
-    if it.rkind == "upgrade" then return 160 end
-    if it.rkind == "repairpart" then return 120 end
-    return 100
+    local pr = D and D.prices or {}
+    if it.rkind == "ab" then
+        local byLvl = pr.ability or { 1000, 2000, 4000 }
+        return byLvl[math.max(1, math.min(#byLvl, tonumber(it.lvl) or 1))]
+    end
+    if it.rkind == "crash" then return pr.crash or 2000 end
+    if it.rkind == "part" then return pr.part or 1000 end
+    if it.rkind == "trait" then return pr.trait or 2000 end
+    if it.rkind == "upgrade" then return pr.upgrade or 1000 end
+    if it.rkind == "repairpart" then return pr.repair or 2000 end
+    return 1000
 end
 
--- the shop stock of a player: 4 perks it does not own (mixed kinds) + the level-cap upgrade
+local function rerollPrice(n)
+    local rr = D and D.prices and D.prices.reroll or { base = 250, step = 250 }
+    return (rr.base or 250) + (rr.step or 250) * (n or 0)
+end
+
+-- the payout of a finish position (1..12) at a planet slot (1..5); eliminators pay one planet ahead (the real
+-- high-risk rule); DNF pays the real floor
+local function payout(slot, pos, dnf, highRisk)
+    local pt = D and D.payouts or nil
+    local scale = tonumber(opt("RunPayoutScale", 1)) or 1
+    if not pt then return math.floor((dnf and 25 or math.max(25, 1300 - pos * 100)) * scale) end
+    if dnf then return math.floor((pt.dnf or 25) * scale) end
+    local s = math.max(1, math.min(#pt.pos, (highRisk and slot + 1 or slot)))
+    local row = pt.pos[s]
+    local p = math.max(1, math.min(#row, math.floor(tonumber(pos) or #row)))
+    return math.floor((tonumber(row[p]) or 25) * scale)
+end
+
+-- The real payout of a finish position for the NEXT node (the run page's risk card); the kind decides the
+-- high-risk planet shift. Safe without a run (planet-1 numbers).
+function M.payoutPreview(pos, kind)
+    local slot = slotOf(R and R.next and R.next.p or nil, (R and R.next and R.next.boss) ~= nil)
+    return payout(slot, pos, false, kind == "highrisk")
+end
+
+-- the shop stock of a player: 4 perks it does not own (mixed kinds, shop-ramp rarities) + the level-cap upgrade
 function M.makeShop(p)
     local cat = catalog(R.arch)
     local o, taken, out = p.owned or emptyOwned(), {}, {}
-    for _, k in ipairs({ "ab", "part", "trait", math.random() < 0.5 and "ab" or "part" }) do
-        local it = pickFrom(cat[k], o[k], taken)
+    local slot = slotOf(R.lastSlot, false)
+    for _ = 1, 4 do
+        local it = pickGraded(cat, o, taken, rarityRoll(slot, "shop"))
         if it then it.price = priceOf(it); out[#out + 1] = it end
     end
     local up = upgradeRow(); up.price = priceOf(up); out[#out + 1] = up
@@ -863,7 +1149,6 @@ function M.shopPicker(ctrlId)
         row.name = string.format("%s · %d CR", tostring(it.name or it.id), it.price or 0)
         items[#items + 1] = row
     end
-    local cat = nil
     for id in pairs(p.broken or {}) do
         local nm = id
         pcall(function() nm = (U.mod("perkdata").PARTS[id] or {}).name or id end)
@@ -871,7 +1156,7 @@ function M.shopPicker(ctrlId)
                               name = string.format("REPAIR %s · %d CR", tostring(nm), priceOf({ rkind = "repairpart" })),
                               price = priceOf({ rkind = "repairpart" }) }
     end
-    local rr = 50 + 25 * (p.rerolls or 0)
+    local rr = rerollPrice(p.rerolls)
     items[#items + 1] = { id = "reroll", rkind = "reroll", slot = "tun0", iconKind = "glyph",
                           name = string.format("REROLL THE SHOP · %d CR", rr), price = rr }
     items[#items + 1] = { id = "leave", rkind = "leave", slot = "tun0", iconKind = "glyph", name = "LEAVE THE SHOP" }
@@ -921,52 +1206,61 @@ function M.buy(ctrlId, item, arch, style)
     return K().copy(p.lo), toastText, M.shopPicker(ctrlId)
 end
 
----------------------------------------------------------------------------------------------------- settle (v2)
--- the humans' ranking value of an event kind (lower is better; nil = no result)
+---------------------------------------------------------------------------------------------------- settle
+-- the humans' ranking value of an event kind (lower is better)
 local function rankValue(kind, h)
     local ev = M.eventOf(kind)
-    if ev.rank == "place" then return (h.dnf and 100 or 0) + (h.pos or 99) end
     if ev.rank == "time" then return (not h.dnf and h.time and h.time > 0) and h.time or 1e9 end
-    if ev.rank == "lap" then return (h.lap and h.lap > 0) and h.lap or 1e9 end
-    if ev.rank == "boost" then return -(h.boost or 0) end
-    if ev.rank == "takedown" then return -(h.takedowns or 0) * 1000 + (h.pos or 99) end
-    return h.pos or 99
+    return (h.dnf and 100 or 0) + (h.pos or 99)
 end
 
--- the team target of an event; -> met, detail text
-local function targetMet(kind, snap, race, len)
+-- the team outcome of an event; -> met, tokensLost, detail text
+local function targetMet(kind, snap)
     local ev = M.eventOf(kind)
-    local nh, best, allFin, team = 0, 99, true, 0
+    local nh, best, allFin, allWrecked = 0, 99, true, true
     for _, h in pairs(snap.humans) do
         nh = nh + 1
         if not h.dnf and (h.pos or 99) < best then best = h.pos or 99 end
         if h.dnf then allFin = false end
-        if ev.rank == "boost" then team = team + (h.boost or 0) end
-        if ev.rank == "takedown" then team = team + (h.takedowns or 0) end
+        if not h.wrecked then allWrecked = false end
     end
-    if ev.rank == "place" then
-        local t = M.targetFor(race, len, nh)
-        return best <= t, best < 99 and ("BEST " .. ordinal(best)) or "NOBODY FINISHED"
-    elseif ev.rank == "time" then
-        return allFin, allFin and "EVERYBODY FINISHED" or "A PLAYER DID NOT FINISH"
-    elseif ev.rank == "lap" then
-        local laps = {}
-        for _, a in ipairs(snap.all or {}) do if a.lap and a.lap > 0 then laps[#laps + 1] = a end end
-        table.sort(laps, function(a, b) return a.lap < b.lap end)
-        local lt = M.lapTarget(nh)
-        for i = 1, math.min(lt, #laps) do if not laps[i].bot then return true, string.format("LAP %.2f", laps[i].lap) end end
-        return false, "NO HUMAN LAP IN THE TOP " .. lt
-    elseif ev.rank == "boost" then
-        local need = BOOST_TARGET_S * math.max(1, nh)
-        return team >= need, string.format("%d / %d S OF BOOST", math.floor(team), need)
-    elseif ev.rank == "takedown" then
-        return team >= nh, string.format("%d / %d TAKEDOWNS", team, nh)
+    local lost, met, detail = 0, true, best < 99 and ("BEST " .. ordinal(best)) or "NOBODY FINISHED"
+    if kind == "highrisk" then
+        met = best <= 3
+        if not met then lost = lost + 1; detail = detail .. " · ELIMINATOR TOP 3 MISSED: TOKEN -1" end
+    elseif kind == "planesprint" then
+        met = allFin
+        if not met then lost = lost + 1; detail = "A PLAYER DID NOT FINISH: TOKEN -1" end
+    elseif kind == "knockout" or kind == "champion" then
+        met = best == 1
+        if not met then lost = lost + 1; detail = detail .. " · MUST-WIN LOST: TOKEN -1" end
+    elseif kind == "fieldtest" then
+        met = true
+        detail = allFin and "EVERYBODY FINISHED" or "A PLAYER DID NOT FINISH"
     end
-    return false, "?"
+    if allWrecked and nh > 0 then
+        lost = lost + 1
+        detail = detail .. " · EVERYBODY WRECKED: TOKEN -1"
+    end
+    return met, lost, detail
 end
 M._targetMet = targetMet
 
--- Back in the front end: score the race (or drop it when it did not end), credits, faults, rewards, next routes.
+-- advance the cursor onto the settled node, then roll the next options
+local function advance(fl)
+    if fl.boss then
+        R.bossIdx = (fl.boss or R.bossIdx or 1) + 1
+        local pre = presetOf(R.preset)
+        if not pre or R.bossIdx > #pre.boss then return "won" end
+    elseif fl.p then
+        R.cursor = { p = fl.p, c = fl.c, i = fl.i }
+    end
+    R.race = R.race + 1
+    if R.race > R.length then return "won" end
+    return "on"
+end
+
+-- Back in the front end: score the race (or drop it when it did not end), credits, faults, rewards, next nodes.
 function M.settle()
     if not (R and R.flight) then return end
     local fl = R.flight
@@ -977,7 +1271,7 @@ function M.settle()
         U.log(TAG, "run race %d left before its end: not counted", fl.race)
         return
     end
-    local kind = fl.kind or "race"
+    local kind = fl.kind or "standard"
     local ev = M.eventOf(kind)
     -- humans ranked by the event's value
     local order = {}
@@ -986,50 +1280,42 @@ function M.settle()
     -- the rival's place (an AI racer, by name)
     local rivalPos = nil
     for _, a in ipairs(fl.snap.all or {}) do if R.rival and a.bot and a.name == R.rival then rivalPos = a.pos end end
-    local mult = fl.risky and RISKY_MULT or 1
     local res, broke = {}, {}
     local worstC = order[#order] and order[#order].c or nil
     for i, e in ipairs(order) do
         local p = R.players[e.c]
-        local counts = not (ev.rank == "place" or ev.rank == "time") or not e.h.dnf
-        local pts = counts and (POINTS[i] or 0) or 0
-        local cr = counts and math.floor((CREDITS[i] or 100) * mult) or math.floor(60 * mult)
+        local pts = (not e.h.dnf) and (POINTS[i] or 0) or 0
+        local cr = payout(fl.slot or 1, e.h.pos or 12, e.h.dnf, kind == "highrisk")
         local beatRival = rivalPos ~= nil and not e.h.dnf and (e.h.pos or 99) < rivalPos
         if beatRival then cr = cr + RIVAL_BONUS end
         if p then
             p.points = (p.points or 0) + pts
-            p.credits = (p.credits or START_CREDITS) + cr
+            p.credits = (p.credits or 0) + cr
             if i == 1 and not e.h.dnf then p.wins = (p.wins or 0) + 1 end
-            if e.h.wrecked then
+            if e.h.wrecked and not fl.over then
                 local id = breakPart(p)
-                if id then broke[#broke + 1] = string.format("%s: %s BROKEN", tostring(p.name), id) end
+                if id then broke[#broke + 1] = string.format("%s: %s FAULTY", tostring(p.name), id) end
             end
         end
         res[e.c] = { rank = i, pos = e.h.pos, dnf = e.h.dnf, pts = pts, cr = cr, rival = beatRival or nil }
     end
-    local met, detail = targetMet(kind, fl.snap, fl.race, R.length)
-    if not met then R.hull = R.hull - 1 end
+    local met, tokensLost, detail = targetMet(kind, fl.snap)
+    R.hull = math.max(0, R.hull - tokensLost)
     R.history[#R.history + 1] = { race = fl.race, label = fl.label, kind = kind, met = met, detail = detail, res = res }
     R.used[fl.track or ("race" .. fl.race)] = true
-    if not fl.planet and fl.track then                        -- race 1 (chosen by the players): find its planet
-        pcall(function()
-            for _, c in ipairs(candidates()) do
-                if c.path == fl.track then fl.planet = c.planet end
-            end
-        end)
-    end
-    R.lastPlanet, R.lastKind = fl.planet, kind
+    R.lastKind, R.lastSlot = kind, fl.slot or 1
     -- the next rival: the AI that placed best
     local bestAI = nil
     for _, a in ipairs(fl.snap.all or {}) do if a.bot and (not bestAI or a.pos < bestAI.pos) then bestAI = a end end
     R.rival = bestAI and bestAI.name or R.rival
-    -- the final is a must-win: missed with hull left -> another final (same race number), until won or hull 0
-    local finalAgain = ((kind == "final" or fl.race >= R.length) and not met and R.hull > 0)
-    if not finalAgain then R.race = R.race + 1 end
+    -- a lost must-win is raced again (the token already went); tokens 0 = the run is over
+    local mustWinAgain = (ev.mustWin and not met and R.hull > 0)
+    local outcome = "on"
+    if not mustWinAgain then outcome = advance(fl) end
     for c, p in pairs(R.players) do
         p.cap = (p.cap or 1) + 1
-        p.credits = p.credits or START_CREDITS
-        if R.hull > 0 and R.race <= R.length then
+        p.credits = p.credits or 0
+        if R.hull > 0 and outcome == "on" then
             p.offer = M.makeOffer(p, (c == worstC and M.playerCount() > 1) and 4 or 3)
             p.offerPending = nil                  -- (a late joiner's free pick is this offer)
             p.shop, p.rerolls, p.shopPending = M.makeShop(p), 0, true
@@ -1041,23 +1327,24 @@ function M.settle()
         R.status = "lost"
         msg = M.statusText()
         archive("LOST")
-    elseif R.race > R.length then
+    elseif outcome == "won" then
         R.status = "won"
         msg = M.statusText()
         archive("WON")
-    elseif finalAgain then
+    elseif mustWinAgain then
         M.makeOptions()
-        msg = string.format("FINAL LOST (%s): HULL -1, RACE THE FINAL AGAIN · %s", detail, M.statusText())
+        msg = string.format("%s LOST (%s): RACE IT AGAIN · %s", ev.name, detail, M.statusText())
     else
         M.makeOptions()
-        msg = string.format("%s (%s) · %s WINS THE %s · %s", met and "TARGET MET" or "TARGET MISSED: HULL -1", detail,
+        msg = string.format("%s (%s) · %s WINS THE %s · %s",
+            tokensLost > 0 and ("TOKEN -" .. tokensLost) or "DONE", detail,
             winner and tostring(winner.name) or "?", ev.name, M.statusText())
     end
     if #broke > 0 then msg = msg .. " · " .. table.concat(broke, ", ") end
     save()
     St.emit("status", msg)
-    U.log(TAG, "race %d (%s) settled: %s, target %s, hull %d, rival %s, next %s", fl.race, ev.name, detail,
-        met and "met" or "missed", R.hull, tostring(R.rival), R.next and (tostring(R.next.kind) .. " " .. tostring(R.next.track)) or "-")
+    U.log(TAG, "race %d (%s) settled: %s, tokens %d, rival %s, next %s", fl.race, ev.name, detail, R.hull,
+        tostring(R.rival), R.next and (tostring(R.next.kind) .. " " .. tostring(R.next.track)) or "-")
 end
 
 -- OPTIONS > Galaxy run OFF while a run is on: the run is dropped (archived as ABANDONED).
@@ -1073,7 +1360,7 @@ end
 -- FREE MODE START between run races: RACE SETUP on the racer cards for the next race. true when handled.
 function M.openNext()
     if not M.betweenRaces() then return false end
-    if not R.next then R.next = M.pickNext(); save() end
+    if not R.next then M.makeOptions(); save() end
     local spec = R.next
     if not spec then return false end
     local setup = U.mod("setup")
@@ -1084,14 +1371,15 @@ function M.openNext()
         return false
     end
     local ev = M.eventOf(spec.kind)
-    St.emit("status", string.format("%s: %s TARGET %s.", ev.name, ev.rule,
-        M.targetText(spec.kind, R.race, R.length)))
+    local t = M.targetText(spec.kind)
+    St.emit("status", string.format("%s: %s%s", ev.name, ev.rule, t and (" TARGET " .. t .. ".") or ""))
     return true
 end
 
 ---------------------------------------------------------------------------------------------------- events
 function M.init()
     ensureLoaded()
+    if not D then U.warn(TAG, "rundata.lua missing or unreadable: GALAXY RUN stays off") end
     St.on("phase", TAG, function(new)
         if not (R and R.flight) then return end
         if new == "POSTRACE" then U.try(TAG, snapshot)
@@ -1104,13 +1392,12 @@ function M.init()
     St.on("leaving", TAG, function()
         if R and R.flight and R.flight.snap and St.phase == "POSTRACE" then U.try(TAG, snapshot) end
     end)
-    St.on("hudmsg", TAG, function(pnum, id) U.try(TAG, onHudMsg, pnum, id) end)
     St.on("humanWrecked", TAG, function(pc)
         if not (R and R.flight) then return end
-        for _, e in ipairs(U.localPlayers()) do
+        for _, e in ipairs(U.localPlayersRO()) do
             if U.ok(e.pc) and U.key(e.pc) == U.key(pc) then
                 stat(e.ctrlId).wrecked = true
-                U.log(TAG, "c%d wrecked: a part breaks at the race end", e.ctrlId)
+                U.log(TAG, "c%d wrecked: a part turns faulty at the race end", e.ctrlId)
             end
         end
     end)
@@ -1126,5 +1413,7 @@ end
 -- tests
 function M._reset() R, loaded = nil, true end
 function M._set(r) R, loaded = r, true end
+function M._data() return D end
+function M._setData(d) D = d end
 
 return M

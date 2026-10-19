@@ -34,7 +34,7 @@ local function nameOf(pc)
         if U.ok(ps) then
             name = U.str(ps:GetPlayerName())          -- APlayerState::GetPlayerName() -> FString
         end
-        if name == "" or name == "?" then
+        if (name == "" or name == "?") and U.ok(pc) then
             name = U.str(pc:GetFName())
         end
     end)
@@ -42,7 +42,7 @@ local function nameOf(pc)
 end
 
 local function isLocal(pc)
-    local ok, res = pcall(function() return pc:IsLocalController() end)
+    local ok, res = pcall(U.callMethod, pc, "IsLocalController")
     return ok and res == true
 end
 
