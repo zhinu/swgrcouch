@@ -86,19 +86,19 @@ The game is not included. You need a legitimately bought copy (Steam). The mod c
 
 ## Install
 
-Download the latest release from the **Releases** page:
-- `SWGRCouch-1.0.0-no-UE4SS.zip` (**recommended**): mod + input filter, without UE4SS. Install
-  [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) by GenerousMods from its page first;
-- `SWGRCouch-1.0.0-with-UE4SS.zip`: mod + input filter + a copy of UE4SS Galactic Racer Edition (open beta,
-  2026-10-08), everything in one download. Prefer the author's page for the latest UE4SS;
-- `SWGRCouch-1.0.0.zip`: mod only - no UE4SS, and **without the compiled input-filter DLL** (some sites and
-  scanners dislike zips with a DLL inside; see [The input filter DLL](#the-input-filter-dll) - solo play works
-  as is, split screen needs the DLL);
-- `swgr_inputfilter.dll`: the compiled input-filter DLL as a bare file, to complete the mod-only zip.
+Downloads are on **Nexus Mods** (page coming soon). No files are attached to the releases here.
+- **Main file** — the mod folder only (Lua scripts, no DLL, no executable): extract it into
+  `<game>\Griffin\Binaries\Win64\ue4ss\Mods\`. Requires
+  [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) by GenerousMods.
+- **Optional file** — `swgr_inputfilter.dll`, into `ue4ss/Mods/SWGRCouch/native/`: gives each player's car its own
+  pad. Solo play works without it; in split screen the pads mix without it (see [The input filter DLL](#the-input-filter-dll)).
+
+You can also install straight from this repository (below): `install.sh` works from a checkout, and the DLL can be
+rebuilt from its source with `SWGRCouch/native/inputfilter/build.sh`.
 
 ### Linux / Steam Deck (Steam + Proton)
 ```sh
-unzip SWGRCouch-1.0.0-with-UE4SS.zip && cd SWGRCouch-1.0.0-with-UE4SS
+git clone https://git.jules.my/jules/swgrcouch.git && cd swgrcouch
 ./install.sh "$HOME/.local/share/Steam/steamapps/common/STAR WARS Galactic Racer"
 ```
 Then set the launch options in Steam (Properties > Launch options): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
