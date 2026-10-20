@@ -520,7 +520,7 @@ Any pad the game sees as a controller. The Xbox layout is tested; DualShock and 
 
 A heuristic false positive on a small DLL. It is built from the C source in this repository and rebuilds
 byte-identical, so anyone can check it, and the 1.0.1 copy carries the author's signature (see
-[The input filter DLL](#the-input-filter-dll)). A CA-trusted signature through SignPath is applied for.
+[The input filter DLL](#the-input-filter-dll)).
 
 </details>
 
@@ -609,9 +609,7 @@ check a download with `osslsigncode verify -in swgr_inputfilter.dll -CAfile swgr
 | unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `42e7b2a4cef5e6d8b5ad6c89ae525df98fc921b74941e70b8f872e8b41f7e8b8` |
 
 ### Code signing policy
-The input filter DLL is the only file this project signs. Free code signing provided by
-[SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org) (application
-pending: until a release says "signed by SignPath Foundation", the DLL carries only the author's self-signed
-signature above). The DLL is built from this repository's source on
-GitHub Actions and every signing request is approved by hand. Team roles, what is signed, how to verify a download
-and the privacy statement (the DLL makes no network connections): [CODE-SIGNING-POLICY.md](CODE-SIGNING-POLICY.md).
+The input filter DLL is the only file this project signs, and the author's self-signed signature above is the
+project's chosen approach: the author signs it by hand on his own machine (the private key never leaves it), and the
+reproducible build with both hashes is the second, independent proof. What is signed, who signs, how to verify a
+download and the privacy statement (the DLL makes no network connections): [CODE-SIGNING-POLICY.md](CODE-SIGNING-POLICY.md).
