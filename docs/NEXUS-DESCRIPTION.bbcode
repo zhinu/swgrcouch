@@ -17,11 +17,14 @@ Race with friends in Free Mode, run a Galactic Grand Prix, or play the game's ow
 [*][b]Couch Campaign:[/b] the game's real campaign (paddock, run map, acts, bosses). Verified for [b]2 players[/b]; 3-4 players are [i]experimental[/i]. Each player has their own vehicle class, racer style, credits, shop, rewards, backer and garage.
 [*][b]Split:[/b] top / bottom or side by side for 2 players, quarters for 3-4.
 [/list]
-[b]New in 1.0.1[/b]
+[b]New in 1.0.1: the big stability update[/b]
 [list]
+[*][b]The random race-start crash is gone:[/b] UE4SS keeps a cache of class members that it never clears, and a Blueprint class reloaded at the same address made a member read hit freed memory (about 1 race start in 40). SWGRCouch now keeps the classes it reads loaded for the session: 0 crashes in every test session since. The full report is shared with GenerousMods ([url=https://git.jules.my/jules/ue4ss-gr-findproperty-cache]write-up and repro[/url]).
+[*][b]The post-race map waits for everyone:[/b] player 1 can no longer pick the next node while player 2 still has rewards open, even with a fast A as the map appears, and the first A after the wait always picks the selected node.
+[*][b]Playing alone?[/b] CONTINUE or an act on the COUCH CAMPAIGN page with only one player now asks: back to the menu (use the game's normal CAMPAIGN for a solo run) or add a second player.
 [*][b]One zip, straight into the game folder:[/b] the new game-folder zip carries the mod and the input filter DLL. Install UE4SS Galactic Racer Edition, then unzip it into the game folder and play. It replaces none of your UE4SS settings or other mods.
 [*][b]Signed input filter:[/b] the DLL now carries the author's own (self-signed) signature.
-[*][b]Steadier couch campaign:[/b] a crash when the game reloads its race HUD is fixed, and so are the backer contract focus (player 1's first card is framed from the start), Hibi's shop exits, a wrecked guest's side bet, a guest's SPEED on the build panel and player 1's first A on the run map after a guest's rewards.
+[*][b]Steadier couch campaign:[/b] fixed: the backer contract focus (player 1's first card is framed from the start), Hibi's shop exits, a wrecked guest's side bet, a guest's SPEED on the build panel and player 1's first A on the run map after a guest's rewards.
 [*][b]Smoother menus:[/b] RACE SETUP's MODE rows move with Up / Down and change with Left / Right; B on the act replay question means NO; the Grand Prix names every racer like the game's own screens.
 [/list]
 
@@ -129,7 +132,7 @@ The game is not included: you need a legitimately bought copy (Steam). The mod c
 [b]Steam Deck:[/b] extract the zip in Desktop Mode (Ark: untick "Extract into subfolder"), set the launch option, go back to Gaming Mode. One pad per extra player; the Deck's own controls are player 1.
 [b]Already using UE4SS for other mods?[/b] Nothing to skip: the zip carries no [font=Courier New]mods.txt[/font], [font=Courier New]mods.json[/font] or [font=Courier New]UE4SS-settings.ini[/font], so your other mods stay as they are. SWGRCouch starts through its own [font=Courier New]Mods\SWGRCouch\enabled.txt[/font]. Keep SplitScreenMod off (another split screen).
 [b]Signed DLL:[/b] its public certificate [font=Courier New]swgrcouch-cert.pem[/font] is next to it in [font=Courier New]native\[/font]. Windows: the DLL's Properties > Digital Signatures shows "Jules (SWGRCouch)" (marked not trusted: expected, it is self-signed). Linux: [font=Courier New]osslsigncode verify -CAfile swgrcouch-cert.pem -in swgr_inputfilter.dll[/font].
-An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the git.jules.my release page (with GenerousMods' OK). On Nexus, get UE4SS from [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]its own page[/url].
+An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.1]git.jules.my release page[/url] (with GenerousMods' OK; please don't re-upload it). On Nexus, get UE4SS from [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]its own page[/url].
 
 [b]The lean way: the mod folder + the optional DLL[/b]
 [list]
@@ -161,6 +164,7 @@ An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the g
 [size=5][b]FAQ and troubleshooting[/b][/size]
 [list]
 [*][b]No FREE MODE tab?[/b] On Linux / Steam Deck check the launch option. Check that UE4SS Galactic Racer Edition is installed ([font=Courier New]Griffin\Binaries\Win64\dwmapi.dll[/font]) and that [font=Courier New]ue4ss\Mods\SWGRCouch\Scripts\main.lua[/font] exists (the zip went into the game folder, not into a folder of its own).
+[*][b]A "2 PLAYERS NEEDED" window on COUCH CAMPAIGN?[/b] The couch campaign needs a second player: let a friend press A on their pad, or go back to the menu and play the game's normal CAMPAIGN alone.
 [*][b]Every pad steers player 1's car?[/b] The input filter DLL is missing: add the optional file, or use the game-folder zip.
 [*][b]The game stopped starting after a game update?[/b] Turn the mod off, update UE4SS Galactic Racer Edition, and look for a new SWGRCouch version.
 [*][b]Online play?[/b] No. Steam Offline Mode, Steam Cloud off, and your pre-mod Saved folder back before you go online.
@@ -179,6 +183,12 @@ An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the g
 [list]
 [*][b]SWGRCouch[/b] by Jules, [b]made with the help of Claude[/b] (Anthropic). MIT licence.
 [*][url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] by [b]GenerousMods[/b] (the UE4SS build the mod runs on), and [url=https://github.com/UE4SS-RE/RE-UE4SS]UE4SS[/url] (MIT).
+[*]All downloads with their sha256: [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.1]git.jules.my release 1.0.1[/url].
 [*]Source, full README and the code signing policy: [url=https://github.com/zhinu/swgrcouch]github.com/zhinu/swgrcouch[/url] and [url=https://git.jules.my/jules/swgrcouch]git.jules.my/jules/swgrcouch[/url].
 [/list]
 [i]Fan-made and unofficial. SWGRCouch is not affiliated with, endorsed by or sponsored by Lucasfilm, Disney, Fuse Games or Secret Mode. STAR WARS and STAR WARS Galactic Racer are trademarks of their respective owners. No game files are distributed.[/i]
+
+
+[center][size=5][b]🌱 One more thing: give vegan a try[/b][/size][/center]
+Thanks for playing. If you have a minute for something bigger than a race: please consider going vegan. Every year, tens of billions of land animals are bred, confined and killed for food. They feel fear and pain just like the dogs and cats we love. Animal farming is also one of the biggest drivers of deforestation, water use and climate change.
+You don't have to be perfect to make a difference. Start with one meal, one week, or a free guided challenge like [url=https://veganuary.com]Veganuary[/url] or [url=https://challenge22.com]Challenge 22[/url].
