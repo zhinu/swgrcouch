@@ -1386,7 +1386,9 @@ local clsCacheN = 0
 -- ExecuteInGameThreadWithDelay timers per CSM state change, and a race changes CSM states all the time).
 -- CosmeticStateMachine state changes seen by the hooks of M.init (garagenative: did a native back already act?)
 local csmSeq = 0
+local csmAt = -1e12
 function M.csmSeq() return csmSeq end
+function M.csmAt() return csmAt end              -- couch-fix65 (AUTO-160a): when the last state change was seen
 
 function M.markDirty(why)
     local now = St.nowMs()
@@ -1971,7 +1973,8 @@ function M.restoreOwnerUiInput(why)
     imcRec = nil
     if not r then return end
     local imc = findL(IMC_UI_PATH)
-    local sub = U.ok(r.pc) and eiOf(r.pc) or nil
+    -- U.alive: a release at a travel (couch-fix65 M.releaseIds) may name the previous world's owner PC
+    local sub = U.alive(r.pc) and eiOf(r.pc) or nil
     if not (imc and sub) then return end
     if r.had == true and r.prio then
         pcall(function() sub:AddMappingContext(imc, math.floor(r.prio), imcOpts()) end)
@@ -2297,6 +2300,33 @@ function M.mapInputHold(on, why)
 end
 function M.mapInputHeld() return swap.hold == true end
 
+-- couch-fix66 (AUTO-161): a vanish leaves no dump and no crash report, only the UE4SS log (flushed per line). Every
+-- couch node pick on the RACE world says, right before the native ChooseNextMapNode, how the run map got there: its
+-- reward map hold (fix32 / fix51 / fix53) and how long ago it ended, the pad ids. The next vanish names its state.
+-- -> the line (also for the sims)
+function M.pickBreadcrumb()
+    if not U.isA(U.gs(), "/Script/Griffin.RacingGameState") then return nil end
+    if #guestPlayerStates() == 0 then return nil end
+    local hold = "no map hold this post-race"
+    pcall(function()
+        local CP = U.mod("couchpanel")
+        local h = CP.lastMapHold and CP.lastMapHold()
+        if CP.mapHeld and CP.mapHeld() == true then
+            hold = "the map is HELD now"
+        elseif h and h.gen == St.worldGen then
+            hold = string.format("map hold released %d ms ago (%s%s)", math.floor(St.nowMs() - (h.at or 0)),
+                h.inputHeld and "input hold" or "no input hold",
+                ((h.maps or 0) + (h.buttons or 0)) > 0 and string.format(", %s map / %s node button(s) re-enabled",
+                    tostring(h.maps or 0), tostring(h.buttons or 0)) or ", the map never written")
+        end
+    end)
+    local line = string.format("node pick on the race world (fix66 breadcrumb): native ChooseNextMapNode next - %s; "
+        .. "pad ids %s", hold, swap.on and (swap.hold and "HELD" or (swap.parked and "swapped + parked" or "swapped"))
+        or "normal")
+    U.log(TAG, "%s", line)
+    return line
+end
+
 -- Ids left on a park / temp id with no swap on (a hot reload while parked, a failed move): back to normal ids.
 -- Polled every second outside the race phases; in LOADING / PRERACE / RACING only once after a phase / world / players
 -- change or a (re)load (swap.repairWanted): nothing in a race moves the ids (couch-racefast).
@@ -2322,6 +2352,45 @@ local function repairIds()
     local ok = pcall(function() applyIds(GS, lp, want) end)
     U.warn(TAG, "pad ids repaired: a local player was left on a park / temporary id (hot reload?): %s",
         ok and "normal ids again" or "FAILED")
+end
+
+-- couch-fix65 (AUTO-159, live round 10 14:35:38): a campaign race entered straight from the guest-owned PLANET
+-- OVERVIEW went OTHER -> PRERACE with no TRANSIT phase seen (no LoadMap hook, the transition world never polled), so
+-- the swap (P1's PC parked on id 6, P2's on P1's id 0) was still on in the race world. The race world's PCs are NEW
+-- objects (the paddock and race GameModes use other PlayerController classes): swap.orig, keyed by the paddock PCs,
+-- named nobody - join's race_enter guard (it runs before every "phase" listener) found no joined guest on ids 1..3,
+-- couch.active() read false and the race ran as "not launched by SWGRCouch" (P2's car to the AI, one view); the
+-- unswap and the repair came only after it. The travel ends every id change at once: at the first sight of any new
+-- world (the transition world or the race / paddock world itself, "world" event, before the phase is computed), at a
+-- phase without shared screens, and at race_enter (join.onRaceEnter asks first). The swap, the park, the fix53 map
+-- input hold and a stale record are dropped and the live ids normalised (P1 on 0, every guest below PARK_ID: its own
+-- id when the record still knows the PC, else the lowest free one). -> true when an id moved or a swap / hold ended
+function M.releaseIds(why)
+    why = tostring(why or "travel")
+    local had = swap.on == true or swap.hold == true or swap.parked == true
+    if M.garageHeld and M.garageHeld() then return false end   -- garagenative's turn: it gives back its own ids
+    if swap.on then
+        U.try(TAG, playersChanged, why)                  -- a stale record (new PCs): ends the swap without moving ids
+        if swap.on then U.try(TAG, M.setSwap, false, why) end
+    end
+    swap.hold, swap.holdWhy, swap.holdCheckAt = false, nil, nil
+    swap.parked, swap.parkFor = false, nil
+    if swap.on then return had end                       -- the unswap failed (logged by setSwap): the tick retries
+    local lp = U.localPlayers()
+    if #lp < 1 or not U.ok(lp[1].pc) then return had end
+    local GS = U.cdo("GameplayStatics")
+    local ids = liveIds(GS, lp)
+    local p1Key = U.key(lp[1].pc)
+    local bad = ids[p1Key] ~= nil and ids[p1Key] ~= 0
+    for _, id in pairs(ids) do if id >= PARK_ID then bad = true end end
+    activeMemo.at = -1e12
+    if not bad then return had end
+    local want = M.normalIds(ids, p1Key)
+    local ok = pcall(function() applyIds(GS, lp, want) end)
+    swap.repairWanted = nil
+    U.log(TAG, "AUTO-159 pad ids released at the travel (%s): P1 back on id 0, every guest on his own id - %s", why,
+        ok and "normal ids" or "FAILED")
+    return true
 end
 
 ---------------------------------------------------------------------------------------------------- save owner
@@ -3840,9 +3909,10 @@ local function onPhase(new, old)
     swap.repairWanted = true                    -- repairIds runs on events only in the race phases
     if new == "FRONTEND" or new == "LOADING" then toastClose() end
     if new == "FRONTEND" then toast.shownFor = nil end
-    if new == "FRONTEND" or new == "LOADING" then if swap.on then M.setSwap(false, "phase " .. new) end end
-    -- any phase without shared screens: normal ids at once (a race seen first as PRERACE skipped LOADING)
-    if not SHARED_PHASES[new] and swap.on then M.setSwap(false, "phase " .. new) end
+    -- any phase without shared screens: normal ids at once (a race seen first as PRERACE skipped LOADING); couch-fix65
+    -- (AUTO-159): through M.releaseIds - a record of the previous world's PCs no longer names the new ones, and the
+    -- park / the fix53 map input hold end too
+    if not SHARED_PHASES[new] and (swap.on or swap.hold or swap.parked) then U.try(TAG, M.releaseIds, "phase " .. new) end
     if new == "LOADING" or new == "FRONTEND" then swap.preRunSeen = nil end
     if new == "FRONTEND" then M.restoreTimeTrials() end
     if new == "LOADING" or new == "PRERACE" then ghosted = {} end
@@ -3914,7 +3984,11 @@ function M.init()
     U.try(TAG, function() U.mod("instances").init() end)
     St.on("leaving", TAG, function() quiet("leaving"); toastClose(); chipClose(); chip.tagged = {} end)
     swap.repairWanted = true                    -- a (re)load: one ids check whatever the phase
-    St.on("world", TAG, function() swap.repairWanted = true; quiet("world"); chip.host, chip.set, chip.texts, chip.last = nil, nil, {}, {} end)
+    St.on("world", TAG, function()
+        swap.repairWanted = true; quiet("world"); chip.host, chip.set, chip.texts, chip.last = nil, nil, {}, {}
+        -- couch-fix65 (AUTO-159): a new world = a travel; no swap / park / map input hold crosses it (M.releaseIds)
+        if swap.on or swap.hold or swap.parked then U.try(TAG, M.releaseIds, "new world") end
+    end)
     St.on("players", TAG, function()
         activeMemo.at, swap.repairWanted = -1e12, true
         U.try(TAG, playersChanged, "players changed"); M.markDirty("players")
@@ -3932,7 +4006,14 @@ function M.init()
     for _, fn in ipairs({ "ChangeToState", "BackToPreviousState", "ContinueToNextState", "FinishState" }) do
         U.hook("/Script/Griffin.CosmeticStateMachine:" .. fn, { post = function()
             csmSeq = csmSeq + 1
+            csmAt = St.nowMs()
             M.markDirty("csm " .. fn)
+            -- couch-fix68 (AUTO-163): a post-race state change may have put the run map up (the holder's
+            -- PickNextEvent page): the reward map hold starts here, before the next input event reaches the map
+            if St.phase == "POSTRACE" then
+                local cp = package.loaded["couchpanel"]
+                if type(cp) == "table" and type(cp.csmChanged) == "function" then U.try(TAG, cp.csmChanged, fn) end
+            end
         end }, TAG .. ".dirty")
     end
     U.hook("/Script/Griffin.CampaignSubsystem:ChooseNextMapNode", {
@@ -3950,6 +4031,9 @@ function M.init()
                     U.warn(TAG, "fix51: a node pick went through while P1's run map was held for a guest's rewards "
                         .. "(an unblocked native path): the guest's open rounds become skip credits")
                 end
+                -- couch-fix68 (AUTO-163): a pick that beat the hold (a guest's reward stages still open, no hold)
+                local race = CP.pickWhileChoosing and CP.pickWhileChoosing()
+                if race then U.warn(TAG, "%s", race) end
             end)
             planeT.kicked = false
             M._pickKept = nil
@@ -3960,6 +4044,7 @@ function M.init()
             U.try(TAG, function() if M.active() or U.isA(U.gs(), "/Script/Griffin.PaddockGameState") then
                 M.patchTimeTrials(#guestPlayerStates())
             end end)
+            U.try(TAG, M.pickBreadcrumb)
         end,
         post = function() U.try(TAG, M.patchGrid, "node picked") end,
     }, TAG)

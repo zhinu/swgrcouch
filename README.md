@@ -77,6 +77,9 @@ own vehicle as the run goes on, in their own part of the screen.
 - **Seats, not pads.** Progress belongs to P2's seat, P3's seat and so on. If a pad dies, another one can take its
   seat, and after a restart each controller returns to the seat it had.
 - **Replay any act** from the COUCH CAMPAIGN page on the CAMPAIGN tab.
+- **Needs 2 players.** With nobody joined, CONTINUE or a new run on the COUCH CAMPAIGN page asks first: **BACK TO
+  MENU** (for a solo run, use the game's normal CAMPAIGN) or **ADD A SECOND PLAYER** (B too). `CouchSoloPrompt =
+  false` in `config_user.lua` starts the run anyway.
 - **House rules** for team mystery choices, P1's rewards and the Broker's penalty: see [Settings](#settings).
 
 <details>
@@ -290,7 +293,7 @@ Edition ships it off). The two `UE4SS-settings.ini` values the mod needs (`bForc
 `UseCache = 0`) are already set in UE4SS Galactic Racer Edition.
 
 An all-in-one variant that also carries UE4SS Galactic Racer Edition (`SWGRCouch-1.0.1-gameroot-with-UE4SS.zip`) is
-built as well; it is only offered if the UE4SS author agrees to it being bundled.
+built as well; it is on the git.jules.my release page only (with GenerousMods' OK), not on Nexus: get UE4SS updates from [its own page](https://www.nexusmods.com/starwarsgalacticracer/mods/2), and please don't re-upload either.
 
 **Updating:** quit the game, then extract the new zip the same way over the old files. Your own files are never in the
 zip, so `settings.txt`, `config_user.lua`, the run and Grand Prix files and the game's saves stay.
@@ -402,6 +405,7 @@ The values above are the defaults; a line you leave out keeps its default.
 - `Debug = true` adds the log lines a bug report needs.
 - **Couch campaign:** `CouchCampaign = false` turns the whole feature off (the campaign closes the friends);
   `CouchSkipPrologue`, `CouchTimeTrials`, `CouchPreRunSplit` and `CouchPanel` turn single parts off;
+  `CouchSoloPrompt = false` lets the COUCH CAMPAIGN page start a run with player 1 alone;
   `CouchGarage = false` hides the friends' GARAGE, `CouchGarageApply = "off"` keeps their chosen model but not their
   livery; `CouchToastMs = 0` hides the banner; `CouchPanelNative = false` shows a friend's rewards as a plain list.
 
@@ -495,6 +499,14 @@ you play online again ([Before you play](#before-you-play-offline-only)).
 
 Yes: the couch campaign *is* player 1's campaign run, and the game keeps one run per profile. Copy `SaveGames` before
 the first couch run, and put it back when you want your solo run again.
+
+</details>
+
+<details>
+<summary><b>The COUCH CAMPAIGN page says it needs 2 players.</b></summary>
+
+No friend has joined yet. Have them press **A** on their pad (ADD A SECOND PLAYER keeps the page open for that), or
+pick BACK TO MENU and play alone from the game's normal **CAMPAIGN**.
 
 </details>
 
@@ -613,3 +625,13 @@ The input filter DLL is the only file this project signs, and the author's self-
 project's chosen approach: the author signs it by hand on his own machine (the private key never leaves it), and the
 reproducible build with both hashes is the second, independent proof. What is signed, who signs, how to verify a
 download and the privacy statement (the DLL makes no network connections): [CODE-SIGNING-POLICY.md](CODE-SIGNING-POLICY.md).
+
+## One more thing: give vegan a try 🌱
+
+Thanks for playing. If you have a minute for something bigger than a race: please consider going vegan.
+Every year, tens of billions of land animals are bred, confined and killed for food. They feel fear and pain just like
+the dogs and cats we love. Animal farming is also one of the biggest drivers of deforestation, water use and climate
+change.
+
+You don't have to be perfect to make a difference. Start with one meal, one week, or a free guided challenge like
+[Veganuary](https://veganuary.com) or [Challenge 22](https://challenge22.com).

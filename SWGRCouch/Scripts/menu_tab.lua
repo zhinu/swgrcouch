@@ -996,13 +996,56 @@ function menu_tab.leaveTick(menu, now)
   if not lc then return end
   if St.menu.visible ~= nil or now > lc.untilMs or not U.ok(menu) then St.menu.leaveCheck = nil; return end
   local sw = menu.WS_ScreenContent
-  if not U.ok(sw) or ourPageIsActive(menu) ~= true then return end
+  if not U.ok(sw) then return end
+  if ourPageIsActive(menu) ~= true then U.try(TAG, menu_tab.paneDrawCheck, sw, lc); return end
   local idx = C.GAME_TABS[lc.id]
   if idx == nil or lc.fixed >= 3 then return end
   lc.fixed = lc.fixed + 1
   sw:SetActiveWidgetIndex(idx)            -- SetActiveWidgetIndex(Int Index)
   U.log(TAG, "left for %s but the FREE MODE page was still the menu's pane: game pane %d put back (AUTO-150b)",
     tostring(lc.id), idx)
+end
+
+-- couch-fix64 (AUTO-155, live round 9 12:02:13 + shots 140234-where2 / 140253-campaign-empty-8s): after the COUCH
+-- CAMPAIGN page was left, RB from FREE MODE to CAMPAIGN showed the tab strip over an EMPTY pane for 8+ s (no CONTINUE /
+-- LOGBOOK / COUCH CAMPAIGN tiles; RB to SCENARIOS + LB back redrew it) and B there is the game's QUIT GAME? with ACCEPT
+-- focused. Our page was no longer the switcher's pane (no AUTO-150b line), so the game pane itself did not draw. For the
+-- leave-check window the shown game pane is read once a MAIN poll: collapsed / hidden / transparent / deactivated ->
+-- one log line with what was seen, its visibility (SelfHitTestInvisible, a UserWidget's default) and opacity given
+-- back and the pane activated again (CommonActivatableWidget: a deactivated pane may apply its deactivated visibility).
+-- Pure decision for the tests: the repairs a pane needs from what was read (nil = it draws).
+function menu_tab.paneRepairs(vis, opacity, activated)
+  local V = C.E.Vis
+  local r = {}
+  if vis == V.Collapsed or vis == V.Hidden then r[#r + 1] = "visibility" end
+  if type(opacity) == "number" and opacity < 0.05 then r[#r + 1] = "opacity" end
+  if #r > 0 and activated == false then r[#r + 1] = "activate" end
+  if #r == 0 then return nil end
+  return r
+end
+
+function menu_tab.paneDrawCheck(sw, lc)
+  if lc.paneFixed then return end
+  local idx = C.GAME_TABS[lc.id]
+  if idx == nil then return end
+  local cur = sw:GetActiveWidget()           -- UWidgetSwitcher::GetActiveWidget() -> Object
+  if not U.ok(cur) then return end
+  local ci = sw:GetChildIndex(cur)           -- GetChildIndex(Object) -> Int
+  if ci ~= idx then return end               -- another pane (the game is still switching): the next poll
+  local vis, op, act = nil, nil, nil
+  pcall(function() vis = cur:GetVisibility() end)
+  pcall(function() op = tonumber(cur:GetRenderOpacity()) end)
+  pcall(function() act = cur:IsActivated() == true end)
+  local r = menu_tab.paneRepairs(vis, op, act)
+  if not r then return end
+  lc.paneFixed = true
+  for _, what in ipairs(r) do
+    if what == "visibility" then pcall(function() cur:SetVisibility(C.E.Vis.SelfHitTestInvisible) end)
+    elseif what == "opacity" then pcall(function() cur:SetRenderOpacity(1.0) end)
+    elseif what == "activate" then pcall(function() cur:ActivateWidget() end) end
+  end
+  U.warn(TAG, "%s: the game's pane %d did not draw (visibility %s, opacity %s, activated %s): %s given back (AUTO-155)",
+    tostring(lc.id), idx, tostring(vis), tostring(op), tostring(act), table.concat(r, " + "))
 end
 
 -- The main menu is covered by another screen (Settings, the dev screen, a modal that deactivates it), as last read

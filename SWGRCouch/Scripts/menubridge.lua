@@ -1114,15 +1114,221 @@ local function sponsorContent(e)
     return U.ok(c) and c or nil
 end
 
+-- couch-fix63 (AUTO-153, live round 8 11:03:01-11:04:15): P1's D-pad DOWN on the backer split took his Slate focus off
+-- his three contracts (side by side: down leads nowhere of his), and every later A found no contract and did nothing -
+-- he was stuck until a pause round trip. couchpanel now makes his screen a Stop boundary while the split is open; if
+-- his focus is lost anyway, his A gives it back to his last contract (else the first visible one) instead of nothing:
+-- the next A signs it (never a contract he did not see focused).
+local function sponsorBtns(e)
+    local out = {}
+    for _, b in ipairs(FindAllOf("WBP_SponsorChoice_Btn_C") or {}) do
+        if U.ok(b) and U.alive(b) and insideOf(b, e.k) then
+            local vis = true
+            pcall(function() local v = b:GetVisibility(); vis = (v ~= 1 and v ~= 2) end)
+            if vis then out[#out + 1] = b end
+        end
+    end
+    return out
+end
+local function sponsorRefocus(e)
+    local pc = S.couchPc
+    if not U.ok(pc) then return false, "no pad-0 PC" end
+    local btns = sponsorBtns(e)
+    if #btns == 0 then return false, "no contract card on the screen" end
+    local t = nil
+    local last = S.sponsorLast
+    if last and last.k == e.k then
+        for _, b in ipairs(btns) do if U.key(b) == last.b then t = b; break end end
+    end
+    t = t or btns[1]
+    local ok = pcall(function() t:SetUserFocus(pc) end)
+    return ok, lname(t)
+end
+M._sponsorRefocus = sponsorRefocus
+
+-- couch-fix64 (AUTO-158d, live rounds 1-9: "contract 'The Broker' (his focus): clicked" in every round while the game
+-- confirmed THE HUTT, the focused first card): the card's SponsorLabel property is not the drawn name (it kept a
+-- default). The backer is the card's Sponsor asset (SetSponsor writes it, couchbackerui.offers reads it the same way):
+-- its name from couchbacker.SPONSORS, the label property / widget name only when the asset is unknown.
+function M.sponsorLabel(b)
+    local sp = nil
+    pcall(function() sp = b.Sponsor end)
+    if U.ok(sp) then
+        local okB, BK = pcall(require, "couchbacker")
+        local id = U.objName(sp)
+        local d = okB and type(BK) == "table" and type(BK.SPONSORS) == "table" and BK.SPONSORS[id] or nil
+        if d and d.name then return d.name end
+    end
+    local lbl = lname(b)
+    pcall(function() local t = U.str(b.SponsorLabel); if type(t) == "string" and t ~= "" then lbl = t end end)
+    return lbl
+end
+
+-- couch-fix65 (AUTO-160a, live round 10 13:57:24): P1's A was taken natively (run sponsor = his focused THE PIRATE,
+-- the run save 0.3 s before) and the bridge, on its scan of the closing screen, still logged "no contract held his
+-- focus" and refocused a card. After a signature the screen is leaving: it is no longer activated, or the state
+-- machine moved on in the last SPONSOR_LEAVE_MS (OnSponsorChosen = ChooseSponsor + ContinueToNextState): no refocus,
+-- no line.
+local SPONSOR_LEAVE_MS = 1500
+local function sponsorLeaving(e)
+    if not stillActive(e.w) then return "the screen is not activated any more" end
+    local okA, at = pcall(function() return U.mod("couch").csmAt() end)
+    if okA and type(at) == "number" and St.nowMs() - at < SPONSOR_LEAVE_MS then
+        return string.format("the state machine moved on %d ms ago", math.floor(St.nowMs() - at))
+    end
+    return nil
+end
+M._sponsorLeaving = sponsorLeaving
+
+-- the PC on pad id 0 right now (P1's physical pad: the swapped screen owner, or P1's own PC); nil = none
+local function pad0Pc()
+    local GS = U.cdo("GameplayStatics")
+    for _, lp in ipairs(U.localPlayersRO()) do
+        local okI, id = pcall(function() return GS:GetPlayerControllerID(lp.pc) end)
+        if okI and id == 0 and U.ok(lp.pc) then return lp.pc end
+    end
+    return nil
+end
+M._pad0Pc = pad0Pc
+
+local function holdsFocus(w, pc)
+    local f = false
+    pcall(function() f = w:HasUserFocus(pc) == true or w:HasUserFocusedDescendants(pc) == true end)
+    return f
+end
+
+-- couch-fix69 (AUTO-164, live round 13 19:34:10-19:35:22): the backer split opened (P2's own cards in his area, P1's
+-- screen shrunk into his) with NONE of P1's three contract cards framed, and D-pad DOWN / UP / LEFT left it that way
+-- (the swap's refocus gave the owner's focus to the screen itself, a UserWidget root: no cursor); only his first RIGHT
+-- brought the frame up. couchpanel calls this when the split opens and a few times after it (the split moves his screen
+-- into his area): while no card of his screen holds the pad-0 PC's focus, his FIRST card (SponsorButtonA, the left one,
+-- the card the game frames in solo) gets it - so an A before any D-pad signs the card he sees framed (sponsorAccept: his
+-- focused card). Never on a screen that is leaving (signed). -> true when the focus was given
+function M.sponsorFocusFirst(native, why)
+    if not U.alive(native) then return false, "no screen" end
+    if not stillActive(native) then return false, "the screen is not activated any more" end
+    local pc = pad0Pc()
+    if not U.ok(pc) then return false, "no pad-0 PC" end
+    local e = { w = native, k = U.key(native), cls = U.className(native) }
+    local btns = sponsorBtns(e)
+    if #btns == 0 then return false, "no contract card on the screen yet" end
+    for _, b in ipairs(btns) do
+        if holdsFocus(b, pc) then return false, "a card of his holds his focus" end
+    end
+    local first = nil
+    pcall(function()
+        local c = native
+        if U.className(native) ~= "WBP_SponsorSelect_Content_C" then
+            local cc = native.WBP_SponsorSelect_Content
+            if U.ok(cc) then c = cc end
+        end
+        local a = c.SponsorButtonA
+        if U.ok(a) then
+            for _, b in ipairs(btns) do if U.key(b) == U.key(a) then first = b end end
+        end
+    end)
+    first = first or btns[1]
+    local ok = pcall(function() first:SetUserFocus(pc) end)
+    if ok then S.sponsorLast = { k = e.k, b = U.key(first) } end
+    U.log(TAG, "backer split: none of P1's contract cards held his focus (%s): his first card '%s' framed for the pad-0 "
+        .. "PC (AUTO-164): %s", tostring(why), tostring(M.sponsorLabel(first)), ok and "ok" or "failed")
+    return ok
+end
+
+-- couch-fix69 (AUTO-165, live round 13 20:11:47-20:12:01, 1 of 11 held picks): after the reward map hold ended (every
+-- guest done) P1's FIRST A on the run map did nothing and left no line; his second A 5 s later was bridged ("desired
+-- focus": no node held his focus). The hold's end restores the ids, refocuses the swapped screen and closes the split
+-- in the same tick (couchroot puts the screens back to full screen); P1's pad (Slate user 0) was left on a widget that
+-- is no node - a focused CommonButton (the invisible sink) consumes the key in Slate, so the native A clicked nothing
+-- and IsInputKeyDown never saw it. Now, after a hold release (couchpanel V.mapRelease), at +150 ms .. +11 s (past couch.lua's own +5 s refocuses: his A came 7.7 s after the release): while no
+-- node was picked since the release and no node button of the run map holds the pad-0 PC's focus, the map's selected node (else the one
+-- any user focuses, else its desired focus target) gets it. And for MAP_PW_MS after the release P1's A on the node
+-- map also comes from the DLL's pad watch / the owner's IA_UI_Accept (PW_KINDS): an A that the native path ate is
+-- bridged (the node-chosen check keeps a native pick single).
+local NODE_BTN = "WBP_RunMap_Activity_Presentation_Btn_C"
+local MAP_PW_MS = 12000
+local function runMapUp()
+    local okL, list = pcall(function() return U.mod("couch").activeScreens() end)
+    if okL and type(list) == "table" then
+        for _, e in ipairs(list) do
+            if type(e.cls) == "string" and e.cls:find("WBP_RunMap_Presentation", 1, true) and U.alive(e.w) then
+                return e.w
+            end
+        end
+    end
+    return nil
+end
+function M.mapNodeFocus(why, chosen0)
+    local okQ, q = pcall(function() return U.mod("couch").isQuiet() end)
+    if okQ and q == true then return false, "world change" end
+    local okH, held = pcall(function() return U.mod("couchpanel").mapHeld() end)
+    if okH and held == true then return false, "the map is held again" end
+    if chosen0 ~= nil and chosenNodeKey() ~= chosen0 then return false, "a node was picked since the release" end
+    local map = runMapUp()
+    if not map then return false, "no run map up" end
+    local pc = pad0Pc()
+    if not U.ok(pc) then return false, "no pad-0 PC" end
+    local mk, nodes = U.key(map), {}
+    for _, b in ipairs(FindAllOf(NODE_BTN) or {}) do
+        if U.ok(b) and U.alive(b) and insideOf(b, mk) then
+            local vis = true
+            pcall(function() local v = b:GetVisibility(); vis = (v ~= 1 and v ~= 2) end)
+            if vis then
+                if holdsFocus(b, pc) then return false, "a node holds his focus" end
+                nodes[#nodes + 1] = b
+            end
+        end
+    end
+    if #nodes == 0 then return false, "no node button on the map" end
+    local t, how = selectedButton(map)
+    local isNode = false
+    if U.ok(t) then for _, b in ipairs(nodes) do if U.key(b) == U.key(t) then isNode = true end end end
+    if not isNode then
+        t, how = nil, "first choosable node"
+        for _, b in ipairs(nodes) do
+            local c = false
+            pcall(function() c = b.MapNode.bIsChoosable == true end)
+            if c then t = b; break end
+        end
+        if not t then return false, "no choosable node" end
+    end
+    local ok = pcall(function() t:SetUserFocus(pc) end)
+    U.log(TAG, "couch: run map after the hold (%s): no node held P1's focus: %s (%s) focused for the pad-0 PC (AUTO-165): %s",
+        tostring(why), lname(t), tostring(how), ok and "ok" or "failed")
+    return ok
+end
+function M.mapNodeFocusSoon(why)
+    S.mapPwUntil = St.nowMs() + MAP_PW_MS
+    local gen = St.worldGen
+    S.mapFocusGen = (S.mapFocusGen or 0) + 1
+    local mine, chosen0 = S.mapFocusGen, chosenNodeKey()
+    for _, ms in ipairs({ 150, 600, 1500, 3000, 5500, 8000, 11000 }) do
+        sched.after("mb.mapfocus" .. ms, ms, function()
+            if St.worldGen ~= gen or S.mapFocusGen ~= mine then return end
+            local okF, done, whyNot = pcall(M.mapNodeFocus, why, chosen0)
+            if not okF then U.warn(TAG, "AUTO-165 refocus failed: %s", tostring(done))
+            elseif not done then U.dbg(TAG, "AUTO-165 refocus +%d ms: %s", ms, tostring(whyNot)) end
+        end)
+    end
+end
+
 local function sponsorAccept(e, p)
     local b = focusedInside(e, "WBP_SponsorChoice_Btn_C")
     if not U.ok(b) then
-        U.logEvery("mb.sponsornf", 5000, TAG, "couch: P1's A on %s: no contract holds his focus, nothing chosen", e.cls)
+        local gone = sponsorLeaving(e)
+        if gone then
+            U.dbg(TAG, "couch: P1's A on %s after the signature (%s): no refocus", e.cls, gone)
+            return
+        end
+        local ok, what = sponsorRefocus(e)
+        S.sponsorRefocus = (S.sponsorRefocus or 0) + 1
+        U.log(TAG, "couch: P1's A on %s: no contract held his focus (AUTO-153): focus back on %s: %s - his next A signs it",
+            e.cls, tostring(what), ok and "ok" or "failed")
         return
     end
-    local locked, lbl = false, lname(b)
+    S.sponsorLast = { k = e.k, b = U.key(b) }
+    local locked, lbl = false, M.sponsorLabel(b)
     pcall(function() locked = b:GetLocked() == true end)
-    pcall(function() local t = U.str(b.SponsorLabel); if type(t) == "string" and t ~= "" then lbl = t end end)
     local ok, err = pcall(function() b:HandleButtonClicked() end)
     S.clicks = S.clicks + 1
     U.log(TAG, "couch: P1's A -> %s contract '%s'%s (his focus): %s", e.cls, tostring(lbl), locked and " (LOCKED)" or "",
@@ -2128,7 +2334,8 @@ function M.fastTick()
     -- couch-scaccept: P1's physical pad's edges from the DLL's pad watch (read every couch tick: the baseline moves on)
     local pw = S.couchMode and padEdges() or { a = false, b = false, view = false }
     if not S.couchMode then S.pw = nil end
-    local pwKind = S.couchMode and e and PW_KINDS[e.cnat] == true
+    local pwKind = S.couchMode and e and (PW_KINDS[e.cnat] == true
+        or (e.cnat == "nodemap" and now < (S.mapPwUntil or 0) and opt("CouchMapHoldEndPadWatch", true) ~= false))
     for _, lp in ipairs(lps) do
         local pc = lp.pc
         if U.ok(pc) and (couchOnly == nil or U.key(pc) == couchOnly) then

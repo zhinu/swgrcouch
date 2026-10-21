@@ -90,8 +90,14 @@ end
 local function callMethod(o, name, ...) return o[name](o, ...) end
 U.callMethod = callMethod
 function U.pcallM(o, name, ...) return pcall(callMethod, o, name, ...) end
+-- couch-fix67 (AUTO-152 generalised, see "class pins" below): U.ok and U.getField keep the class of every Blueprint
+-- object they see loaded for the session. Set once the pin code below is defined (nil while util.lua loads).
+local keepObj, keepAny = nil, nil
 --- pcall(o[k]) without a closure: ok, value
-local function getField(o, k) return o[k] end
+local function getField(o, k)
+    if keepAny ~= nil and type(k) == "string" then keepAny(o) end   -- a by-name member read (never an array index)
+    return o[k]
+end
 U.getField = getField
 function U.pcallGet(o, k) return pcall(getField, o, k) end
 
@@ -141,7 +147,11 @@ local function isValidOf(o) return o:IsValid() end
 function U.ok(o)
     if o == nil or type(o) ~= "userdata" then return false end
     local ok, v = pcall(isValidOf, o)
-    return ok and v == true
+    if ok and v == true then
+        if keepObj ~= nil then keepObj(o) end      -- couch-fix67: its Blueprint class kept loaded (class pins below)
+        return true
+    end
+    return false
 end
 
 local kslIsValidBroken = false
@@ -642,6 +652,249 @@ function U.gi()
     return CreateInvalidObject()
 end
 
+-- couch-fix63 (AUTO-152 crash_2026_10_20_11_06_05 + FINDING #44 crash_2026_10_17_23_02_01, both AV at UE4SS.dll+0x406911):
+-- UE4SS GR Edition's UStruct::FindProperty (+0x400330) keeps a global cache (UStruct*, FName) -> FProperty* (+0x1344770;
+-- written only at +0x40053a, never invalidated: no other code touches it). A Blueprint class the GC unloads (the race
+-- HUD and ignition screen classes are hard references of RaceFlow CSM assets, which the GC unloads and reloads: the
+-- "CSM_RF_Spectating now points at CSM_RF_Racing" cache line) leaves entries pointing at its FREED FProperties; a class
+-- loaded later at the same address (UClass objects are all one size: the binned allocator hands the freed slot out
+-- again) gets them back on the first by-name read of that member. While the freed memory is intact the read works
+-- (same layout); once it was reused, handle_unreal_property_value reads the FFieldClass of garbage: the AV, under a
+-- U.ok-valid object (U.ok cannot see it). The mod's side of the fix: the Blueprint classes whose members it reads
+-- by name in a race are kept loaded for the session (GameInstance.ReferencedObjects, a UPROPERTY TArray<UObject*> of
+-- the GameInstance: "objects kept alive by this game instance"), so their addresses are never handed to another
+-- class and their cached FProperties stay theirs. A class keeps its WidgetTree archetype, so the nested widget
+-- classes of a pinned HUD stay loaded with it. Native classes (/Script/) never unload: never pinned.
+-- couch-fix67 (AUTO-152 generalised): fix63 pinned the race HUD and ignition classes by hand; every other Blueprint class
+-- whose members the mod reads by name was safe only while the GC happened to keep it. Now the class of EVERY object the
+-- mod validates (U.ok) or reads a member of (U.getField) is kept loaded the first time it is seen, when it is a generated
+-- class that can unload (a "..._C" class outside /Script/: BlueprintGeneratedClass, WidgetBlueprintGeneratedClass, Anim
+-- BPs...). Cost: per object ADDRESS once per world (objSeen, reset at each new world), one GetClass wrapper + one
+-- GetFullName per class ADDRESS for the session (clsNever / pinnedK: a native class never unloads and a pinned one never
+-- does either, so neither address is ever handed to another class); every later U.ok / getField of a known object is
+-- one GetAddress (a built-in: no wrapper) + a table read. Never pinned: native classes, level script classes (keeping one
+-- would keep its whole map), subobject classes (a ':' in the path). Bounded: cfg.ClassPinCap (default 400) classes, one
+-- WARN when reached; cfg.ClassPinAuto = false keeps only the named pins of fix63. Per world: one summary line
+-- ("N Blueprint classes kept loaded"), and a sweep of the classes the mod looked up (U.class / U.findLoaded caches) that
+-- are loaded now - pinned before the new world's first member read. The hooked Blueprint functions' classes too.
+local pinnedW = setmetatable({}, { __mode = "k" })   -- wrapper -> true (no GetAddress per call on a cached wrapper)
+local pinnedK = {}                                   -- class address -> path (kept for the session)
+local pinScanned, pinBroken = false, nil
+local pinCount, pinCapped = 0, false
+local clsNever = {}                                  -- class address -> true: a native / non-generated class
+local clsSkip, clsSkipGen = {}, nil                  -- class address -> reason, re-decided in every world
+local objSeen, objSeenN, objSeenGen = {}, 0, nil     -- object address -> true: its class was decided in this world
+local OBJ_SEEN_MAX = 20000                           -- one world's distinct objects; past it the set starts again
+local pinBusy = false                                -- inside the pin code: its own U.ok / getField calls do not recurse
+local pinWorld = { new = 0, names = {}, gen = nil }  -- pins made since the last world's summary line
+local PIN_NAMES_MAX = 10
+local LSA_PATH = "/Script/Engine.LevelScriptActor"
+
+local function pinCap()
+    local n = tonumber(cfg.ClassPinCap)
+    if not n or n < 1 then n = 400 end
+    return n
+end
+
+local function shortOfPath(path)
+    return string.match(path, "[.:]([^.:/]+)$") or path
+end
+
+-- Append cls to GameInstance.ReferencedObjects. true = pinned (now or by an earlier Lua state), false = refused (pinBroken
+-- set), nil = no GameInstance yet (retried later).
+local function appendPin(cls, k, path)
+    local gi = U.gi()
+    if not U.ok(gi) then return nil end
+    local okA, arr = pcall(getField, gi, "ReferencedObjects")  -- UGameInstance::ReferencedObjects (native member)
+    if not (okA and type(arr) == "userdata") then
+        pinBroken = "GameInstance.ReferencedObjects not readable"
+        U.warn("util", "class pin unavailable (%s): Blueprint classes may unload and reload at a reused address "
+            .. "(AUTO-152)", pinBroken)
+        return false
+    end
+    local n = U.arrayCount(arr)
+    if not pinScanned then                                     -- a hot-reloaded Lua state: the pins of the last one
+        pinScanned = true
+        for i = 1, n do
+            local okE, o = pcall(getField, arr, i)
+            if okE and U.ok(o) then
+                local ok2 = U.key(o)
+                if ok2 ~= 0 and not pinnedK[ok2] then pinnedK[ok2] = U.pathOf(o); pinCount = pinCount + 1 end
+            end
+        end
+        if pinnedK[k] then return true end
+    end
+    local okW, err = pcall(function() arr[n + 1] = cls end)    -- UE4SS TArray: a write one past the end appends
+    local okR, back = pcall(getField, arr, n + 1)
+    if not (okW and okR and U.ok(back) and U.key(back) == k) then
+        pinBroken = "append refused: " .. tostr(okW and (okR and "read back " .. tostr(back) or back) or err)
+        U.warn("util", "class pin of %s failed (%s): Blueprint classes may unload and reload at a reused address "
+            .. "(AUTO-152)", path, pinBroken)
+        return false
+    end
+    return true, n + 1
+end
+
+-- Decide (and pin) one class. why = the caller's label (U.pinClass: logged) or nil (automatic: one Debug line).
+-- -> true kept loaded, false never pinned (native / not pinnable / cap / refused), nil undecided (retried later)
+local function keepClass(cls, why)
+    if not U.ok(cls) then return false end
+    local okK, k = pcall(callMethod, cls, "GetAddress")
+    if not okK or type(k) ~= "number" or k == 0 then return false end
+    if pinnedK[k] then return true end
+    if clsNever[k] then return false end
+    if clsSkipGen ~= St.worldGen then clsSkip, clsSkipGen = {}, St.worldGen end
+    if clsSkip[k] then return false end
+    if pinBroken then return false end
+    local okF, full = pcall(callMethod, cls, "GetFullName")
+    if not okF or type(full) ~= "string" then clsSkip[k] = "no name"; return false end
+    local sp = sfind(full, " ", 1, true)
+    local meta = sp and ssub(full, 1, sp - 1) or ""
+    local path = sp and ssub(full, sp + 1) or full
+    if not sfind(meta, "Class", 1, true) then clsSkip[k] = "not a class"; return false end  -- a stale cache entry
+    if ssub(path, 1, 8) == "/Script/" or ssub(path, -2) ~= "_C" then clsNever[k] = true; return false end
+    if sfind(path, ":", 1, true) then clsSkip[k] = "subobject class"; return false end
+    local lsa = findObjectCached(LSA_PATH, 60000)
+    if lsa and U.ok(lsa) then
+        local okL, isL = pcall(callMethod, cls, "IsChildOf", lsa)
+        if okL and isL == true then
+            clsSkip[k] = "level script"
+            U.dbg("util", "class pins: level script class %s left alone (it would keep its map loaded)", path)
+            return false
+        end
+    end
+    if pinCount >= pinCap() then
+        clsSkip[k] = "cap"
+        if not pinCapped then
+            pinCapped = true
+            U.warn("util", "class pins: the cap of %d Blueprint classes is reached (cfg.ClassPinCap): %s and later classes "
+                .. "are NOT kept loaded and may unload and reload at a reused address (AUTO-152)", pinCap(), path)
+        end
+        return false
+    end
+    local done, n = appendPin(cls, k, path)
+    if done == nil then return nil end
+    if not done then return false end
+    if pinnedK[k] then return true end                         -- found by the hot-reload re-scan
+    pinnedK[k] = path
+    pinCount = pinCount + 1
+    pinWorld.new = pinWorld.new + 1
+    if #pinWorld.names < PIN_NAMES_MAX then pinWorld.names[#pinWorld.names + 1] = shortOfPath(path) end
+    if why ~= nil then
+        U.log("util", "class kept loaded for the session: %s (%s; GameInstance.ReferencedObjects %d) (AUTO-152)", path,
+            tostr(why), n or 0)
+    else
+        U.dbg("util", "class kept loaded for the session: %s (seen by name; ReferencedObjects %d)", path, n or 0)
+    end
+    return true
+end
+
+-- the classes the mod looked up by path (U.class / U.findLoaded caches) that are loaded now: pinned at a new world
+-- before its first member read (the per-world sweep; a cache entry is re-checked by name first: stillNamed)
+local function sweepCaches()
+    for _, cache in ipairs({ classCache, findCache }) do
+        for path, o in pairs(cache) do
+            if ssub(path, -2) == "_C" and ssub(path, 1, 8) ~= "/Script/" and U.ok(o) and stillNamed(path, o) then
+                keepClass(o, nil)
+            end
+        end
+    end
+end
+
+local function worldTurn(gen)
+    objSeen, objSeenN, objSeenGen = {}, 0, gen
+    if pinCount > 0 or pinWorld.new > 0 then
+        local names = ""
+        if pinWorld.new > 0 then
+            names = ": " .. table.concat(pinWorld.names, ", ")
+            if pinWorld.new > #pinWorld.names then names = names .. fmt(" +%d more", pinWorld.new - #pinWorld.names) end
+        end
+        U.log("util", "class pins: %d Blueprint classes kept loaded (+%d in the last world%s; cap %d%s) (AUTO-152)",
+            pinCount, pinWorld.new, names, pinCap(), pinCapped and ", REACHED" or "")
+    end
+    pinWorld.new, pinWorld.names = 0, {}
+    sweepCaches()
+end
+
+local function pinsOff()
+    return pinBusy or pinBroken ~= nil or pinCapped or cfg.ClassPinAuto == false
+end
+
+-- o: a U.ok-valid wrapper. Never throws (it runs inside U.ok / U.getField).
+local function keepObjImpl(o)
+    if pinsOff() then return end
+    pinBusy = true
+    if objSeenGen ~= St.worldGen then pcall(worldTurn, St.worldGen) end
+    local okA, a = pcall(callMethod, o, "GetAddress")
+    if okA and type(a) == "number" and a ~= 0 and not objSeen[a] then
+        local okC, cls = pcall(callMethod, o, "GetClass")
+        local decided = true
+        if okC then
+            local okK, r = pcall(keepClass, cls, nil)
+            decided = not okK or r ~= nil                      -- nil: no GameInstance yet, asked again next time
+        end
+        if decided then
+            if objSeenN >= OBJ_SEEN_MAX then objSeen, objSeenN = {}, 0 end
+            objSeen[a] = true
+            objSeenN = objSeenN + 1
+        end
+    end
+    pinBusy = false
+end
+keepObj = keepObjImpl
+keepAny = function(o)
+    if type(o) ~= "userdata" or pinsOff() then return end
+    local ok, v = pcall(isValidOf, o)
+    if ok and v == true then keepObjImpl(o) end
+end
+
+--- Keep a Blueprint class loaded for the rest of the session (see above). true when it is (now or already) pinned.
+function U.pinClass(cls, why)
+    if cls == nil then return false end
+    local known = pinnedW[cls]
+    if known ~= nil then return known end
+    if pinBroken or not U.ok(cls) then return false end
+    local was = pinBusy
+    pinBusy = true
+    local okK, r = pcall(keepClass, cls, why or "named")
+    pinBusy = was
+    if not okK then return false end
+    if r ~= nil then pinnedW[cls] = r end
+    return r == true
+end
+
+--- U.pinClass of an object's class (a live UObject wrapper; anything else is ignored).
+function U.pinClassOf(o, why)
+    if not U.ok(o) then return false end
+    local ok, cls = pcall(callMethod, o, "GetClass")
+    if not ok then return false end
+    return U.pinClass(cls, why)
+end
+
+--- The class of the Blueprint function `fn` (a hooked UFunction: its outer) kept loaded.
+local function pinOuterClass(fn)
+    if not U.ok(fn) then return end
+    local ok, cls = pcall(callMethod, fn, "GetOuter")
+    if ok and U.ok(cls) then
+        local was = pinBusy
+        pinBusy = true
+        pcall(keepClass, cls, nil)
+        pinBusy = was
+    end
+end
+
+function U.pinnedClasses()
+    local out = {}
+    for _, p in pairs(pinnedK) do out[#out + 1] = p end
+    table.sort(out)
+    return out, pinBroken
+end
+
+--- diag / sim: { pinned, cap, capped, broken, seen (objects decided in this world) }
+function U.pinStats()
+    return { pinned = pinCount, cap = pinCap(), capped = pinCapped, broken = pinBroken, seen = objSeenN }
+end
+
 --- Local players in GameInstance.LocalPlayers order: array of {lp, pc, ctrlId, index}.
 --- pc may be an invalid object (LocalPlayer without controller); callers test U.ok(e.pc).
 -- PER LOOP RUN CACHE (couch-racefast, live 2026-10-15: one U.localPlayers() allocates ~2.5 KB of UE4SS wrappers -
@@ -1138,7 +1391,8 @@ local function registerNow(path)
     if hookFailed[path] then return false end
     -- cached with a short miss TTL: pending race-UI classes re-checked raw every SLOW tick were the
     -- once-per-second menu hitch; 2.5 s still arms a freshly loaded class fast enough for the pause bridge
-    if not findObjectCached(path, 2500) then return false end   -- not loaded yet: stays pending
+    local fnObj = findObjectCached(path, 2500)
+    if not fnObj then return false end                           -- not loaded yet: stays pending
     local ok, preId, postId
     if isNativePath(path) then
         ok, preId, postId = pcall(RegisterHook, path,
@@ -1156,6 +1410,8 @@ local function registerNow(path)
     end
     St.hooks[path] = { pre = preId, post = postId }
     St.pendingHooks[path] = nil
+    -- couch-fix67 (AUTO-152): a hooked Blueprint function's class stays loaded (its callbacks read its members by name)
+    if not isNativePath(path) then pinOuterClass(fnObj) end
     U.log("hook", "registered %s (%s, ids %s/%s)", path, isNativePath(path) and "native" or "bp", tostr(preId), tostr(postId))
     return true
 end

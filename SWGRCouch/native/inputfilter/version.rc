@@ -1,9 +1,8 @@
 // VERSIONINFO for swgr_inputfilter.dll (SWGRCouch). Compiled by build.sh with llvm-rc (no preprocessor), linked
 // into the DLL by lld-link.
-// SignPath Foundation code signing (CODE-SIGNING-POLICY.md) enforces ProductName = the project name ("SWGRCouch")
-// and the same ProductVersion in every build of one release: keep them in sync with the SignPath artifact
-// configuration (set up in SignPath). A new DLL version: change FILEVERSION, PRODUCTVERSION and both
-// version strings together, and the fixed PE time stamp (SWGR_IF_TIMESTAMP) in build.sh with them.
+// Keep ProductName = the project name ("SWGRCouch") and ProductVersion in sync per release (the same in every
+// build of one release). A new DLL version: change FILEVERSION, PRODUCTVERSION and both version strings together,
+// and the fixed PE time stamp (SWGR_IF_TIMESTAMP) in build.sh with them.
 
 1 VERSIONINFO
 FILEVERSION     1,0,0,0

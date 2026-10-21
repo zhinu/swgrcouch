@@ -2720,6 +2720,16 @@ function M.flowCtx(ctrlId, p, info)
     return ctx
 end
 
+-- couch-fix63 (AUTO-154g): couchrules.flowLabel - a failed podracer test's round is named as the solo fail's
+local function flowLabel(ctx)
+    local ok, r = pcall(require, "couchrules")
+    if ok and type(r) == "table" and type(r.flowLabel) == "function" then
+        local okL, s = pcall(r.flowLabel, ctx.kind, ctx.earned, ctx.beat)
+        if okL and type(s) == "string" then return s end
+    end
+    return ctx.earned and "rewards earned" or "no reward round"
+end
+
 -- his flow from the race end (onRaceEnd) -> flow or nil
 function M.buildFlow(ctrlId, p, info)
     if opt("CouchRewardFlow", true) == false then return nil end
@@ -2738,7 +2748,7 @@ function M.buildFlow(ctrlId, p, info)
         t[#t + 1] = tostring(st.type) .. (st.round and ("(" .. st.round.kind .. " x" .. #st.round.cards .. ")") or "")
     end
     U.log(TAG, "P%s's own reward flow (%s, %s): stages %s%s", tostring(p.pnum), tostring(ctx.kind),
-        ctx.earned and "rewards earned" or "no reward round", #t > 0 and table.concat(t, ",") or "none",
+        flowLabel(ctx), #t > 0 and table.concat(t, ",") or "none",
         (#(ctx.faults or {}) > 0) and string.format(", %d fault(s)", #ctx.faults) or "")
     return flow
 end
@@ -3367,7 +3377,32 @@ function M.settleBet(ctrlId, won, info)
         tostring(p.pnum), b.name, tostring(b.predicted), b.stake, tostring(p.pnum),
         info.out and "OUT" or ("P" .. tostring(info.pos)), "P" .. tostring(info.targetPos),
         won and string.format("WON +%d CR", pay) or "LOST", p.credits or 0)
+    U.try(TAG, M.wreckCredits160, ctrlId, p)
     return pay
+end
+
+-- couch-fix65 (AUTO-160d, live round 10 14:07:25, standard race Sentinel I: P2 wrecked (refunded: P1 still raced), P1
+-- won): P2 got NO area at all. The rule is the solo one and stays (couchrules D2/D4, couch-fix13 #81): a wreck is no
+-- finish (the native ingestion books no finish row, 0 CR) and earns no reward round - only a REFUNDED wreck in an
+-- elimination race (eliminator / gauntlet) counts as an elimination at his standing. But the solo hub still shows
+-- what a wrecked racer's race did to his credits: his side bet (CreditsReason_LostSidebet / WonSidebet), backer
+-- lines, favour lines. His flow was built at the race end with no stage (no finish row, no round) and offerPending
+-- false, and his challenge settled right after it ("LOST", -1000 CR) never reached a CREDITS stage: no area opened,
+-- the lost stake shown nowhere. When a challenge settles on such a flow (this world, no stage, no area pending), its
+-- CREDITS stage is made now (flowRefresh) and his area opens with P1's reward screen: CREDITS (the challenge row) on
+-- his hub, no round - the solo wreck. A wreck with nothing to show (no bet, no lines) keeps no area, as before.
+function M.wreckCredits160(ctrlId, p)
+    p = p or M.player(ctrlId)
+    local f = p and p.flow
+    if not (type(f) == "table" and type(f.stages) == "table" and #f.stages == 0) then return false end
+    if f.gen ~= St.worldGen or p.offerPending then return false end
+    if not M.flowRefresh(ctrlId) then return false end
+    p.offerPending = true
+    save()
+    U.log(TAG, "P%s's race left him no stage (%s): his settled challenge makes his CREDITS stage - his area opens "
+        .. "with P1's reward screen, no reward round (the solo rule, AUTO-160d)", tostring(p.pnum),
+        (f.credit and f.credit.wrecked) and "wrecked" or "no finish row")
+    return true
 end
 
 -- the bet cannot be judged (race left, target unreadable): the stake back

@@ -1,26 +1,12 @@
-# Builds SWGRCouch's native input filter (swgr_inputfilter.dll) from source on a GitHub-hosted runner and, once the
-# SignPath Foundation OSS subscription is set up, gets it code signed (certificate issued to "SignPath Foundation").
-# See CODE-SIGNING-POLICY.md.
+# Builds SWGRCouch's native input filter (swgr_inputfilter.dll) from source on a GitHub-hosted runner, as the public
+# proof that the shipped DLL is the public source's code. See CODE-SIGNING-POLICY.md.
 #
 # - build: official LLVM release (pinned version + sha256) -> SWGRCouch/native/inputfilter/build.sh -> the DLL is
 #   uploaded as the workflow artifact "swgr_inputfilter-unsigned" (a zip holding swgr_inputfilter.dll). The build is
-#   reproducible: the run prints the DLL's sha256, which must match a local build of the same commit with the same
-#   LLVM version (docs/INPUTFILTER.md).
-# - sign: only when the repository variable SIGNPATH_ENABLED is "true" AND (a tag v* / inputfilter-v* was pushed, or
-#   the workflow was started by hand with "sign" ticked). It submits the artifact to SignPath; a SignPath approver
-#   (Jules) approves the request in the SignPath web app; the signed DLL is uploaded as "swgr_inputfilter-signed" and,
-#   for a tag, attached to the GitHub release of that tag.
-#   Needs (repo Settings > Secrets and variables > Actions):
-#     secret   SIGNPATH_API_TOKEN          API token of a SignPath CI user (submitter role in the project)
-#     variable SIGNPATH_ENABLED            true
-#     variable SIGNPATH_ORGANIZATION_ID    e.g. 00000000-0000-0000-0000-000000000000 (SignPath > Organization)
-#     variable SIGNPATH_PROJECT_SLUG       e.g. swgrcouch
-#     variable SIGNPATH_SIGNING_POLICY     e.g. release-signing
-#   The project's DEFAULT artifact configuration (set up in SignPath) is used; to pick another
-#   one, un-comment artifact-configuration-slug below (an empty value is sent as is, so do not wire an unset var).
-# The sign job only runs on github.com (Forgejo also reads .github/workflows when a repo has no .forgejo/workflows).
-# SignPath Foundation OSS rule: every job that leads to a signing request runs on a GitHub-hosted runner
-# (ubuntu-latest here). Never switch these jobs to a self-hosted runner.
+#   reproducible: the run prints the DLL's sha256 in its summary, which must match a local build of the same commit
+#   with the same LLVM version (docs/INPUTFILTER.md) and the unsigned hash published in CODE-SIGNING-POLICY.md.
+# The released DLL is that build signed locally by the author with his self-signed certificate (docs/signing/);
+# no signing happens in CI and no signing key is stored here.
 name: build-inputfilter
 
 on:
@@ -35,15 +21,9 @@ on:
       - 'SWGRCouch/native/inputfilter/**'
       - '.github/workflows/build-inputfilter.yml'
   workflow_dispatch:
-    inputs:
-      sign:
-        description: 'Submit the built DLL to SignPath for signing (needs SIGNPATH_ENABLED=true)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
-  actions: read
 
 env:
   LLVM_VERSION: '23.1.1'
@@ -54,9 +34,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-      sha256: ${{ steps.build.outputs.sha256 }}
     steps:
       - name: Check out the source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,7 +74,7 @@ jobs:
           if [ "$(git show HEAD:"$dll" 2>/dev/null | sha256sum | cut -d' ' -f1)" != "$sum" ]; then
             echo "::warning::the committed $dll differs from this build (rebuild it locally with build.sh and commit)"
           fi
-          # SignPath enforces this metadata (CODE-SIGNING-POLICY.md): fail early here if it is missing
+          # the release metadata (version.rc): fail early here if it is missing
           python3 - "$dll" <<'PY'
           import re, sys
           raw = open(sys.argv[1], "rb").read()
@@ -118,59 +95,3 @@ jobs:
           path: ${{ runner.temp }}/unsigned/swgr_inputfilter.dll
           if-no-files-found: error
 
-  sign:
-    needs: build
-    if: >-
-      github.server_url == 'https://github.com' && vars.SIGNPATH_ENABLED == 'true' &&
-      github.event_name != 'pull_request' &&
-      (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.sign))
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    permissions:
-      contents: write   # attach the signed DLL to the tag's release
-      actions: read     # the SignPath connector reads the job and downloads the unsigned artifact
-    steps:
-      - name: Submit the signing request to SignPath (waits for the approver)
-        id: signpath
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'      # <SignPath organization id>
-          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG }}'            # <SignPath project slug>, e.g. swgrcouch
-          signing-policy-slug: '${{ vars.SIGNPATH_SIGNING_POLICY }}'   # <SignPath signing policy slug>
-          # artifact-configuration-slug: '<SignPath artifact configuration slug>'
-          github-artifact-id: '${{ needs.build.outputs.artifact-id }}'
-          wait-for-completion: true
-          # a human approves each request; a GitHub-hosted job is killed after 6 h, so approve within ~5.5 h
-          # (a timed-out request: start the workflow again by hand on the tag, with "sign" ticked)
-          wait-for-completion-timeout-in-seconds: 19800
-          output-artifact-directory: 'signed'
-
-      - name: Check the signature
-        run: |
-          set -eu
-          sudo apt-get update -qq && sudo apt-get install -y -qq osslsigncode > /dev/null
-          osslsigncode verify -in signed/swgr_inputfilter.dll | tee "$RUNNER_TEMP/verify.txt" || true
-          grep -q 'SignPath Foundation' "$RUNNER_TEMP/verify.txt" || { echo "::error::no SignPath Foundation signature"; exit 1; }
-          echo "### swgr_inputfilter.dll (signed)" >> "$GITHUB_STEP_SUMMARY"
-          echo "sha256 \`$(sha256sum signed/swgr_inputfilter.dll | cut -d' ' -f1)\` (unsigned build: \`${{ needs.build.outputs.sha256 }}\`)" >> "$GITHUB_STEP_SUMMARY"
-          echo "SignPath request: ${{ steps.signpath.outputs.signing-request-web-url }}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the signed DLL
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: swgr_inputfilter-signed
-          path: signed/swgr_inputfilter.dll
-          if-no-files-found: error
-
-      - name: Attach the signed DLL to the release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -eu
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
-              --notes "Signed swgr_inputfilter.dll (Free code signing provided by SignPath.io, certificate by SignPath Foundation)."
-          gh release upload "$TAG" signed/swgr_inputfilter.dll --repo "$GITHUB_REPOSITORY" --clobber

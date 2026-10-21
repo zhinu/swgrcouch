@@ -135,6 +135,8 @@ local function disarm(why)
 end
 
 function M.disarm(why) return disarm(why or "launch") end
+-- couch-fix64: a QuitGame post is being answered (the hidden prompt may hold P1's focus: couchpage's keeper waits)
+function M.pending() return Q.pending ~= nil end
 -- B04: when the game last posted its QuitGame prompt while watched (runpage: a B between END THE RUN's two presses)
 function M.lastQuitPostMs() return Q.lastPostMs or -1e12 end
 
@@ -217,7 +219,14 @@ local function backStep(pd)
         local lastB = -1e12
         pcall(function() lastB = cp.lastP1BackMs() end)
         if lastB >= pd.atMs - 150 then return "the lobby's own B poll already closed the COUCH CAMPAIGN page" end
+        -- couch-fix64 (AUTO-155): with the replay confirm up this B is its NO: the confirm closes, the page stays
+        local okM, modal = pcall(function() return cp.modal() end)
         local ok, closed = pcall(function() return cp.onP1Back("pad B (the game's Quit prompt)") end)
+        if okM and modal ~= nil then
+            pd.cpKept = true
+            return (ok and closed) and "the COUCH CAMPAIGN confirm answered NO (the page stays open)"
+                or "the COUCH CAMPAIGN confirm was already closed"
+        end
         return (ok and closed) and "COUCH CAMPAIGN page closed" or "the COUCH CAMPAIGN page was already closed"
     end
     if pd.what == "gppage" then
@@ -243,6 +252,8 @@ local function backStep(pd)
     pcall(function() setup.p1Back("pad B (the game's Quit prompt)") end)
     return "one step back"
 end
+
+M._backStep = backStep
 
 -- One prompt, answered once it is ready: a click during its intro is dropped (live 2026-10-10: the reused prompt
 -- stayed up with no focused button), so "ready" = one of its buttons holds focus (the game focuses ACCEPT when the
@@ -301,6 +312,21 @@ local function answer(pd, now)
                 tostring(pd.did))
             -- fix16 (GP hub B, live 2026-10-15): the answered prompt hands the focus back to the lobby page's default
             -- (QUICK RACE) after the GRAND PRIX page closed onto its poster: focus the lobby's cursor (the poster) again
+            -- couch-fix64 (AUTO-155): the prompt's removal handed P1's focus to the main menu's own target: the
+            -- COUCH CAMPAIGN page (still open after its confirm's NO) takes it back; a closed page leaves it on the
+            -- lobby's posters (as fix16 for the GRAND PRIX page)
+            if pd.what == "couchpage" then
+                local okA, on = pcall(function() return U.mod("couchpage").active() end)
+                if okA and on == true then
+                    U.try(TAG, function() U.mod("couchpage").onPromptAnswered() end)
+                elseif okA and on == false then
+                    pcall(function()
+                        local lobby = U.mod("lobby")
+                        lobby.focusFirst()
+                        lobby.armFocusKeeper("COUCH CAMPAIGN page closed (prompt answered)")
+                    end)
+                end
+            end
             if pd.what == "gppage" then
                 local okA, on = pcall(function() return U.mod("gppage").active() end)
                 if okA and on == false then

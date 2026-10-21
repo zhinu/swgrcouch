@@ -491,6 +491,10 @@ function M.tick(lps)
     end
     local perView = screensWanted(mode) and present.ignitionView() == "split" and not present.isSingleView()
     local cls = loadedClass(IGN_CLASS)
+    -- couch-fix63 (#44 crash_2026_10_17_23_02_01, AV at UE4SS.dll+0x406911 0.08 ms after "P1 ignition screen created"):
+    -- the ignition screen class (a hard reference of CSM_RF_IgnitionSequence, unloaded and reloaded with it) stays
+    -- loaded for the session before any member of a screen is read by name (util.lua U.pinClass)
+    if cls then U.pinClass(cls, "ignition screen") end
     local simple = (mode == "simple") or cfg.IgnitionSimple == true
     local padList = {}
     ign.state = ign.state or {}

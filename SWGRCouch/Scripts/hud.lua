@@ -332,6 +332,9 @@ local function membersOf(w)
         return out
     end
     local function first(list) return all(list)[1] end
+    -- couch-fix63 (AUTO-152): the HUD's class and its BotEngineInfo's (read by name: WBP_Hud_CharacterHolo, the
+    -- crash frame) stay loaded for the session; the HUD class's WidgetTree keeps the other nested classes
+    U.pinClassOf(w, "race HUD")
     local res = {
         raw = m,            -- lower-case name -> {widgets}
         laps = all(LAP_NAMES),
@@ -344,6 +347,7 @@ local function membersOf(w)
     if not res.bot then
         for _, n in ipairs(BOT_NAMES) do local x = w[n]; if U.ok(x) then res.bot = x; break end end
     end
+    if res.bot then U.pinClassOf(res.bot, "HUD engine row") end
     local okC, cls = false, nil
     if U.ok(w) then okC, cls = pcall(U.callMethod, w, "GetClass") end   -- U.ok: null GetClass = native AV
     local okT, tree = pcall(U.getField, w, "WidgetTree")
@@ -827,6 +831,8 @@ function M.findP1Hud()
         for _, hc in ipairs(HUD_CLASS_KEYS) do
             local cls = loadedClass(C.BP[hc.key]) -- never LoadAsset here (unused HUD BP + dependency tree)
             if cls then
+                -- couch-fix63 (AUTO-152): kept loaded before any member of its instances is read by name (U.pinClass)
+                U.pinClass(cls, "race HUD")
                 -- VERIFY(V-HUD-01): UIManager:GetWidgetInLayer(Class, EUILayer.HUD) returns the game's race HUD
                 -- (CSM_RF_*_InHud_Default/_Memory: CsmActionShowWidgetData Layer = EUILayer::HUD, decoded 2026-10-07).
                 local ok, w = U.try(TAG, function() return mgr:GetWidgetInLayer(cls, C.E.UILayer.HUD) end)
@@ -1151,6 +1157,7 @@ function M.ensureGuest(pc, pnum)
     else
         return nil
     end
+    U.pinClass(cls, "race HUD")   -- couch-fix63 (AUTO-152): see util.lua U.pinClass
     -- VERIFY(V-HUD-03): a HUD created for the guest PC reads the guest's pawn/PlayerState (owner-based parts).
     local w = U.WBL():Create(pc, cls, pc) -- Create(WorldContextObject, WidgetType, OwningPlayer) -> Object
     if not U.ok(w) then
@@ -1972,6 +1979,20 @@ local function findLocalResults(h)
                 return w
             end
         end
+    end
+    return nil
+end
+
+-- couch-fix64 (AUTO-158e): the outro's WBP_PostRace_Info_C through the UIManager's layers only (no FindAllOf walk:
+-- present.lua reads it in the full-screen outro, whose walk budget is spent) -> widget | nil
+function M.postRaceInfo()
+    local cls = loadedClass(C.BP.PostRaceInfo, 1000)
+    if not cls then return nil end
+    local mgr = U.giSubsystem("UIManager")
+    if not U.ok(mgr) then return nil end
+    for _, layer in ipairs(RESULTS_LAYERS) do
+        local ok, w = pcall(function() return mgr:GetWidgetInLayer(cls, layer) end)
+        if ok and U.ok(w) then return w end
     end
     return nil
 end

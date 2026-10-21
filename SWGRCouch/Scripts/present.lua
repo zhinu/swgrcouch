@@ -357,6 +357,54 @@ local function guestHudTick()
     end
 end
 
+-- couch-fix64 (AUTO-158e, live round 9 FM12 11:56:46-50, shot fm3-results: P2 wrecked, P1 won, and the post-race camera
+-- showed a full-screen "WRECKED"). Not the mod's plate (finishplate removed its plates at POSTRACE): the game's outro,
+-- WBP_PostRace_Info, is created by the UIManager for the LAST local PC (= P2) and its Construct reads its OWNER's
+-- RaceEventComponent (ux-split-inventory: "position text = P2's while the flow is P1's"; couchsolo #35: its title =
+-- the owner's verdict, InitForWrecked). So it was P2's WRECKED, drawn over P1's one full-screen view. In the one view
+-- of POSTRACE a guest-owned outro goes transparent like the guests' HUDs (P1's own HUD outro shows his place); a
+-- race-alone couch test keeps it (couchsolo writes P1's own result into it), so does a boss race raced as copies
+-- (instances.lua writes P1's own place into it). Pure decision for the tests:
+function M.outroInfoAction(ownerIsP1, singleView, raceAlone)
+    if not singleView or ownerIsP1 or raceAlone then return nil end
+    return "hide"
+end
+
+local infoHidden = {}
+local INFO_EVERY_MS, INFO_FOR_MS = 250, 12000          -- UIManager layer reads (no walk) for the outro's first 12 s
+function M.outroInfoPass(p1)
+    if cfg.PresentOutroP1Hud == false or not M.isSingleView() then return end
+    local now = St.nowMs()
+    if infoHidden.gen ~= St.worldGen then infoHidden = { gen = St.worldGen, n = 0, start = now, at = -1e12 } end
+    if now - infoHidden.start > INFO_FOR_MS or now - infoHidden.at < INFO_EVERY_MS then return end
+    infoHidden.at = now
+    local alone = false
+    pcall(function() alone = U.mod("couchsolo").raceAlone() == true end)
+    -- a boss race raced as copies: instances.lua writes P1's own place into this outro (couch-fix49)
+    pcall(function() if U.mod("instances").bossRace() == true then alone = true end end)
+    if alone then return end
+    local w = nil
+    pcall(function() w = U.mod("hud").postRaceInfo() end)
+    if not U.ok(w) then return end
+    do
+        pcall(function()
+            if not w:IsInViewport() then return end
+            local own = w:GetOwningPlayer()
+            local isP1 = U.ok(own) and U.key(own) == U.key(p1)
+            if M.outroInfoAction(isP1, M.isSingleView(), alone) ~= "hide" then return end
+            if (tonumber(w:GetRenderOpacity()) or 1) <= 0 then return end
+            w:SetRenderOpacity(0.0)
+            infoHidden.n = infoHidden.n + 1
+            if infoHidden.n == 1 then
+                local pn = "?"
+                pcall(function() pn = tostring(U.mod("join").pnumForPC(own) or "?") end)
+                U.log(TAG, "outro: the game's WBP_PostRace_Info belongs to P%s (the UIManager's last local PC) and reads "
+                    .. "HIS result: hidden in P1's full-screen view, P1's own HUD outro shows (AUTO-158e)", pn)
+            end
+        end)
+    end
+end
+
 ---------------------------------------------------------------------------------------------------- loop
 -- MAIN loop, race phases (main.lua calls present.tick() right before hud.tick(); cfg.PresentFromMain = true).
 function M.tick()
@@ -366,7 +414,11 @@ function M.tick()
     if #lps < 2 then return end
     findBudget, walkedThisTick = MISS_FINDS_PER_TICK, false
     U.try(TAG, viewTick)
-    if St.phase == "POSTRACE" then U.try(TAG, outroDedupeTick); U.try(TAG, guestHudTick) end
+    if St.phase == "POSTRACE" then
+        U.try(TAG, outroDedupeTick); U.try(TAG, guestHudTick)
+        local p1 = U.p1()
+        if U.ok(p1) then U.try(TAG, M.outroInfoPass, p1) end
+    end
     local ig = ignitionMod()
     if ig then U.try(TAG, ig.tick, lps) end
 end

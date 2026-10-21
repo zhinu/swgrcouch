@@ -143,6 +143,10 @@ cfg.SlowPollMs          = 1000      -- SLOW loop (pending hooks, menu ensure, ne
 cfg.UseKslIsValid       = true      -- U.alive also asks KismetSystemLibrary:IsValid   VERIFY(V-CORE-05)
 cfg.SubsystemLookup     = "sbl"     -- "sbl" (SubsystemBlueprintLibrary) | "findfirst"  VERIFY(V-CORE-06)
 cfg.LoopErrorLogEveryMs = 5000      -- a failing loop logs at most one error line per this period
+cfg.ClassPinAuto        = true      -- couch-fix67 (AUTO-152): the class of every Blueprint object the mod reads by name
+                                    --   is kept loaded for the session (UE4SS's member cache crash after a class reload);
+                                    --   false = only the race HUD / ignition classes (couch-fix63)
+cfg.ClassPinCap         = 400       -- couch-fix67: at most this many Blueprint classes kept loaded (> 0; a WARN when reached)
 cfg.DiagPeriodicMs      = 0         -- > 0: diag.dump() at that interval
 -- couch-racegc (gctune.lua): the mod's Lua garbage collector. Every UE4SS wrapper is a finalizable userdata and Lua 5.4's
 -- incremental collector walks all of them in one indivisible atomic step: the 10-20 ms race stalls of 2026-10-15.
@@ -985,6 +989,9 @@ cfg.CouchPreRunWaitGuests = true       -- #104: P1's START RUN on the LOADOUT wa
 cfg.CouchPreRunWaitMs     = 180000     -- #104: safety: P1's START RUN is released after this long (0 = never)
 cfg.CouchPreRunNavBoundary = true      -- AUTO-122: P1's pre-run screen is a navigation boundary while the split is open
                                        --   (his D-pad never runs into a guest's area). false = Slate's default
+cfg.CouchBackerNavBoundary = true      -- AUTO-153: P1's backer contract screen is a navigation boundary while the split is open
+cfg.CouchBackerFocusFirst = true       -- couch-fix69 (AUTO-164): when that split opens, P1's first contract card gets his
+                                       --   pad's focus (framed) if none of his cards has it. false = the game's focus only
 cfg.CouchPanel            = true       -- after a race and at shops every guest gets his own area of the screen for his
                                        --   reward / purchases. false = guests pick no rewards and buy nothing
 cfg.CouchPanelNative      = true       -- the guest's reward area uses the game's own CHOOSE AN UPGRADE cards. false =
@@ -1026,6 +1033,17 @@ cfg.CouchRewardWaitGuests = true       -- couch-fix32 (audit 12 #13): P1 on the 
 cfg.CouchMapInputHold     = true       -- couch-fix53 (AUTO-131): during that wait the screen owner leaves pad id 0 and
                                        --   P1's PC takes it back: P1's A reaches no CommonUI router that owns the map
                                        --   (the disabled screens / node buttons did not stop it live). false = fix51
+                                       --   couch-fix66 (AUTO-161): while it is in place the held map and its node
+                                       --   buttons are never disabled (fix32 / fix51 are its fallback only)
+cfg.CouchMapHoldEarly     = true       -- couch-fix68 (AUTO-163): that hold starts as soon as the run map is the post-race
+                                       --   holder's page (read every FAST tick + inside every post-race state change),
+                                       --   not when the screen list shows it (P1's release of the A that left his last
+                                       --   reward screen picked a node first). false = couch-fix66
+cfg.CouchMapHoldEndRefocus = true      -- couch-fix69 (AUTO-165): when that hold ends, P1's pad focus goes back on the map's
+                                       --   selected node if no node has it (his first A picks). false = the swap's refocus only
+cfg.CouchMapHoldEndPadWatch = true     -- couch-fix69 (AUTO-165): for 12 s after that hold ends P1's A on the node map is
+                                       --   also read from the input filter DLL's pad watch (an A the native path ate is
+                                       --   bridged once). false = native / IsInputKeyDown only
 cfg.CouchShopRarityTable  = true       -- couch-fix32 (audit 12 #14): a guest's Hibi's shelf rolls the shop's rarity table
                                        --   (rundata rarity.shop, one planet behind the race rewards) for the planet, never
                                        --   the race / eliminator table (richer shelves than P1's); Legendary parts 4,000.
@@ -1088,6 +1106,10 @@ cfg.CouchCampaignTile     = true       -- F01: COUCH CAMPAIGN tile on the Campai
 cfg.CouchActPosters       = true       -- F02: the COUCH CAMPAIGN page shows the campaign's acts (ACT I-III): an unlocked
                                        --   act starts a NEW run of it (a run in progress is abandoned after a confirm).
                                        --   false = the page's NEW CAMPAIGN poster (the game's own restart) as in F01
+cfg.CouchSoloPrompt       = true       -- couch-fix70: CONTINUE / an act / NEW CAMPAIGN on the COUCH CAMPAIGN page with no
+                                       --   joined guest opens a window instead (solocamp.lua): BACK TO MENU (the
+                                       --   page's own close; solo = the game's CAMPAIGN tab) or ADD A SECOND PLAYER (B too:
+                                       --   the page stays). false = the couch run starts with P1 alone (the old behaviour)
 cfg.CouchDeleteProgress   = true       -- #98: FREE MODE > OPTIONS > ADVANCED > Delete all couch progress (only while the COUCH save
                                        --   profile of tools/swgr-save-profile.sh is live; refused otherwise)
 cfg.CouchSaveAccountId    = ""         -- F02: the SaveGames/<account> folder whose .swgr-profile marker is checked;
@@ -1335,6 +1357,8 @@ cfg.PauseDialogGuestUi    = "lower"    -- D2: "lower": guests' IMC_UI back to de
 -- arcade or on a network client), confirmed by the game's RetryRace dialog, then RacingGameMode:RequestResetRace (the
 -- same map, seamless). Not PauseRestartCsm above (G: the pause state machine after P1's wreck).
 cfg.PauseRestart          = true       -- the RESTART RACE entry; false = the pause menu stays the game's   VERIFY(V-RST-01)
+cfg.PauseHideAbandonTour  = true       -- couch-fix64 AUTO-158f: ABANDON TOUR collapsed in the pause of a race the mod launched
+                                       --   (its Yes = LockRun of P1's campaign run); false = the game's list as it is
 cfg.PauseRestartConfirm   = "dialog"   -- "dialog": the game's Btn_RetryRace + its RetryRace confirm dialog; Accept is seen
                                        --   by a native pre-hook on ArcadeSubsystem:RequestRestartEvent (registered while
                                        --   such a race is RACING) | "twice": an own row, confirmed by a second press
@@ -1812,7 +1836,9 @@ local POSITIVE = { CouchGarageTries = true, Garage4SpinCaptureMs = true, FastPol
                    LuaGcMinorMul = true, LuaGcMajorMul = true, LuaGcRaceMajorMul = true, LuaGcPause = true,
                    LuaGcStepMul = true, LuaGcStepSize = true,
                    -- #38 race-progress strip
-                   HudProgressMs = true, HudProgressHalfLap = true, HudProgressSpan = true }
+                   HudProgressMs = true, HudProgressHalfLap = true, HudProgressSpan = true,
+                   -- couch-fix67 class pins
+                   ClassPinCap = true }
 -- 0.10.0: numbers that must be >= 0 (0 = off / at once).
 local NONNEG = { CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
                  SetupPreviewCaptureMs = true,

@@ -558,6 +558,7 @@ local function buildSummary(kit, tree, cv, P, n)
     Sm.box = kit.solid(tree, col.DEEP);                kit.place(cv, Sm.box, x, y, w, h, 6)
     Sm.bar = kit.solid(tree, col.AMBER);               kit.place(cv, Sm.bar, x, y, w, s(12), 7)
     Sm.head = kit.text(tree, s(58), col.AMBER);         kit.place(cv, Sm.head, x + pad, y + pad, nil, nil, 7)
+    Sm.headSize, Sm.headMax = s(58), w - 2 * pad        -- couch-fix63 (AUTO-154b): the head is fitted to the box
     for i = 1, 4 do
         local t = kit.text(tree, s(40), col.CREAM, kit.FONT_BODY, w - 2 * pad)
         kit.place(cv, t, x + pad, y + pad + s(130) + (i - 1) * s(150), nil, nil, 7)
@@ -950,7 +951,20 @@ function M.summaryLines(P, items)
     local model = nil
     local g4 = G4()
     if g4 and arch ~= nil then pcall(function() model = g4.prerunInfo(P.pnum, arch).model end) end
-    lines[1] = "VEHICLE   " .. string.upper(tostring(cls and cls.label or "?")) .. ((model and model ~= "") and ("  -  " .. string.upper(model)) or "")
+    -- couch-fix63 (AUTO-154a, live round 8: "VEHICLE LANDSPEEDER - VORNSKR" while P2 raced P1's Skimmer): a guest who
+    -- never picked a class follows P1's (couchrun.ensure gives him P1's class once P1's run starts: "P2 follows P1's class
+    -- 0 -> 3"). On the pre-run screens P1's run still holds the previous / default class, so archOf named the wrong one:
+    -- his summary says he races P1's class
+    local follows = false
+    pcall(function()
+        local p = CR().player(P.ctrlId)
+        follows = p ~= nil and p.picked ~= true
+    end)
+    if follows then
+        lines[1] = "VEHICLE   SAME AS P1"
+    else
+        lines[1] = "VEHICLE   " .. string.upper(tostring(cls and cls.label or "?")) .. ((model and model ~= "") and ("  -  " .. string.upper(model)) or "")
+    end
     local it = items and items[P.choice or P.equip or P.sel]
     lines[2] = "RACER STYLE   " .. (it and string.upper(tostring(it.name)) or "?")
     local fav = {}
@@ -980,7 +994,9 @@ local function renderSummary(P)
     for _, k in ipairs({ "box", "bar", "head", "hint" }) do kit.show(Sm[k], on) end
     for _, t in ipairs(Sm.lines) do kit.show(t, on) end
     if not on then return end
-    kit.setText(Sm.head, "READY - WAITING FOR " .. table.concat(waitingNames(P), ", "))
+    local head = "READY - WAITING FOR " .. table.concat(waitingNames(P), ", ")
+    if kit.setTextFit then kit.setTextFit(Sm.head, head, Sm.headMax, Sm.headSize, kit.FONT_DISPLAY, "stepLabel", 14)
+    else kit.setText(Sm.head, head) end
     local lines = M.summaryLines(P, S.items)
     for i, t in ipairs(Sm.lines) do kit.setText(t, lines[i] or "") end
     kit.setText(Sm.hint, "A on START RUN or B: change")

@@ -93,6 +93,8 @@
 --    protected instead. P1's own refunded wreck: cfg.CouchWreckRefundRewards (default false = the solo rule, audit Q2):
 --    the token only - he loses his reward round like a wrecked guest (taken right before the race end).
 --    A wrecked guest himself: DNF payout, no own reward offer this round (the native single-player wreck rule).
+--    couch-fix65 (AUTO-160d): his credits lines still show, as in the solo hub - a challenge settled after the race
+--    end makes his CREDITS stage and opens his area (couchrun.wreckCredits160); nothing to show = no area.
 --    #81: EXCEPT in an elimination race (eliminator / gauntlet) when his wreck was refunded (the team kept its token):
 --    a wreck there leaves the race like an elimination, so he is booked at his standing (M.standingAt: 1 + the racers
 --    not eliminated / wrecked yet) - credits and his own reward round as an eliminated guest at that place (D4).
@@ -298,6 +300,20 @@ function M.sitOutCredits(planet, act, engine)
 end
 
 -- ctx = {kind, planet, pos, wrecked, sitOut, teamEarned, mult, beat, act, engine} -> {credits, offer, note}
+-- couch-fix63 (AUTO-154g, live round 8 11:25:27): the words of a guest's own reward-flow log line. After a team-FAILED
+-- podracer test P2's line said "rewards earned: stages 1,2(stat x3)" while the tester read P1's hub as "NO REWARDS
+-- (+25 CR)" - read as P2 being paid for a fail. It is the solo fail itself: P1's node of that very race booked
+-- "completed true, earned rewards true, reward rounds 1 (at 1), finish credits 25, tuning 2" (gauntlet RESULT
+-- 11:26:54; RewardRoundIx 0 -> 1 = P1's round was played), the same as #107b (2026-10-18 10:11, Jules's photo: FAULTS
+-- + CREDITS + UPGRADE PACK). So the line names a failed test's round for what it is.
+function M.flowLabel(kind, earned, beat)
+    if not earned then return "no reward round" end
+    if beat == false and kind == "planesprint" then
+        return "podracer test FAILED: the solo fail's credits + base round, as the game books P1's own fail"
+    end
+    return "rewards earned"
+end
+
 function M.guestOutcome(ctx)
     -- #89 (live 2026-10-18 09:06, podracer test: "P2 finished P0: +500 CR - sat out (planesprint)" + his own reward
     -- flow): a test is each player's own game (#87) - a guest without a run of his own has no result to be paid for
@@ -1459,7 +1475,12 @@ local function teamTestRepair(booked)
     if not (struck or lost or (delta and delta < want)) then
         -- the game booked a pass: the team's (his own verdict may not be readable inside his hook frame yet)
         R.teamPassed, R.teamCarrier = true, passer or booked          -- the first player who passed
-        U.log(TAG, "team test PASSED: P%s's booking passed natively", tostring(booked.pnum))
+        -- couch-fix63 (AUTO-154f): the booking is the GAME's (the last player out); the team result is the first
+        -- player who passed - say both, or the later "team result by P2" reads as a contradiction of this line
+        local carrier = R.teamCarrier
+        U.log(TAG, "team test PASSED: the game booked P%s's finish as a pass; team result carried by P%s (%s)",
+            tostring(booked.pnum), tostring(carrier.pnum),
+            carrier == booked and "his own pass" or "the first player who passed")
         return
     end
     if not passer then
@@ -1694,7 +1715,8 @@ ownEconomy = function(why)
             end
         end
     end
-    U.log(TAG, "P1's own result pays P1 (OWN PLACE rule; team result by %s, P1 %s): %s (%s)",
+    -- couch-fix63 (AUTO-154f): `booked` is the game's booking (the team test's carrier may be another player)
+    U.log(TAG, "P1's own result pays P1 (OWN PLACE rule; the game booked %s, P1 %s): %s (%s)",
         booked and ("P" .. tostring(booked.pnum)) or "nobody",
         snap and (snap.wrecked and "wrecked" or ("P" .. tostring(snap.pos))) or "?",
         #notes > 0 and table.concat(notes, "; ") or "nothing to change", tostring(why))
@@ -1945,8 +1967,16 @@ local function finish(why)
                aloneKind = R.aloneKind, limit = R.limit, target = R.target, humans = own, gen = St.worldGen,
                real = R.real, teamEarnedKept = R.teamEarnedKept, p1RoundLost = R.p1RoundLost == true,
                ownCr = R.ownCr, p1OwnNoRound = R.p1OwnNoRound == true }
+    -- couch-fix63 (AUTO-154f): a team test's carrier (the first player who passed) is not always the game's booking
+    -- (the last player out): the line names both then
+    local by = carrier and ("P" .. tostring(carrier.pnum)) or "nobody"
+    if carrier and R.booked and carrier ~= R.booked then
+        by = string.format("%s (%s; the game booked P%s)", by,
+            R.teamTest and (R.teamPassed and "the first player who passed" or "the team test's carrier") or "carrier",
+            tostring(R.booked.pnum))
+    end
     U.log(TAG, "couch race ruled (%s): team result by %s, %d refund(s), team rewards %s%s", tostring(why),
-        carrier and ("P" .. tostring(carrier.pnum)) or "nobody", #R.refunds, tostring(M.last.earned),
+        by, #R.refunds, tostring(M.last.earned),
         R.teamTest and (", team test " .. (R.teamPassed and "PASSED" or "FAILED")) or
             (R.boss and (", " .. bossWords().inst .. " " .. ((R.bossResult and R.bossResult.won) and "WON" or "LOST")) or
             (R.rival and (", rival challenge " .. ((R.rivalResult and R.rivalResult.won) and "WON" or "LOST")) or "")))

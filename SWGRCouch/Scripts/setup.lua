@@ -1807,6 +1807,14 @@ function M.stepGrid(dir)
     if W.v2 then v2.renderGrid(m) else setText(W.gridCy.m, gridText(m), true) end
 end
 
+-- couch-fix65 (AUTO-160b, live round 10 RACE SETUP > MODE): A on the Opponents row stepped the value like Right (TIER 2
+-- -> 3): the row's middle ghost clicked +1. On the MODE page's two value rows (Racers, Opponents) only Left / Right
+-- change a value (AUTO-156's rule for a vertical move, now for A too); A on a row does nothing. The arrow ghosts keep
+-- their mouse clicks.
+function M.rowAccept(id)
+    U.dbg(TAG, "A on the %s row: no step (only Left / Right change it, AUTO-160b)", tostring(id))
+end
+
 function M.cyclerStep(id, dir, src)
     local cy = W and W.cyclers[id]
     if not cy then return end
@@ -2316,7 +2324,7 @@ local function buildModeView()
     -- the old cycler's three buttons are the row's ghosts (middle = the row, left / right = its arrows): the focus trap
     -- of onFocus works unchanged (EUINavigation Left 0, Right 1, as makeCycler)
     local cy = { id = "grid", onStep = function(dir) M.stepGrid(dir) end }
-    cy.m = th.ghost(W.tctx, W.panel, V2.rowRect, "setup:grid:m", function() M.cyclerStep("grid", 1, "click") end,
+    cy.m = th.ghost(W.tctx, W.panel, V2.rowRect, "setup:grid:m", function() M.rowAccept("grid") end,
         { geo = W.geo, z = 10 })
     cy.l = th.ghost(W.tctx, W.panel, { dx, ry, 64, 96 }, "setup:grid:l",
         function() M.cyclerStep("grid", -1, "click") end, { geo = W.geo, z = 11 })
@@ -2339,7 +2347,7 @@ local function buildModeView()
     V2.row2 = th.settingsRow(W.tctx, W.panel, V2.row2Rect, { geo = W.geo, z = 3 })
     if not V2.row2 then error("Opponents row not built") end
     local cy2 = { id = "aitier", onStep = function(dir) M.stepAiTier(dir) end }
-    cy2.m = th.ghost(W.tctx, W.panel, V2.row2Rect, "setup:aitier:m", function() M.cyclerStep("aitier", 1, "click") end,
+    cy2.m = th.ghost(W.tctx, W.panel, V2.row2Rect, "setup:aitier:m", function() M.rowAccept("aitier") end,
         { geo = W.geo, z = 10 })
     cy2.l = th.ghost(W.tctx, W.panel, { dx, ry2, 64, 96 }, "setup:aitier:l",
         function() M.cyclerStep("aitier", -1, "click") end, { geo = W.geo, z = 11 })
@@ -2748,12 +2756,25 @@ function v2.previewMode(m)
     v2.renderGrid(m)
 end
 
+-- couch-fix65 (AUTO-160c, live round 10, MIXED CLASS tile: Racers SET BY THE GAME): Up from Opponents landed on the
+-- RACE tile (the first poster) and the detail view switched to RACE. The top row's Up goes back to the tile whose
+-- detail the rows show (the previewed poster: P1 reached the rows with Right from it), the first one only without it.
+local function upPoster()
+    local i = tonumber(S.previewed)
+    if i and W.posters and U.ok(W.posters[i]) and W.posterMap and W.posterMap[i] then return W.posters[i], i end
+    return W.posters and W.posters[1], 1
+end
+M._upPoster = upPoster                                     -- offline tests (couch-fix65)
+
 -- The strips' Right rule reaches the first GRID row that takes focus (Racers: "max" grids only; Opponents: speeders).
--- Racers Down -> Opponents -> BACK; Up the other way, the top row up to the first strip.
+-- Racers Down -> Opponents -> BACK; Up the other way, the top row up to the previewed strip (upPoster).
 local function gridNav(on, on2)
     local cy, cy2 = W.cyclers.grid, W.cyclers.aitier
     if not (cy and W.posters) then return end
     local th = T()
+    local up, upI = upPoster()
+    local V2m = W.views and W.views.mode
+    if V2m then V2m.upIdx = upI end
     local first = (on and cy.m) or (on2 and cy2 and cy2.m) or nil
     for i = 1, 4 do
         navReset(W.posters[i], { 1 })
@@ -2763,11 +2784,11 @@ local function gridNav(on, on2)
     if cy2 then navReset(cy2.m, { 2, 3 }) end
     if on then
         th.nav(cy.m, "down", (on2 and cy2) and cy2.m or W.back)
-        th.nav(cy.m, "up", W.posters[1])
+        th.nav(cy.m, "up", up)
     end
     if on2 and cy2 then
         th.nav(cy2.m, "down", W.back)
-        th.nav(cy2.m, "up", on and cy.m or W.posters[1])
+        th.nav(cy2.m, "up", on and cy.m or up)
     end
 end
 
@@ -2825,6 +2846,8 @@ function v2.renderGrid(m)
         gridNav(on, on2)
         if not on then V2.rowFocus = nil; V2.row.set({ focused = false }) end
         if not on2 and V2.row2 then V2.row2Focus = nil; V2.row2.set({ focused = false }) end
+    elseif (on or on2) and select(2, upPoster()) ~= V2.upIdx then
+        gridNav(on, on2)                                   -- couch-fix65 (AUTO-160c): another tile previewed
     end
     -- the strip: humans INK, AI INK @0.32 (MIXED 4 + 4 + 4, ELIMINATOR 12 mixed); then one sentence
     local list, key = {}, m and m.key or "race"
@@ -3080,7 +3103,9 @@ local function navRules(step, view)
         if step == "mode" then
             if n > 0 then th.nav(W.posters[n], "down", back) end
             local V2 = W.views.mode
-            gridNav(V2 ~= nil and V2.gridOn == true)
+            -- couch-fix64 (AUTO-156, live round 9 FM3): the Opponents row was dropped here (gridNav(on) alone reset its
+            -- rules and pointed Racers' Down at BACK): both rows, as renderGrid left them
+            gridNav(V2 ~= nil and V2.gridOn == true, V2 ~= nil and V2.tierOn == true)
         else
             for i = 1, n do th.nav(W.posters[i], "down", back) end
         end
@@ -3095,6 +3120,7 @@ local function navRules(step, view)
         pcall(CM.navDown, back)
     end
 end
+M._navRules = navRules                                   -- offline tests (couch-fix64)
 
 ---------------------------------------------------------------------------------------------------- v2 step
 function v2.showStep(step)
@@ -3715,11 +3741,29 @@ local function cyclerOf(w)
     return nil, nil
 end
 
+-- couch-fix64 (AUTO-156): P1 is moving vertically right now (an Up / Down key down and no Left / Right key down)
+local VKEYS = { "Gamepad_DPad_Up", "Gamepad_LeftStick_Up", "Gamepad_DPad_Down", "Gamepad_LeftStick_Down" }
+local HKEYS = { "Gamepad_DPad_Left", "Gamepad_LeftStick_Left", "Gamepad_DPad_Right", "Gamepad_LeftStick_Right" }
+function M.verticalMove(pc)
+    if not U.ok(pc) then return false end
+    local function any(keys)
+        for _, k in ipairs(keys) do
+            local ok, d = pcall(function() return ui().keyDown(pc, k) end)
+            if ok and d == true then return true end
+        end
+        return false
+    end
+    return any(VKEYS) and not any(HKEYS)
+end
+
 local function onFocus(f)
     S.lastFocus = f
     if not f then return end
     if W.v2 then
-        v2.noteFocus(f)                                      -- 0.12.0: BACK's Up rule follows the content focus
+        -- 0.12.0: BACK's Up rule follows the content focus. couch-fix64 (AUTO-156): a cycler's ARROW ghost (the focus
+        -- trap below) is noted as its row's middle: BACK's Up onto an arrow stepped the value (Racers -1 on every Up)
+        local cyN, dN = cyclerOf(f)
+        v2.noteFocus((cyN and dN ~= 0) and cyN.m or f)
         if S.view == "posters" and W.posters then            -- a poster ghost: preview its item (painted by v2.poll)
             for i, g in ipairs(W.posters) do
                 if U.same(g, f) then
@@ -3757,11 +3801,18 @@ local function onFocus(f)
     if cy and dir ~= 0 then
         -- focus trap: d-pad left/right moved the focus onto an arrow. Mouse hover and the keyboard (lobby.onKey
         -- steps itself) only get the focus put back.  VERIFY(V-SET-03)
-        if gamepadInput() and M.realMs() - S.kbStepAt > 300 then M.cyclerStep(cy.id, dir, "pad") end
+        -- couch-fix64 (AUTO-156): only Left / Right change a value; an arrow reached by an Up / Down move (pad or
+        -- stick held vertically, no horizontal key down) only gets the focus put back on the row
+        if gamepadInput() and M.realMs() - S.kbStepAt > 300 and not M.verticalMove(U.p1()) then
+            M.cyclerStep(cy.id, dir, "pad")
+        elseif gamepadInput() then
+            U.dbg(TAG, "cycler %s: arrow reached by an Up / Down move: no step (AUTO-156)", cy.id)
+        end
         ui().focus(cy.m, U.p1())
         S.lastFocus = cy.m
     end
 end
+M._onFocus = onFocus                                     -- offline tests (couch-fix64)
 
 local PADK = {
     up = { "Gamepad_DPad_Up", "Gamepad_LeftStick_Up" }, down = { "Gamepad_DPad_Down", "Gamepad_LeftStick_Down" },
@@ -4112,5 +4163,9 @@ end
 -- 0.12.0 v2: every St.emit("status") reaches the open page's status pill even when lobby.setStatus does not forward
 -- it (when it does, the pill's echo filter drops the second copy). A classic page or a closed setup: nothing.
 St.on("status", TAG, function(text) pillFeed(text, nil) end)
+
+-- offline tests (couch-fix64 AUTO-156): the page's widgets and the two navigation entry points
+M._test = { setW = function(w) W = w end, setS = function(k, v) S[k] = v end, navRules = function(...) return M._navRules(...) end,
+            onFocus = function(f) return M._onFocus(f) end }
 
 return M

@@ -151,6 +151,29 @@ function M.canJoin()
     return St.join and St.join.active == true and St.join.frozen ~= true
 end
 
+-- couch-fix63 (AUTO-154e, live round 8: 12 racers, the 11th-placed AI left out while P2 at 12th was listed - the lists
+-- kept "the top 10 + every human"): the rows a list of max lines shows (pure). Every row when they fit; else the top of
+-- the table, as many as leave room for every human below it.
+function M.fitRows(rows, max)
+    rows, max = rows or {}, tonumber(max) or 0
+    if #rows <= max then
+        local all = {}
+        for i, r in ipairs(rows) do all[i] = r end
+        return all
+    end
+    local k = max
+    while k > 0 do
+        local below = 0
+        for i = k + 1, #rows do if rows[i].human then below = below + 1 end end
+        if k + below <= max then break end
+        k = k - 1
+    end
+    local out = {}
+    for i = 1, k do out[#out + 1] = rows[i] end
+    for i = k + 1, #rows do if rows[i].human and #out < max then out[#out + 1] = rows[i] end end
+    return out
+end
+
 -- championship rows (best first) {rank, name, value, human, pnum}; the last race's rows {rank, name, value}
 function M.standingsRows(gs)
     local out = {}
@@ -412,7 +435,10 @@ local function slotRow(T, ctx, cv, geo, i)
     function row.set(f)
         if f.label ~= nil then pcall(T.set, e.title, { text = f.label }) end
         if f.value ~= nil then pcall(T.set, e.sub, { text = f.value }) end
-        if f.art ~= nil then pcall(T.set, e.thumb, { tex = f.art, visible = row.st.shown ~= false }) end
+        if f.art ~= nil then
+            row.st.art = f.art
+            pcall(T.set, e.thumb, { tex = f.art, visible = row.st.shown ~= false })
+        end
         if f.cycle ~= nil then row.st.cycle = f.cycle end
         -- #22: a fixed list (PLANET CHAMPIONSHIP) is display-only: its ghost leaves CommonUI's navigation
         if f.nav ~= nil and row.st.nav ~= f.nav then
@@ -423,7 +449,9 @@ local function slotRow(T, ctx, cv, geo, i)
     end
     function row.show(on)
         row.st.shown = on ~= false
-        if not row.st.shown then pcall(T.set, e.thumb, { visible = false }) end
+        -- couch-fix63 (AUTO-154e, live round 8: Races 3 -> 4 showed the 4th race without its thumbnail): set() ran
+        -- while the row was still hidden, so the thumbnail is given back here when the row shows again
+        pcall(T.set, e.thumb, { visible = row.st.shown and row.st.art ~= nil })
         pcall(T.set, e.ghost, { visible = row.st.shown and row.st.nav ~= false })
         paint()
     end
@@ -849,11 +877,8 @@ local function renderStandings()
         T.set(W.standings.headL, { text = h and string.format("RACE %d %s %s", h.race, DOT, tostring(h.name)) or "NO RACE YET" })
         T.set(W.standings.headR, { text = string.format("CHAMPIONSHIP %s %d / %d", DOT, math.min(gs.race - 1, #gs.races), #gs.races) })
     end)
-    -- the last race: the top 10 + every human below them
-    local shown = {}
-    for _, r in ipairs(last) do
-        if #shown < MAX_ROWS and (r.rank <= 10 or r.human) then shown[#shown + 1] = r end
-    end
+    -- the last race: every racer that fits, else the top + every human below them (M.fitRows)
+    local shown = M.fitRows(last, MAX_ROWS)
     for i = 1, MAX_ROWS do
         local e = W.standings.left[i]
         local r = shown[i]
@@ -863,10 +888,7 @@ local function renderStandings()
         end
     end
     local tab = M.standingsRows(gs)
-    local list = {}
-    for _, r in ipairs(tab) do
-        if #list < MAX_ROWS and (r.rank <= MAX_ROWS - 2 or r.human) then list[#list + 1] = r end
-    end
+    local list = M.fitRows(tab, MAX_ROWS)
     for i = 1, MAX_ROWS do
         local e = W.standings.right[i]
         local r = list[i]

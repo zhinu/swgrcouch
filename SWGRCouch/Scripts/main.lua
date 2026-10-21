@@ -62,7 +62,7 @@ local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join
                   "crashcam", "nametags", "gfx", "pause",
                   "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
                   "restart", "feowner", "backprompt", "run", "runpage", "couch", "couchrules", "couchsolo", "soloscore", "precision", "finishplate", "instances", "couchrun", "couchpanel",
-                  "couchfence", "couchrewards", "couchflow", "couchbacker", "couchpenalty", "couchbackerui", "couchfaults", "couchfavours", "couchlayout", "couchprerun", "couchroot", "couchbets", "couchmeta", "debugai", "garagenative", "couchacts", "couchpage", "gpdata", "gp", "gppage",
+                  "couchfence", "couchrewards", "couchflow", "couchbacker", "couchpenalty", "couchbackerui", "couchfaults", "couchfavours", "couchlayout", "couchprerun", "couchroot", "couchbets", "couchmeta", "debugai", "garagenative", "couchacts", "couchpage", "solocamp", "gpdata", "gp", "gppage",
                   "custdata", "garage", "garage4", "garage4ui", "gctune", "progress" }
 local mods = {}
 for _, name in ipairs(MODULES) do

@@ -408,6 +408,18 @@ local function place(w, btn, resume)
         #fx > 0 and (", switched on: " .. table.concat(fx, ", ")) or ""), rows
 end
 
+-- AUTO-158f (see decorate): ABANDON TOUR collapsed on a pause screen of a race the mod launched -> true when hidden
+function M.hideAbandon(w)
+    if not opt("PauseHideAbandonTour", true) or not U.ok(w) then return false end
+    local ab = nil
+    pcall(function() ab = w.Btn_AbandonRun end)
+    if not U.ok(ab) then return false end
+    local hid = pcall(function() ab:SetVisibility(C.E.Vis.Collapsed) end)
+    U.log(TAG, "ABANDON TOUR %s in this SWGRCouch-launched race's pause (no campaign tour here; its Yes would LockRun "
+        .. "P1's campaign run) (AUTO-158f)", hid and "hidden" or "NOT hidden")
+    return hid
+end
+
 -- Called by pause.lua with every new pause screen: right after its pre-create (split race, inside the ChangeStateTo
 -- hook: AddToViewport ran PreConstruct / Construct, the CSM shows the screen afterwards, so the re-layout is not seen)
 -- and at first sight (menuTick: every screen, also the UIManager's own in a one-player race or with PauseMenuOwner
@@ -462,6 +474,13 @@ function M.decorate(w, how)
     -- WBP_Vertical_Btn_C:SetText sets ButtonLabel + Txt_Label: the label survives the re-add's PreConstruct
     if ft then pcall(function() btn:SetText(ft) end) end
     local okP, placed, ptxt, rows = pcall(place, w, btn, resume)
+    -- couch-fix64 (AUTO-158f, live round 9 shot fm9-pause: a FREE MODE race's pause lists ABANDON TOUR, EXIT TO MAIN
+    -- MENU with its lock icon). Both are the game's own: WBP_PauseRacing's 'CampaignRace' row filter (UpdateSlots, the
+    -- list this module only re-orders below RESUME; restart-race.md §3) and its SafeExitToMenuStates icon - no mod
+    -- leftover (fix61 never touched the pause). But ABANDON TOUR's Yes is CampaignSubsystem:LockRun + ReturnToMainMenu
+    -- (decoded Btn_AbandonRun): in a race the mod launched (FREE MODE / its GRAND PRIX, no campaign tour) it would end
+    -- P1's saved campaign run. Collapsed there (cfg.PauseHideAbandonTour = false: kept); EXIT TO MAIN MENU stays.
+    M.hideAbandon(w)
     st.screen, st.screenKey, st.btn, st.placed = w, k, btn, okP and placed == true
     st.rows, st.resume, st.rowFixes, st.placedMs = okP and rows or nil, resume, 0, now
     st.rowLogged, st.rowWarned = false, false

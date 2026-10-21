@@ -1,6 +1,6 @@
 # SWGRCouch: FREE MODE (solo or couch split screen) and self-hosted races for STAR WARS: Galactic Racer
 
-UE4SS Lua mod, version 1.0.0 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
+UE4SS Lua mod, version 1.0.1 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
 5.7.4 shipping, Denuvo, project codename Griffin; hotfix build CL 382493), UE4SS Galactic Racer Edition (open beta,
 2026-10-08). The main-menu tab was called SPLIT SCREEN until 0.10.0; it is now **FREE MODE** (the mod is for one
 player too). This file ships twice: as `docs/REFERENCE.md` and as `SWGRCouch/README.md`, which `install.sh` copies into
@@ -909,6 +909,10 @@ while one of those keys is held (e.g. steering with the arrows), UE4SS drops the
 | Ctrl+F9 | network dump (net mode, driver, flow, remote humans) |
 | Ctrl+F11 | restart the mod (hot reload, §2.5). 0.10.0: registered only with `AllowHotReload = true` (default `false`: UE4SS's restart of a Lua state other threads still use can crash the game; restart the game instead) |
 
+**Debug autopilot (L3, off by default):** with `DebugAiKey = true` in `Scripts/config_user.lua`, a local player's L3
+(left stick click) in a race hands his own car to the game's AI and back ("P1: AI DRIVING" / "P1: YOU DRIVE"). It is
+a test tool, not a player feature: releases ship with it off.
+
 Keys used by the bundled mods are avoided: F10/Tilde open the console (ConsoleEnablerMod), plus INS, Ctrl+J/H/O/R/Y/U/I,
 Ctrl+Num5-9 and F3.
 
@@ -1499,13 +1503,16 @@ The race results screens are not covered (menu bridge above).
 | Key | Default | Meaning |
 |---|---|---|
 | `CouchCampaign` | `true` | master switch: the campaign keeps the joined guests (own cars, split screen); `false` = the pre-0.15.0 behaviour (guests closed when the campaign starts) |
+| `CouchSoloPrompt` | `true` | couch-fix70 (`solocamp.lua`): on the COUCH CAMPAIGN page, CONTINUE CAMPAIGN or an act (NEW RUN) with no joined guest opens a window instead of starting: *2 PLAYERS NEEDED*, **BACK TO MENU** (the page closes as P1's B closes it; a solo run = the game's own CAMPAIGN tab) or **ADD A SECOND PLAYER** (B too: the page stays, P2 presses A to join; a guest who joins while it is up closes it). Nothing is started from the window; `false` = the couch run starts with P1 alone (before 1.0.1) |
 | `CouchSkipPrologue` | `true` | a new run skips the vehicle-tryout prologue race (`Campaign.SkipPrologueEvents 1`, set at the front end) |
 | `CouchTimeTrials` | `true` | Field / Podracer Tests: 1 + guests entries, every human in P1's test vehicle, the others as ghosts; `false` = P1 alone |
 | `CouchPreRunSplit` | `true` | new-run VEHICLE SELECT / LOADOUT split: each guest picks class + racer style; `false` = guests follow P1's class |
 | `CouchPanel` | `true` | the guests' own reward / shop areas; `false` = guests pick no rewards and buy nothing |
 | `CouchPanelNative` | `true` | reward areas built from the game's CHOOSE AN UPGRADE widgets; `false` (or any build failure) = the dark list panel |
 | `CouchPanelNativeHover` | `true` | the focused guest card uses the card's own focus events; `false` = a hover look drawn by the mod |
-| `CouchGarage` | `true` | each guest's GARAGE (`garage.lua`): a *GARAGE* hint beside *(A) SHOP* on the run map opens his area (model, livery template, colours, finish); per seat and class in `Mods/SWGRCouch/guest-garage.txt` |
+| `CouchGarage` | `true` | each guest's GARAGE (`garage.lua`): his turn in the game's garage, offered in the paddock after P1 leaves his own (`CouchGarageOffer`); per seat and class in `Mods/SWGRCouch/guest-garage.txt` |
+| `CouchMapGuestShop` | `false` | `true` = the old *(A) SHOP* hint on the run map: a guest's A opens his own shop at any time; `false` = guests shop at the shops the run visits (Hibi's shop, the scrap dealer), like P1 |
+| `CouchMapGuestGarage` | `false` | `true` = the old *GARAGE* hint on the run map (the compact garage panel); `false` = the native garage turn offered in the paddock |
 | `CouchGarageApply` | `"upload"` | how his livery reaches his car: `"upload"` = `Server_UpdateVehicleRecipe(his recipe)` on his PlayerState's customisation component (the game's own per-player path) \| `"tags"` = the tags on his car's recipe actor + `OnRep_VehicleRecipe()` \| `"off"` = his model only (grid entry) |
 | `CouchGarageUnlocks` | `"p1"` | GARAGE options: what P1 owns (`IsOptionUnlockedAndPurchased` on P1's account) \| `"all"` |
 | `CouchGarageNative` | `true` | a guest's GARAGE = a TURN in the game's own full-screen garage (3D car; Choose Model / Edit Vehicle / Edit Livery driven by his pad; model, livery and kit parts saved to his seat and class; P1's garage backed up and restored exactly); `false` = the compact panel (also the fallback when a turn cannot start) |

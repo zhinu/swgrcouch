@@ -26,7 +26,11 @@
 -- native call are in couchacts.lua's header.
 -- #98 (2026-10-18): DELETE ALL COUCH PROGRESS left this page for the mod's settings: FREE MODE > OPTIONS > ADVANCED
 -- (lobby.onCouchDelete, the same couchacts.deleteAll).
--- Config: cfg.CouchCampaignTile (true), cfg.CouchActPosters (true).
+-- couch-fix70 (Jules 2026-10-21, solocamp.lua): CONTINUE / an act / NEW CAMPAIGN with no joined guest asks first
+-- (this page's confirm, kind "solo"): BACK TO MENU = the page closes exactly as P1's B closes it (nothing
+-- starts; the game's own CAMPAIGN tab is the solo campaign), ADD A SECOND PLAYER (or B) = the page stays with its join
+-- strip. A guest joining while it is up closes it (P1 presses again). cfg.CouchSoloPrompt = false: the old behaviour.
+-- Config: cfg.CouchCampaignTile (true), cfg.CouchActPosters (true), cfg.CouchSoloPrompt (true).
 local U = require("util")
 local St = require("state")
 local cfg = require("config")
@@ -51,7 +55,8 @@ local TEX_BG = TX .. "Backgrounds/T_UI_MainMenu_Bg.T_UI_MainMenu_Bg"
 
 local W = nil                    -- the page's widgets (nil until built; dropped by forget)
 local S = { active = false, backMs = -1e12, openWanted = 0, slotsSig = nil, lastSlotsMs = -1e12, modal = nil,
-            msg = "", progress = nil, states = nil, verifyMs = -1e12 }
+            msg = "", progress = nil, states = nil, verifyMs = -1e12,
+            lastFocus = nil, lostMs = nil, refocusMs = -1e12, refocused = 0 }
 local T = { rec = nil, tile = nil, scanMs = -1e12, warned = false }   -- the Campaign tab tile
 
 local function mk(paths, outer)
@@ -135,9 +140,18 @@ local MSG = { x = 128, y = 1872 }                        -- F02: one message lin
 -- F02 confirm (a modal over the page, the game's dark panel look)
 local MODAL = { x = 1020, y = 560, w = 1800, h = 960 }
 local BTN = { yes = { 1100, 1340, 780, 110 }, no = { 1960, 1340, 780, 110 }, ok = { 1530, 1340, 780, 110 } }
+-- couch-fix70: the one-player window's answers (live 2026-10-21: "ADD A SECOND PLAYER" is ~840 su wide at heroLabel 39)
+local BTN_SOLO = { yes = { 1060, 1340, 760, 110 }, no = { 1860, 1340, 920, 110 } }
+local JOIN_HINT = "Press (A) on a second controller to join, then pick CONTINUE or an act again."
 local YES_GUARD_MS = 400         -- an A within this time after the confirm opened is the press that opened it
 
 local function acts() return U.mod("couchacts") end
+local function solo() return U.mod("solocamp") end
+local function guestsJoined()
+    local n = 0
+    pcall(function() n = #U.mod("join").joinedList() end)
+    return n
+end
 local function actMode() return opt("CouchActPosters", true) ~= false end
 
 function M.build(root, pc, page)
@@ -348,14 +362,17 @@ local function focusFirst()
     end
 end
 
--- the focus look follows P1's CommonUI focus on the ghosts
+-- the focus look follows P1's CommonUI focus on the ghosts. Returns true when a page ghost (or, with the confirm up, a
+-- confirm ghost) holds P1's focus; the poster that holds it is remembered (S.lastFocus, the focus keeper's target).
 local function paintFocus()
-    if not W then return end
+    if not W then return false end
     local p1 = U.p1()
+    local any = false
     W.focus = W.focus or {}
     for id, p in pairs(W.posters) do
         local f = false
         pcall(function() f = ui().hasFocus(W.ghosts[id], p1) == true end)
+        if f and not S.modal then any = true; S.lastFocus = id end
         if W.focus[id] ~= f then
             W.focus[id] = f
             pcall(function() p.focus(f) end)
@@ -367,6 +384,7 @@ local function paintFocus()
         for k, gh in pairs(m.gh) do
             local f = false
             pcall(function() f = ui().hasFocus(gh, p1) == true end)
+            if f then any = true end
             if W.focus["m:" .. k] ~= f then
                 W.focus["m:" .. k] = f
                 pcall(function() T.set(m.btn[k], { colour = f and T.COL.RUST or T.COL.TILE }) end)
@@ -374,6 +392,60 @@ local function paintFocus()
             end
         end
     end
+    return any
+end
+
+-- couch-fix64 (AUTO-155, live round 9 11:58:11 / 12:01:55, 2/2): P1's B on the replay confirm. In the front end the B
+-- reaches CommonUI and the main menu posts the game's QUIT GAME? prompt; backprompt.lua hides it, focuses its NO and
+-- runs our back step (the confirm closes, a poster is focused under the still-open prompt), then clicks NO. The prompt's
+-- removal hands P1's CommonUI focus back to the main menu's own target, not to our poster: the page stayed drawn with
+-- no poster focused, A / D-pad dead (couchpage.status() "page open"), the next B closed it onto FREE MODE and the
+-- CAMPAIGN tab then came back empty. The page now keeps P1's focus itself: while it is open and nothing covers it, no
+-- page ghost holding P1's focus for FOCUS_LOST_MS (never while backprompt still answers a prompt) puts the focus back on
+-- the remembered poster (the confirm's NO while the confirm shows). backprompt also calls M.onPromptAnswered at once.
+local FOCUS_LOST_MS, REFOCUS_EVERY_MS = 300, 200
+local function refocusTarget()
+    if not W then return nil, nil end
+    if S.modal and W.modal then return W.modal.gh.no, "the confirm's NO" end
+    local id = S.lastFocus
+    local g = id and W.ghosts[id]
+    if U.ok(g) and ghostShown(g) then return g, id end
+    return nil, nil
+end
+
+local function refocus(why)
+    local g, id = refocusTarget()
+    if g then pcall(function() g:SetFocus() end)
+    else U.try(TAG, focusFirst); id = "the first poster" end
+    S.refocused = S.refocused + 1
+    U.log(TAG, "P1's focus back on %s (%s) (AUTO-155)", tostring(id), tostring(why))
+end
+
+local function covered()
+    if St.menu.visible ~= "lobby" then return true end
+    local okB, pend = pcall(function() return U.mod("backprompt").pending() end)
+    if okB and pend == true then return true, "prompt" end
+    local okL, cov = pcall(function() return U.mod("lobby").isCovered() end)
+    if okL and cov == true then return true end
+    return false
+end
+
+local function keepFocus(now, any)
+    if any then S.lostMs = nil; return end
+    if covered() then S.lostMs = nil; return end
+    if not S.lostMs then S.lostMs = now; return end
+    if now - S.lostMs < FOCUS_LOST_MS or now - S.refocusMs < REFOCUS_EVERY_MS then return end
+    S.refocusMs = now
+    refocus("no poster held P1's focus")
+end
+M._keepFocus = keepFocus
+
+-- backprompt.lua, once the game's QUIT GAME? prompt that P1's B posted over this page is gone
+function M.onPromptAnswered()
+    if not S.active or not W then return false end
+    S.lostMs, S.refocusMs = nil, St.nowMs()
+    refocus("the game's QUIT GAME? prompt answered")
+    return true
 end
 
 ---------------------------------------------------------------------------------------------------- F02 confirm
@@ -389,17 +461,22 @@ local function paintModal(on)
     local T = U.mod("theme")
     local d = S.modal or {}
     local info = d.kind == "info"
+    local soloKind = d.kind == "solo"
     for _, e in ipairs({ m.dim, m.panel, m.title, m.body, m.foot }) do pcall(function() T.set(e, { visible = on }) end) end
     pcall(function() T.set(m.title, { text = d.title or "" }) end)
     pcall(function() T.set(m.body, { text = d.body or "" }) end)
-    pcall(function() T.set(m.foot, { text = info and "(A) OK   (B) BACK" or "(A) SELECT   (B) NO" }) end)
-    local yesOn, noOn = on and not info, on
-    pcall(function() T.set(m.btn.yes, { visible = yesOn }) end)
-    pcall(function() T.set(m.lbl.yes, { visible = yesOn, text = d.yes or "YES" }) end)
-    pcall(function() T.set(m.gh.yes, { visible = yesOn }) end)
-    local nr = info and BTN.ok or BTN.no
+    pcall(function()
+        T.set(m.foot, { text = info and "(A) OK   (B) BACK"
+            or (soloKind and "(A) SELECT   (B) ADD A SECOND PLAYER" or "(A) SELECT   (B) NO") })
+    end)
     local geo = W.geo
     local function LR(x, y, w, h) return { x - geo.x, y - geo.y, w, h } end
+    local yesOn, noOn = on and not info, on
+    local yr = soloKind and BTN_SOLO.yes or BTN.yes
+    pcall(function() T.set(m.btn.yes, { visible = yesOn, rect = LR(yr[1], yr[2], yr[3], yr[4]) }) end)
+    pcall(function() T.set(m.lbl.yes, { visible = yesOn, text = d.yes or "YES", rect = LR(yr[1] + yr[3] / 2, yr[2] + yr[4] / 2) }) end)
+    pcall(function() T.set(m.gh.yes, { visible = yesOn, rect = LR(yr[1], yr[2], yr[3], yr[4]) }) end)
+    local nr = info and BTN.ok or (soloKind and BTN_SOLO.no or BTN.no)
     pcall(function() T.set(m.btn.no, { visible = noOn, rect = LR(nr[1], nr[2], nr[3], nr[4]) }) end)
     pcall(function() T.set(m.lbl.no, { visible = noOn, text = info and "OK" or (d.no or "NO"),
                                        rect = LR(nr[1] + nr[3] / 2, nr[2] + nr[4] / 2) }) end)
@@ -425,12 +502,14 @@ local function closeModal(why, refocus)
     if not d then return false end
     S.modal = nil
     U.log(TAG, "confirm closed: %s (%s)", tostring(d.kind), tostring(why))
+    if d.kind == "solo" and why ~= "BACK TO MENU" then say(JOIN_HINT, false) end
     if W then
         paintModal(false)
         pageGhosts(true)
         if not W.acts then U.try(TAG, M.refresh) end          -- F01 page: CONTINUE stays hidden without a run
         if refocus ~= false then
             local back = d.from and W.ghosts[d.from]
+            if d.from then S.lastFocus = d.from end
             if U.ok(back) then pcall(function() back:SetFocus() end) else U.try(TAG, focusFirst) end
         end
     end
@@ -452,6 +531,7 @@ function M.open()
     if okM and type(lobby.setSetupMode) == "function" then U.try(TAG, lobby.setSetupMode, true) end
     S.active = true
     S.modal = nil
+    S.lastFocus, S.lostMs = nil, nil
     -- the pads join from here: no ADD PLAYERS confirm (this page IS the couch entry)
     pcall(function()
         local join = U.mod("join")
@@ -484,19 +564,33 @@ local function leaveFor(why)
     pcall(function() U.mod("join").close("couch campaign") end)
 end
 
+-- couch-fix70: no joined guest -> the one-player window instead of the couch run (solocamp.lua). -> true when it opened
+local function askSolo(kind, from, n)
+    local g = guestsJoined()
+    local okW, want = pcall(function() return solo().wanted(g) end)
+    if not (okW and want == true) then return false end
+    local okP, d = pcall(function() return solo().prompt(kind, from, n) end)
+    if not okP or type(d) ~= "table" then U.warn(TAG, "one-player window not built (%s): the couch run starts", tostring(d)); return false end
+    U.log(TAG, "%s with no joined guest: the one-player window (couch-fix70)", kind == "continue" and "CONTINUE" or "NEW RUN")
+    openModal(d)
+    return true
+end
+
 function M.onContinue()
-    if not S.active then return end
+    if not S.active or S.modal then return end
     if W and W.acts then
         local p = acts().readProgress()
         if p.inProgress ~= true then say("No run in progress: pick an act to start a new run."); return end
     end
+    if askSolo("continue", "cont", nil) then return end
     leaveFor("CONTINUE CAMPAIGN")
     campaignSelected("CONTINUE CAMPAIGN")
 end
 
 -- F01 page (CouchActPosters = false): the NEW CAMPAIGN poster
 function M.onNew()
-    if not S.active then return end
+    if not S.active or S.modal then return end
+    if askSolo("new", "new", nil) then return end
     local exists = runExists()
     leaveFor("START NEW CAMPAIGN")
     if exists then
@@ -530,6 +624,7 @@ function M.onAct(n)
     local st = A.states(p)[n]
     if not st then return end
     if not st.unlocked then say(st.reason); return end
+    if askSolo("new", "act" .. n, n) then return end
     if p.inProgress then
         local a = A.ACTS[n]
         openModal({ kind = "replay", n = n, from = "act" .. n, title = "START ACT " .. a.roman .. " AGAIN?",
@@ -549,6 +644,12 @@ function M.onModal(k)
     if k ~= "yes" or d.kind == "info" then closeModal(k == "yes" and "OK" or "NO"); return end
     if St.nowMs() - (d.openedMs or 0) < YES_GUARD_MS then
         U.log(TAG, "confirm: YES %d ms after it opened ignored (the opening press)", math.floor(St.nowMs() - (d.openedMs or 0)))
+        return
+    end
+    if d.kind == "solo" then
+        -- the page's own exit (P1's B on the page): nothing starts
+        closeModal("BACK TO MENU", false)
+        M.close("BACK TO MENU (one player)")
         return
     end
     closeModal("YES", false)
@@ -758,10 +859,18 @@ function M.fastTick()
             U.try(TAG, M.open)
         end
     end
-    if S.active then U.try(TAG, paintFocus) end
+    if S.active then
+        local okF, any = pcall(paintFocus)
+        if okF then U.try(TAG, keepFocus, now, any == true) end
+    end
     if S.active and now - S.lastSlotsMs > 300 then
         S.lastSlotsMs = now
         U.try(TAG, refreshSlots, false)
+        -- couch-fix70: a guest joined while the one-player window is up: it closes, the page stays (P1 presses again)
+        if S.modal and S.modal.kind == "solo" and guestsJoined() > 0 then
+            closeModal("a guest joined")
+            say("A second player joined: pick CONTINUE or an act again for the couch run.", false)
+        end
     end
 end
 

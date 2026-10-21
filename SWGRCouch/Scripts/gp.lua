@@ -723,8 +723,20 @@ function M.setupModeText(classes, aiCls)
 end
 
 ---------------------------------------------------------------------------------------------------- launch plumbing
+-- couch-fix63 (AUTO-154e, live round 8: the game's results screen named P1 "Yuval", the GP standings / podium "Player 1"):
+-- P1's name comes WITH his PlayerState - nametags.displayName's own rule: the slot's custom name, else his profile name
+-- (the one every game screen shows), "Player 1" only when neither is readable. Guests keep their slot names.
+local function p1PlayerState()
+    local ps = nil
+    pcall(function()
+        local pc = U.p1()
+        if U.ok(pc) then ps = pc.PlayerState end
+    end)
+    return U.ok(ps) and ps or nil
+end
 local function humanName(pnum)
-    local ok, n = pcall(function() return U.mod("nametags").displayName(pnum) end)
+    local ps = (tonumber(pnum) == 1) and p1PlayerState() or nil
+    local ok, n = pcall(function() return U.mod("nametags").displayName(pnum, ps) end)
     if ok and type(n) == "string" and n ~= "" then return n end
     return "P" .. tostring(pnum)
 end

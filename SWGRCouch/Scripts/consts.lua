@@ -9,7 +9,7 @@
 local C = {}
 
 C.MOD       = "SWGRCouch"
-C.VERSION = "1.0.0"
+C.VERSION = "1.0.1"
 C.TAB_ID    = "SWGR_SplitScreen"   -- FName of our CommonUI tab (not in DT_TabDescriptors)
 C.TAB_LABEL = "FREE MODE"     -- 0.11.0: was "SPLIT SCREEN" (the mod also races solo: any track, any vehicle, any settings)
 

@@ -346,18 +346,64 @@ local function couchSwap()
 end
 
 -- U.localPlayers() with each ctrlId = the ORIGINAL id while the couch swap is on (a copy; live ids otherwise).
+-- couch-fix65 (AUTO-159, live round 10 14:35:38): the ids a guest is known by never depend on the ids the PCs carry at
+-- the moment. A race world entered with the swap still on has NEW PlayerControllers (the swap record names the
+-- paddock's), P1's PC on the park id 6 and the screen owner on P1's id 0: the live ids made "no joined guest" (the
+-- owner on id 0 is no guest id, ids 1..3 had no PC) and the couch race ran as a race the mod did not launch. Ids left
+-- abnormal - a PC the swap record does not know, P1 off id 0, any PC on a park / hold / temporary id (>= PARK_ID) -
+-- are normalised here (couch.normalIds: P1 on 0, every other PC on its own id when free, else the lowest free one:
+-- the one id left over is the screen owner's own). Not during a garagenative turn (its own held ids).
+-- -> list, true when the ids were normalised
 local function localPlayersOrig()
     local lps = U.localPlayers()
     local c = couchSwap()
-    if not c then return lps end
-    local out = {}
-    for i = 1, #lps do
-        local e = lps[i]
-        local id = nil
-        pcall(function() id = c.originalIdOf(e.pc) end)
-        out[i] = { lp = e.lp, pc = e.pc, ctrlId = (type(id) == "number") and id or e.ctrlId, index = e.index }
+    local cm = package.loaded["couch"]
+    local out, unknown = lps, false
+    if c then
+        out = {}
+        for i = 1, #lps do
+            local e = lps[i]
+            local id = nil
+            pcall(function() id = c.originalIdOf(e.pc) end)
+            if type(id) ~= "number" and U.ok(e.pc) then unknown = true end
+            out[i] = { lp = e.lp, pc = e.pc, ctrlId = (type(id) == "number") and id or e.ctrlId, index = e.index }
+        end
     end
-    return out
+    if type(cm) ~= "table" or type(cm.normalIds) ~= "function" or #out < 2 then return out, false end
+    local park = tonumber(cm.PARK_ID) or 6
+    local abnormal = unknown
+    if not abnormal then
+        for i = 1, #out do
+            local id = out[i].ctrlId
+            if type(id) == "number" and (id >= park or (out[i].index == 1 and id ~= 0)) then abnormal = true end
+        end
+    end
+    if not abnormal then return out, false end
+    if type(cm.garageHeld) == "function" then
+        local okG, held = pcall(cm.garageHeld)
+        if okG and held == true then return out, false end
+    end
+    local p1Key, ids = nil, {}
+    for i = 1, #out do
+        local e = out[i]
+        if U.ok(e.pc) and type(e.ctrlId) == "number" then
+            local k = U.key(e.pc)
+            ids[k] = e.ctrlId
+            if e.index == 1 then p1Key = k end
+        end
+    end
+    if p1Key == nil then return out, false end
+    local okN, norm = pcall(cm.normalIds, ids, p1Key)
+    if not (okN and type(norm) == "table") then return out, false end
+    local res = {}
+    for i = 1, #out do
+        local e = out[i]
+        local id = U.ok(e.pc) and norm[U.key(e.pc)] or nil
+        res[i] = { lp = e.lp, pc = e.pc, ctrlId = (type(id) == "number") and id or e.ctrlId, index = e.index }
+    end
+    U.logEvery("join.idsnorm159", 5000, TAG, "AUTO-159 local players read by their own pad ids (the live ids are a "
+        .. "swap / park / hold left over: %s)", unknown and "a swap record of other PCs" or "P1 off id 0 or a park id")
+    return res, true
 end
 
 -- The guest's OWN PlayerController (his PlayerState, his car), whatever pad id it carries now.
@@ -367,15 +413,19 @@ local function pcFor(id, world)
         local okO, own = pcall(c.pcOfOriginalId, id)
         if okO and U.ok(own) then return own end
     end
+    -- couch-fix65 (AUTO-159): swapped, or ids left abnormal: the PC known by this original / normalised id
+    local lps, norm = localPlayersOrig()
+    if c or norm then
+        for i = 1, #lps do
+            local e = lps[i]
+            if e.index ~= 1 and e.ctrlId == id and U.ok(e.pc) then return e.pc end
+        end
+        return nil
+    end
     world = world or U.world()
     if not U.ok(world) then return nil end
     local pc = U.GS():GetPlayerControllerFromID(world, id)
     if not U.ok(pc) then return nil end
-    if c then
-        -- swapped and no PC was recorded with this original id: the live holder is someone else's PC
-        local okI, orig = pcall(c.originalIdOf, pc)
-        if okI and type(orig) == "number" and orig ~= id then return nil end
-    end
     return pc
 end
 
@@ -1789,6 +1839,15 @@ local function onRaceEnter(new, from)
     -- next race of a relisten / servertravel).
     if from == "BOOT" or from == "LEAVING" or from == "TRANSIT" or RACE_PHASES[from] then return end
     if St.race.launchedByUs == true or U.netMode() == "client" or St.net.wantConnected == true then return end
+    -- couch-fix65 (AUTO-159): no pad-id swap / park / map input hold reaches the race (a race entered straight from the
+    -- guest-owned overview showed no TRANSIT phase); couch.releaseIds is a no-op when the ids are normal. The decision
+    -- below reads the players by their own pads (localPlayersOrig), never by the ids they carry now.
+    pcall(function()
+        local cm = U.mod("couch")
+        if type(cm.releaseIds) == "function" then cm.releaseIds("race enter") end
+        if type(cm.activeForget) == "function" then cm.activeForget() end
+    end)
+    jlForget()
     local okC, couch = pcall(function() return U.mod("couch").active() end)
     if okC and couch == true then
         local dorm = M.dormantList()
@@ -1849,6 +1908,7 @@ local function onRaceEnter(new, from)
         .. "guest(s) removed, %d kept", tostring(from), tostring(new), handed, removed, kept)
     St.emit("players")
 end
+M._onRaceEnter = onRaceEnter             -- tests (tools/test_auto159.lua)
 
 -- Hot reload (Ctrl+F11): the joined ControllerIds survive in a UE4SS shared variable (strings only). Each token is
 -- the id followed by flag letters: L = leaving, D = pad disconnected, A = our Disconnect override is on its car

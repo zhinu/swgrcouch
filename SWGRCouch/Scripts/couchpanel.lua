@@ -152,6 +152,30 @@ local function text(outer, size, colour, fontPath, wrap)
     return t
 end
 local function setText(t, s) if U.ok(t) then pcall(function() t:SetText(U.ftext(s or "")) end) end end
+-- couch-fix63 (AUTO-154b, live round 8: "READY - WAITING FOR P1" and "... - WAITING FOR P1" cut at the panel / screen
+-- edge): the size (<= size) at which s fits maxW su, by theme.textWidth in role (a display role for FONT_DISPLAY, a
+-- body role for FONT_BODY), never below minSize. Pure.
+function M.fitSize(s, maxW, size, role, minSize)
+    size = tonumber(size) or 30
+    local w = nil
+    pcall(function() w = U.mod("theme").textWidth(s, role, size) end)
+    if not (w and maxW and maxW > 0 and w > maxW) then return size end
+    return math.max(tonumber(minSize) or 10, math.floor(size * maxW / w))
+end
+-- setText + the font size that fits maxW (SetFont only when the size changes: t's last size kept on the kit's table)
+M._fitSizes = setmetatable({}, { __mode = "k" })
+function M.setTextFit(t, s, maxW, size, fontPath, role, minSize)
+    if not U.ok(t) then return size end
+    local want = M.fitSize(s, maxW, size, role, minSize)
+    local fitSizes = M._fitSizes
+    if fitSizes[t] ~= want then
+        local f = font(fontPath or FONT_DISPLAY)
+        if f then pcall(function() t:SetFont({ FontObject = f, TypefaceFontName = U.fname("None"), Size = want }) end) end
+        fitSizes[t] = want
+    end
+    setText(t, s)
+    return want
+end
 local function setInk(t, c) if U.ok(t) then pcall(function() t:SetColorAndOpacity({ SpecifiedColor = lin(c), ColorUseRule = 0 }) end) end end
 
 local function solid(outer, colour)
@@ -587,16 +611,31 @@ end
 
 ---------------------------------------------------------------------------------------------------- offer rows -> card data
 local function arch() local ok, a = pcall(function() return CR().campaignArch() end); return ok and a or nil end
+-- couch-fix64 (AUTO-158b, live round 9 shot hibi-p2-packopen: P2 on a Skim Speeder, his UPGRADE PACK's first card drawn
+-- DRIFT "Stronger Drift ..." = P1's Landspeeder move, while the log offered and gave KNIFE EDGE +2): a card's class
+-- move follows HIS class (his couchrun record's arch, read only: never couchrun.ensure from a paint), P1's only when he
+-- has none
+function M.archOfP(P)
+    if P and P.ctrlId ~= nil then
+        local ok, a = pcall(function()
+            local p = CR().player(P.ctrlId)
+            return p and tonumber(p.arch) or nil
+        end)
+        if ok and a ~= nil and a ~= 1 then return a end
+    end
+    return arch()
+end
 
 -- -> { title, desc, large, icon, q (EGfnRarity), itype (1 upgrade, 2 ability, 3 modifier, 4 affix), level }
-local function rowInfo(row, lo)
+local function rowInfo(row, lo, guestArch)
     local k, id = row.rkind, row.id
     local out = { title = tostring(row.name or id or ""), desc = tostring(row.desc or ""), q = 0, itype = 2 }
     if not PD then return out end
     if k == "stat" then
         local st = PD.STATS and PD.STATS[id]
         local name = st and st.name or out.title
-        local a = arch()
+        local a = guestArch
+        if a == nil then a = arch() end
         if id == 5 and a and PD.ADVANCED and PD.ADVANCED[a] then name = PD.ADVANCED[a] end
         out.title, out.desc = name, st and (st.rich or st.desc) or ""
         if id == 5 and a and PD.ADVANCED_DESC and PD.ADVANCED_DESC[a] then out.desc = PD.ADVANCED_DESC[a] end
@@ -851,17 +890,26 @@ end
 -- panel's InitVehicleIcon reads VehicleArchetype too. The copy gets HIS class: the VehicleArchetype object of the
 -- game's own VEHICLE SELECT view model (ViewModelSubsystem:BuildVehicleSelectVM().Vehicles[i], VehicleSelectItemVM:
 -- VehicleArchetype / RawSpeed = the class' base speed for this account), else GfnGameInstance.VehicleList:
--- FindArchetype. His speed = his class' base + the run's level bonus at P1's rate per level (P1's VM RawSpeed minus
--- P1's class base, divided by P1's summed build levels; no levels on P1 = his class base). Pure: M.guestSpeed.
--- pure: -> raw speed for the guest. base2 / base1 = the classes' base speeds, raw1 = P1's VM speed, sum1 / sum2 = the
--- summed build levels of P1 / the guest
-function M.guestSpeed(base2, raw1, base1, sum1, sum2)
+-- FindArchetype.
+-- couch-fix66 (AUTO-162, live round 11 Derven Acos: P2's Speeder Bike read SPEED 726 next to P1's 363, growing every
+-- race 298 -> 328 -> 410 -> 524 -> 669 -> 726): his speed was his class base + P1's gain over P1's class base spread
+-- over P1's summed levels - P1's levels read from his VM's StatBars came out 2.0 (or 0.0) all run long, so P2's 15
+-- levels got P1's whole +57 x 7.5. His speed is HIS OWN now, the game's rule (research perks-loadout §1.4): the chip
+-- is the class base + the power-rating step of his PowerLevel (= the sum of his six part levels, 0..60:
+-- TNS_Upgrade_PowerRating_Max, top speed +150 at 60 for speeders, +250 for pods). One power level on the chip =
+-- M.SPEED_PER_LEVEL (4.1, read off P1's own live chip: 306 -> 310 -> 314 ... 347 at 10, 363 at 14, 383 at 19; the
+-- game truncates), pods x 250 / 150. P1's VM is never extrapolated (his parts / traits are his). Pure: M.guestSpeed.
+M.SPEED_PER_LEVEL = 4.1
+M.POD_SPEED_SCALE = 250 / 150
+M.POWER_LEVEL_MAX = 60
+-- pure: -> the chip speed of a class base + a power level (arch 1 = Plane: a pod), nil without a base
+function M.guestSpeed(base2, level2, arch2, perLevel)
     base2 = tonumber(base2)
     if not base2 then return nil end
-    raw1, base1, sum1, sum2 = tonumber(raw1), tonumber(base1), tonumber(sum1) or 0, tonumber(sum2) or 0
-    if not (raw1 and base1) or sum1 <= 0 then return math.floor(base2 + 0.5) end
-    local per = math.max(0, raw1 - base1) / sum1
-    return math.floor(base2 + per * sum2 + 0.5)
+    local pl = math.max(0, math.min(M.POWER_LEVEL_MAX, tonumber(level2) or 0))
+    local per = tonumber(perLevel) or M.SPEED_PER_LEVEL
+    if tonumber(arch2) == 1 then per = per * M.POD_SPEED_SCALE end
+    return math.floor(base2 + per * pl + 1e-6)
 end
 
 local selectCache = { atMs = -1e12, items = nil }
@@ -886,20 +934,7 @@ local function classItems()
     return out
 end
 
-local function levelSum(bars)
-    local sum = 0
-    for _, bar in ipairs(bars) do
-        pcall(function()
-            local mx = tonumber(bar.MaxValue) or LEVEL_MAX
-            if mx <= 0 then mx = LEVEL_MAX end
-            local k = (mx > LEVEL_MAX + 0.5) and (mx / LEVEL_MAX) or 1
-            sum = sum + (tonumber(bar.BaseValue) or tonumber(bar.Value) or 0) / k
-        end)
-    end
-    return sum
-end
-
--- his class + speed into a build VM copy (before reapplyBuild rewrites the bars: P1's levels are read first)
+-- his class + speed into a build VM copy (before reapplyBuild rewrites the bars)
 local function rewriteVehicle(P, bvm)
     local a2 = nil
     pcall(function() a2 = U.mod("couchrun").archOf(P.ctrlId, P.pnum) end)
@@ -913,14 +948,15 @@ local function rewriteVehicle(P, bvm)
     local va2 = it2 and it2.va or nil
     if not U.ok(va2) then pcall(function() va2 = U.mod("vehicles").archetypeObj({ arch = a2 }) end) end
     if U.ok(va2) and a1 ~= a2 then pcall(function() bvm.VehicleArchetype = va2 end) end
-    local bars = {}
-    pcall(function() bars = U.arrayToTable(bvm.StatBars) end)
-    local sum1 = levelSum(bars)
     local sum2 = 0
     for s = 0, 5 do sum2 = sum2 + (tonumber((P.lo and P.lo.tune or {})[s]) or 0) end
     local raw1, temp1 = nil, nil
     pcall(function() raw1 = tonumber(bvm.RawSpeed); temp1 = tonumber(bvm.TempSpeed) end)
-    local raw2 = M.guestSpeed(it2 and it2.raw, raw1, it1 and it1.raw, sum1, sum2)
+    local raw2 = M.guestSpeed(it2 and it2.raw, sum2, a2)
+    -- the rule checked on P1's own chip (his real PowerLevel: VehicleBuild.PowerLevel, never the StatBars): logged
+    local pl1 = nil
+    pcall(function() pl1 = tonumber(bvm.VehicleBuild.PowerLevel) end)
+    local p1Rule = (pl1 and it1) and M.guestSpeed(it1.raw, pl1, a1) or nil
     if raw2 then
         pcall(function()
             bvm.RawSpeed = raw2
@@ -928,9 +964,10 @@ local function rewriteVehicle(P, bvm)
             bvm.TempSpeed = (temp1 == nil or temp1 == 0) and (temp1 or 0) or raw2
         end)
     end
-    U.log(TAG, "P%s build copy: class %s -> %s (%s), speed %s -> %s (bases %s/%s, levels %s/%s)", tostring(P.pnum),
-        tostring(a1), tostring(a2), U.ok(va2) and "archetype set" or "archetype NOT found", tostring(raw1), tostring(raw2),
-        tostring(it1 and it1.raw), tostring(it2 and it2.raw), tostring(sum1), tostring(sum2))
+    U.log(TAG, "P%s build copy: class %s -> %s (%s), speed %s -> %s (his class base %s + power level %s; P1: base %s, "
+        .. "power level %s -> rule %s vs his chip %s)", tostring(P.pnum), tostring(a1), tostring(a2),
+        U.ok(va2) and "archetype set" or "archetype NOT found", tostring(raw1), tostring(raw2), tostring(it2 and it2.raw),
+        tostring(sum2), tostring(it1 and it1.raw), tostring(pl1), tostring(p1Rule), tostring(raw1))
     return U.ok(va2)
 end
 M.rewriteVehicle = rewriteVehicle
@@ -1025,9 +1062,39 @@ refreshShopBuild = function(P, row)
     if okP and p and p.lo then P.lo = p.lo end
     local okR, parts, afx = pcall(rewriteBuildVM, P, nv.bvm)
     pcall(function() nv.panel:Init(nv.bvm) end)
-    U.log(TAG, "P%s's installed parts refreshed after his buy: %s part(s), %s shown", tostring(P.pnum),
-        tostring(okR and #parts or "?"), tostring(okR and math.min(#parts, #afx) or "?"))
+    -- couch-fix64 (AUTO-158a, live round 9 shot hibi-p2-replaced: after PART SLOTS FULL put AFTERBURNER RECHARGER in
+    -- VOLATILE BATTERY's slot, his INSTALLED PARTS still listed VOLATILE BATTERY until the shop was rebuilt): the
+    -- panel's list keeps an entry widget per unchanged VM object (rewritten in place, same count), so Init redraws
+    -- nothing for a swap. Every displayed entry re-reads its VM, then his part icons go back on.
+    local nRe = M.repopulateAffixes(nv.panel)
+    pcall(paintBuildIcons, P)
+    local now = St.nowMs()
+    P.paintAt = P.paintAt or {}
+    P.paintAt[#P.paintAt + 1] = now + 200
+    U.log(TAG, "P%s's installed parts refreshed after his buy: %s part(s), %s shown, %d entr%s re-read", tostring(P.pnum),
+        tostring(okR and #parts or "?"), tostring(okR and math.min(#parts, #afx) or "?"), nRe, nRe == 1 and "y" or "ies")
     return okR
+end
+
+-- the INSTALLED PARTS entries (WBP_AppliedAffixPanel: LV / TV of WBP_AppliedAffixInfo) re-read their own VM -> count
+function M.repopulateAffixes(panel)
+    if not U.alive(panel) then return 0 end
+    local ap = nil
+    pcall(function() ap = panel.WBP_AppliedAffixPanel_Presentation end)
+    if not U.ok(ap) then return 0 end
+    local n = 0
+    for _, list in ipairs({ "LV_AppliedAffixes", "TV_AppliedAffixes" }) do
+        local es = {}
+        pcall(function() es = U.arrayToTable(ap[list]:GetDisplayedEntryWidgets()) end)
+        for _, w in ipairs(es) do
+            if U.ok(w) then
+                local vm = nil
+                pcall(function() vm = w.AppliedAffixVM end)
+                if U.ok(vm) and pcall(function() w:PopulateFromVM(vm) end) then n = n + 1 end
+            end
+        end
+    end
+    return n
 end
 M._refreshShopBuild = function(P, row) return refreshShopBuild(P, row) end
 
@@ -1141,7 +1208,7 @@ local function priceCard(P, w, row)
 end
 
 local function paintCard(P, w, row, first)
-    local info = rowInfo(row, P.lo)
+    local info = rowInfo(row, P.lo, M.archOfP(P))
     pcall(function() w.Txt_Title:SetText(U.ftext(info.title)) end)
     if info.itype ~= 1 then pcall(function() w.RTxt_ItemDesc:SetText(U.ftext(info.desc)) end) end
     pcall(function() w.WBP_ItemRarity:SetRarityLevel(info.q) end)
@@ -1433,7 +1500,7 @@ local function buildNative(H, P)
     for _, it in ipairs(items) do
         local t, pick = ntype(it), nil
         for j, r in ipairs(cardsRows) do
-            if not usedRow[j] and (t == nil or t == 0 or rowInfo(r, P.lo).itype == t) then pick = j; break end
+            if not usedRow[j] and (t == nil or t == 0 or rowInfo(r, P.lo, M.archOfP(P)).itype == t) then pick = j; break end
         end
         if not pick and t and t > 0 and not P.flowRound then
             -- no guest row of this card's type (his offer was made for another round shape): one of that type
@@ -1459,7 +1526,7 @@ local function buildNative(H, P)
     if U.arrayCount(vm.Items) ~= #cardsRows then error("item count mismatch after RemoveItem") end
     for i, r in ipairs(cardsRows) do
         local t = ntype(items[i])
-        writeItem(items[i], rowInfo(r, P.lo), (t and t > 0) and t or nil)   -- unknown native type: written as before
+        writeItem(items[i], rowInfo(r, P.lo, M.archOfP(P)), (t and t > 0) and t or nil)   -- unknown native type: written as before
     end
     pcall(function() vm.SkipCreditsAward = skip and math.floor(tonumber(skip.credits) or 0) or 0 end)
     pcall(function() vm.bIsAllowedToSkipRewardRound = skip ~= nil end)
@@ -1691,11 +1758,11 @@ end
 local function emptyPlace() return { rkind = "empty", id = "empty", name = "", bought = true } end
 
 -- the copy's shelf cards from card rows (types kept: BUG-12); a bought / empty place = the game's PURCHASED card
-local function shelfFill(items, cardRows, lo)
+local function shelfFill(items, cardRows, lo, guestArch)
     for i, it in ipairs(items or {}) do
         local r = cardRows[i]
         if r and not r.bought and r.rkind ~= "empty" then
-            writeItem(it, rowInfo(r, lo), true)                       -- keepType: the card stays an Affix (BUG-12)
+            writeItem(it, rowInfo(r, lo, guestArch), true)                       -- keepType: the card stays an Affix (BUG-12)
             pcall(function() it.CreditsValue = math.floor(tonumber(r.price) or 0) end)
             -- #73: the scrap dealer's sale shows the struck-through full price (CreditsValueNoDiscount), as P1's
             pcall(function() it.CreditsValueNoDiscount = math.floor(tonumber(r.fullPrice or r.price) or 0) end)
@@ -1753,7 +1820,7 @@ local function packOpen(P, choices, why)
     local nv = P.nv
     local cardRows = {}
     for i = 1, nv.nCards do cardRows[i] = choices[i] or emptyPlace() end
-    shelfFill(nv.items, cardRows, P.lo)
+    shelfFill(nv.items, cardRows, P.lo, M.archOfP(P))
     for i = 1, nv.nCards do P.rows[i] = cardRows[i] end
     shelfRepaint(P)
     setSel(P, 1)
@@ -1772,7 +1839,7 @@ local function packClose(P)
     end
     local nv = P.nv
     local cardRows = P.stockRows or {}
-    shelfFill(nv.items, cardRows, P.lo)
+    shelfFill(nv.items, cardRows, P.lo, M.archOfP(P))
     for i = 1, nv.nCards do P.rows[i] = cardRows[i] or emptyPlace() end
     shopControls(P)
     shelfRepaint(P)
@@ -1810,7 +1877,7 @@ local function buildNativeShop(H, P)
     -- stock fill the same places, the buttons after them keep their indices
     local cardRows = {}
     for i = 1, #items do cardRows[i] = stock[i] or emptyPlace() end
-    shelfFill(items, cardRows, P.lo)
+    shelfFill(items, cardRows, P.lo, M.archOfP(P))
     local rows = {}
     for _, r in ipairs(cardRows) do rows[#rows + 1] = r end
     leave = leave or { rkind = "leave", id = "leave", name = "LEAVE THE SHOP" }
@@ -1964,7 +2031,7 @@ local function restockNative(P, rows)
     if not (nv and nv.shop) then P.rows = rows; P.sel = 1; return end
     local cardRows = {}
     for i = 1, nv.nCards do cardRows[i] = stock[i] or emptyPlace() end
-    shelfFill(nv.items, cardRows, P.lo)
+    shelfFill(nv.items, cardRows, P.lo, M.archOfP(P))
     P.stockRows = cardRows
     local newRows = {}
     for i, r in ipairs(cardRows) do newRows[i] = r end
@@ -2351,7 +2418,7 @@ function V.buildVendorShop(H, P)
     end
     local cardRows = {}
     for i = 1, #items do cardRows[i] = stock[i] or emptyPlace() end
-    shelfFill(items, cardRows, P.lo)
+    shelfFill(items, cardRows, P.lo, M.archOfP(P))
     local rows = {}
     for _, r in ipairs(cardRows) do rows[#rows + 1] = r end
     leave = leave or { rkind = "leave", id = "leave", name = "BACK", sub = "" }
@@ -2574,9 +2641,15 @@ function V.buildVendorRepair(H, P)
         if U.ok(fr) then pcall(function() fr:HideFaultyDescription() end) end
         pcall(function() scr:RefreshCredits() end)
     end
+    -- couch-fix63 (AUTO-154d, live round 8 shot scrap-repair: two credit chips on top of each other): the repair page
+    -- has the game's header (WBP_Header_Presentation) with its own credits chip at the landing chip's place. That
+    -- chip is his (rewired, his P-tag inside), as on the shop page; vendorSwitch collapses the landing's top chip
+    local hchip = headerChip(scr, P)
+    ownInside(scr)
     local back = V.modalButton(gpc, "BACK")
     if back then pcall(function() back:BP_SetIsFocusable(false) end) end
     local cv = V.vendorMarks(H, P, ov)
+    if hchip then P.nv.chip, P.nv.topChip, P.nv.headerChip = hchip, nil, true end
     if back then
         pcall(place, cv, back, VW - 1000, 1800, 760, 150, 25)
         P.nv.back = back
@@ -3174,6 +3247,11 @@ local function close(why, relayout)
     -- U.alive first: a world change seen by this tick before phase's "world" event left a freed host (couchsim soak,
     -- paddock -> front end with a shop open), and a pcall does not catch the access violation of a call on it
     if S.H and U.alive(S.H.host) then pcall(function() S.H.host:RemoveFromParent() end) end
+    -- couch-fix63 (AUTO-153): Slate's default boundary back on P1's screen (a pooled CommonUI widget may live on)
+    if S.navFence ~= nil then
+        if U.alive(S.navFence) then pcall(function() S.navFence:SetAllNavigationRules(0, U.fname("None")) end) end
+        S.navFence = nil
+    end
     U.log(TAG, "panels closed (%s)", tostring(why))
     S.open, S.H, S.panels, S.native, S.nativeKey, S.own, S.buildTab, S.garageFree = false, nil, {}, nil, 0, {}, nil, nil
     S.vendorGoneAt = nil
@@ -3405,6 +3483,13 @@ local function open(kind, native, list, listOnly)
     end
     fillers(H, R, used)
     setNative(native)
+    -- couch-fix63 (AUTO-153): P1's backer contracts sit side by side in his shrunk screen; a D-pad move with nothing of
+    -- his that way (DOWN) let Slate's geometric search leave his screen and his A found no contract. While the split is
+    -- open his screen is a Stop navigation boundary (as couch-fix47's CouchPreRunNavBoundary), Escape again at the close.
+    if kind == "backer" and opt("CouchBackerNavBoundary", true) ~= false and U.alive(native) then
+        S.navFence = pcall(function() native:SetAllNavigationRules(3, U.fname("None")) end) and native or nil
+        if S.navFence then U.log(TAG, "backer split: P1's screen %s is a navigation boundary (AUTO-153)", U.className(native)) end
+    end
     if kind == "shop" or kind == "vendor" then U.try(TAG, V.armHold) end         -- #77: P1's leave waits for the guests
     local rt = root()
     if rt then U.try(TAG, rt.begin, "panel", S.n) end
@@ -3416,6 +3501,29 @@ local function open(kind, native, list, listOnly)
         table.concat(views, ", "), U.ok(S.native) and U.className(S.native) or "-")
     -- couch-fix46 (AUTO-120): the copies' own footers lose the engine's "[P1]" tags now, not at the next 5 s scan
     pcall(function() U.mod("couch").tagsSoon() end)
+    if kind == "backer" then V.backerFocusSoon(native) end
+end
+
+-- couch-fix69 (AUTO-164): P1's first backer card framed when the split opens (menubridge.sponsorFocusFirst: only while
+-- no card of his holds his pad's focus), again at +0.3 / +1 / +2.5 s (couchroot's move of his screen into his area and
+-- the swap's own refocuses come in those first seconds). cfg.CouchBackerFocusFirst = false: off.
+function V.backerFocusSoon(native)
+    if opt("CouchBackerFocusFirst", true) == false or not U.alive(native) then return end
+    local MB = package.loaded["menubridge"]
+    if not (type(MB) == "table" and type(MB.sponsorFocusFirst) == "function") then return end
+    local nk, gen = U.key(native), St.worldGen
+    local function step(why)
+        if not S.open or S.kind ~= "backer" or St.worldGen ~= gen or not U.ok(S.native) or U.key(S.native) ~= nk then
+            return
+        end
+        U.try(TAG, MB.sponsorFocusFirst, S.native, why)
+    end
+    step("split open")
+    local sched = package.loaded["sched"]
+    if not (type(sched) == "table" and type(sched.after) == "function") then return end
+    for _, ms in ipairs({ 300, 1000, 2500 }) do
+        sched.after("cp.backerfocus" .. ms, ms, function() step("+" .. ms .. " ms") end)
+    end
 end
 
 -- garage.lua: one step of the focused row (LEFT / RIGHT, A = the next option), RESET, DONE
@@ -3482,8 +3590,10 @@ function V.vendorSwitch(P, mode)
     end
     -- the game chip of the landing / repair pages: the shop page has its own (its header's)
     if P.vchip then
+        -- couch-fix63 (AUTO-154d): the repair page has its own header chip too (when it was found and rewired)
+        local own = P.view == "native" and (mode == "shop" or (mode == "repair" and P.nv and P.nv.headerChip == true))
         for _, w in ipairs(P.vchip.parts or {}) do
-            pcall(function() w:SetVisibility((mode == "shop" and P.view == "native") and VIS.Collapsed or VIS.HitTestInvisible) end)
+            pcall(function() w:SetVisibility(own and VIS.Collapsed or VIS.HitTestInvisible) end)
         end
     end
     if P.view == "list" then
@@ -3525,7 +3635,12 @@ function V.vendorAct(P, it)
         if U.alive(w) then
             pcall(function() w:OnActionSuccess() end)
             if U.ok(it.vm) then pcall(function() w:PopulateFromVM(it.vm) end) end
+            -- couch-fix63 (AUTO-154d, shot scrap-repaired: the part's icon an empty grey square): PopulateFromVM reads
+            -- the icon from the VM's affix config (not resolved on his fresh AppliedAffixVM): his part's own icon again
+            local d = PD and PD.PARTS and PD.PARTS[it.id]
+            if d then pcall(function() brush(w.WBP_Build_Affix_Presentation.Img_AffixIcon, d.icon) end) end
         end
+        P.paintAt = { now + 40, now + 300 }                 -- and repainted once its animation settled
         if U.alive(scr) then pcall(function() scr.WBP_FaultyAffixRepair:HideFaultyDescription() end) end
         V.repairDetail(P)
         local pp = CR().player(P.ctrlId)
@@ -3666,6 +3781,12 @@ function V.replaceClose(P)
         end
     end
     P.rp = nil
+    -- couch-fix64 (AUTO-158a, shots hibi-p2-replaced / hibi-p2-packopen: the choice's credits chip (6,000) stayed drawn
+    -- over Hibi's shop's own chip for the rest of the visit): the chip lives on the host canvas, not in the choice's
+    -- box. Only the scrap dealer's pages use it; anywhere else it goes with the choice (shown again by the next one)
+    if P.vchip and S.kind ~= "vendor" then
+        for _, w in ipairs(P.vchip.parts or {}) do pcall(function() w:SetVisibility(VIS.Collapsed) end) end
+    end
     if P.nv then P.nv.focusShown = nil end
     local now = St.nowMs()
     P.paintAt = { now + 40, now + 300 }
@@ -3843,6 +3964,7 @@ local function act(P)
             local w = target(P, P.sel)
             if w then pcall(function() w:ActionSucceeded() end); pcall(function() w:PopulateFromVM() end) end
             P.paintAt = { St.nowMs() + 40, St.nowMs() + 300 }
+            M.noteBuy(P, St.nowMs())                             -- AUTO-158c: his cursor stays, a quick 2nd A waits
             refreshShopBuild(P, it)
             reapplyBuild(P)
         elseif ok then
@@ -3935,6 +4057,31 @@ local function readPad(pc)
     return st
 end
 
+-- couch-fix64 (AUTO-158c, live round 9 Hibi's: after a part buy P2's focus jumped to the row-2 card, Right could not
+-- leave it (only empty places to its right) and a quick second A bought that card too). The bought card turns
+-- unavailable (PopulateFromVM) and the focus moved off it. A focus jump within BUY_HOLD_MS of the buy (the card's own
+-- disable, not his move: none with a D-pad / stick key down) is undone ONCE: his cursor stays on the card he bought (the
+-- PURCHASED card: an A there only says PURCHASED); an A within BUY_A_GUARD_MS of the buy is not a press (the same
+-- thumb's double tap).
+M.BUY_HOLD_MS, M.BUY_A_GUARD_MS = 350, 300
+M.DIR_KEYS = { "Gamepad_DPad_Left", "Gamepad_DPad_Right", "Gamepad_DPad_Up", "Gamepad_DPad_Down",
+               "Gamepad_LeftStick_Left", "Gamepad_LeftStick_Right", "Gamepad_LeftStick_Up", "Gamepad_LeftStick_Down" }
+function M.noteBuy(P, now)
+    P.selHold = { sel = P.sel, untilMs = now + M.BUY_HOLD_MS }
+    P.aGuardUntil = now + M.BUY_A_GUARD_MS
+    P.refocus = true
+end
+-- pure: the row his cursor shows after a buy -> sel to keep (nil = follow the focus read), moved = he moved it himself
+function M.buyHoldSel(P, now, focused, moved)
+    local h = P.selHold
+    if not h then return nil end
+    if now > h.untilMs or moved then P.selHold = nil; return nil end
+    if focused ~= nil and focused ~= h.sel then P.selHold = nil; return h.sel end      -- once
+    return nil
+end
+-- pure: an A edge now is swallowed (too soon after his buy)
+function M.buyAGuarded(P, now) return P.aGuardUntil ~= nil and now < P.aGuardUntil end
+
 local function panelTick(P, now)
     if P.broken or P.ownClosed then return end
     -- a SETTLED chip (the property swap did not stick): re-applied every tick, P1's Tick rewrites it when his credits move
@@ -3997,6 +4144,23 @@ local function panelTick(P, now)
         P.focusAt = now
         focused = P.sel
     end
+    if P.selHold then                                 -- AUTO-158c: the focus jump off his bought card is undone
+        local moved = false
+        if not padParked(P.ctrlId) then
+            for _, n in ipairs(M.DIR_KEYS) do
+                if U.mod("ui").keyDown(pc, n) then moved = true; break end
+            end
+        end
+        local keep = M.buyHoldSel(P, now, focused, moved)
+        if keep then
+            local b = P.btns and P.btns[keep]
+            if U.ok(b) then padSetFocus(b, P.ctrlId, pc) end
+            P.focusAt = now
+            U.dbg(TAG, "P%s: focus moved to row %s right after his buy: back on the card he bought (row %d)",
+                tostring(P.pnum), tostring(focused), keep)
+            focused = keep
+        end
+    end
     if focused and focused ~= P.sel then
         setSel(P, focused)
         if P.view ~= "native" or (P.nv and P.nv.mystery) then render(P) end     -- #112: the mystery reason line
@@ -4028,7 +4192,14 @@ local function panelTick(P, now)
         local b = P.btns[P.sel]
         if U.ok(b) then padSetFocus(b, P.ctrlId, pc) end
     end
-    if pressed and not P.prev.a then act(P) end
+    if pressed and not P.prev.a then
+        if M.buyAGuarded(P, now) then
+            U.log(TAG, "P%s's A %d ms after his buy ignored (a double tap, AUTO-158c)", tostring(P.pnum),
+                math.floor(now - (P.aGuardUntil - M.BUY_A_GUARD_MS)))
+        else
+            act(P)
+        end
+    end
     -- B leaves the shop. couch-fix48 (live round 2 AUTO-125, 13:45:3x: P2's B twice in his Hibi's copy, nothing; his
     -- LEAVE row worked): the pad ids were SWAPPED and PARKED (the shop screen is the last local PC's = P2's: P1's pad
     -- drives it, P1's PC waits on the spare id), so no PlayerInput reads P2's pad and the B read below was skipped. His
@@ -4547,6 +4718,69 @@ function V.release(why)
     end
     U.log(TAG, "#77 the stop closes (%s): the screen's own BackToPreviousState %s", tostring(why), ok and "ran"
         or "FAILED (P1's next B leaves)")
+    if ok then V.afterRel = { atMs = St.nowMs(), cls = U.className(nat), n = 0, lastMs = -1e12, why = tostring(why) } end
+end
+
+-- couch-fix64 (AUTO-157, live round 9 12:11:27): P2's B released P1's held leave of Hibi's shop, "the stop closes ...
+-- BackToPreviousState ran", "panels closed (native screen closed)" - and 1.9 s later a NEW shop screen was up (new
+-- WBP_Item_Btn_C, "5 new top-level screen(s)" without the paddock HUD), P2's area reopened, and a second round of B
+-- (P2, then P1's own game back) was needed. One BackToPreviousState stepped back to an earlier shop state of the
+-- front-end CSM (P1 had bought there: the game's own leave does not stop on it, ours did). Now, for COMEBACK_MS after a
+-- release, the same stop screen coming back before any paddock HUD is the same leave: it is left again (at most
+-- COMEBACK_TRIES times, COMEBACK_GAP_MS apart), the guests' areas do not reopen. A paddock HUD in between = the stop was
+-- really left (a later visit opens normally).
+V.COMEBACK_MS, V.COMEBACK_TRIES, V.COMEBACK_GAP_MS = 3500, 3, 700
+V.PADDOCK_HUD = "WBP_Paddock_HUD_C"
+-- pure: what to do with a stop screen seen now after a release -> "leave" | "wait" | nil (open normally) ; rel cleared
+-- by the caller on nil. screen = the leaving screen of rel.cls is up; hud = the paddock HUD is up
+function M.comebackAction(rel, now, screen, hud)
+    if not rel then return nil end
+    if hud or now - rel.atMs > V.COMEBACK_MS or rel.n >= V.COMEBACK_TRIES then return nil end
+    if not screen then return "wait" end
+    if now - rel.lastMs < V.COMEBACK_GAP_MS then return "wait" end
+    return "leave"
+end
+
+-- no stop on screen after a release: the paddock HUD up = the stop was really left (a later visit opens normally)
+function V.comebackHud(now)
+    local rel = V.afterRel
+    if not rel then return end
+    if now - rel.atMs > V.COMEBACK_MS then V.afterRel = nil; return end
+    local okA, list = pcall(function() return U.mod("couch").activeScreens() end)
+    if not (okA and type(list) == "table") then return end
+    for _, e in ipairs(list) do
+        if e.cls == V.PADDOCK_HUD then V.afterRel = nil; return end
+    end
+end
+
+-- the scan saw a stop again: true = handled here (no split opens this tick)
+function V.comebackTick(now)
+    local rel = V.afterRel
+    if not rel then return false end
+    local screen, hud = nil, false
+    local okA, list = pcall(function() return U.mod("couch").activeScreens() end)
+    if okA and type(list) == "table" then
+        for _, e in ipairs(list) do
+            if e.cls == V.PADDOCK_HUD then hud = true end
+            if e.cls == rel.cls and U.alive(e.w) then screen = e.w end
+        end
+    end
+    local a = M.comebackAction(rel, now, screen, hud)
+    if a == nil then
+        V.afterRel = nil
+        if rel.n >= V.COMEBACK_TRIES and not hud then
+            U.warn(TAG, "AUTO-157 %s still up after %d extra leave(s): the split opens again (P1's B leaves)", rel.cls, rel.n)
+        end
+        return false
+    end
+    if a == "wait" then return true end
+    rel.n, rel.lastMs = rel.n + 1, now
+    U.try(TAG, M.stopNodeComplete, screen, "AUTO-157 comeback")
+    local ok = pcall(function() screen:BackToPreviousState() end)
+    U.log(TAG, "AUTO-157 %s came back %d ms after the release (%s): left again (BackToPreviousState %s, try %d of %d); "
+        .. "the guests' areas stay closed", rel.cls, math.floor(now - rel.atMs), rel.why, ok and "ran" or "FAILED", rel.n,
+        V.COMEBACK_TRIES)
+    return true
 end
 
 function V.cancel(why)
@@ -4750,12 +4984,62 @@ function V.mapRelease(why, forced)
     pcall(function() U.mod("couch").mapInputHold(false, tostring(why)) end)
     local nb = V.mapNodesRelease(h)
     if nb > 0 then U.log(TAG, "fix51: %d run map node button(s) enabled again", nb) end
+    -- couch-fix66 (AUTO-161): read by couch.lua's node pick breadcrumb (the last line before the native pick)
+    V.lastHold = { at = St.nowMs(), gen = St.worldGen, maps = n, buttons = nb, inputHeld = h.inputHeld == true,
+                   forced = forced == true }
     if V.noteShown and tostring(V.noteShown):find("HOLD B TO LEAVE", 1, true) then V.p1Note(nil) end
     if forced then h.forced = true else S.mapHold = nil end
     U.log(TAG, "fix32: the run map is P1's again (%s): %d map screen(s) enabled%s", tostring(why), n,
         forced and " - the guests' open rounds are booked when the post-race ends" or "")
+    -- couch-fix69 (AUTO-165): P1's pad focus back on a node of the run map once the split has closed (menubridge)
+    if opt("CouchMapHoldEndRefocus", true) ~= false then
+        local MB = package.loaded["menubridge"]
+        if type(MB) == "table" and type(MB.mapNodeFocusSoon) == "function" then U.try(TAG, MB.mapNodeFocusSoon, why) end
+    end
 end
-function V.mapHoldTick(now)
+V.HOLD_GRACE_MS = 1000
+-- couch-fix68 (AUTO-163, live round 12 17:08:14.847): P1's A on his LAST reward screen brought the run map up and
+-- picked a node 54 ms before the hold started; the travel closed P2's open UPGRADES round (skip credits). The map is a
+-- PAGE of the post-race holder (CSM_RF_Results_Campaign_PickNextEvent shows WBP_RunMap_Presentation in the holder's
+-- WS_ScreenSwitcher) and P1's Rewards_Layout stays activated under it, so nothing left couch.lua's screen list: the
+-- cached list only saw the map once the pick's own state change marked it dirty (the hold then came at once). P1's
+-- press (150 ms) brought the map, its release clicked the focused node. Now the hold does not wait for the screen
+-- list: every FAST tick of an open reward split with a guest still choosing reads the holder's switcher page itself
+-- (V.holderMapPage: the cached holder, one property, GetActiveWidget), and every CosmeticStateMachine state change of
+-- the post-race arms it inside the hook (M.csmChanged, couch.lua), before the next input event can reach the map.
+-- cfg.CouchMapHoldEarly = false: the hold starts when the screen list shows the map (couch-fix66).
+-- inHook = true (M.csmChanged): no screen scan inside the native hook (the list is dirty there): the holder the last
+-- FAST tick found, in this world, alive
+V.holderPage = { key = 0, cls = "" }
+function V.holderMapPage(inHook)
+    local holder = nil
+    local hk = V.holderW
+    if hk and hk.gen == St.worldGen and U.alive(hk.w) then holder = hk.w end
+    if not inHook then
+        holder = nil
+        local okA, list = pcall(function() return U.mod("couch").activeScreens() end)
+        if okA and type(list) == "table" then
+            for _, e in ipairs(list) do
+                if e.cls == HOLDER_CLS and not S.own[U.key(e.w)] and U.alive(e.w) then holder = e.w; break end
+            end
+        end
+        V.holderW = holder and { w = holder, gen = St.worldGen } or nil
+    end
+    if not holder then return nil end
+    local page = nil
+    pcall(function()
+        local sw = holder.WS_ScreenSwitcher
+        if U.ok(sw) then page = sw:GetActiveWidget() end
+    end)
+    if not (U.ok(page) and U.alive(page)) then return nil end
+    local k = U.key(page)
+    if k ~= V.holderPage.key then V.holderPage = { key = k, cls = tostring(U.className(page)) } end
+    for _, pat in ipairs(MAP_MATCH) do
+        if V.holderPage.cls:find(pat, 1, true) then return page end
+    end
+    return nil
+end
+function V.mapHoldTick(now, via)
     if S.kind ~= "reward" or S.debug or opt("CouchRewardWaitGuests", true) == false then return end
     local h = S.mapHold
     if h and h.forced then return end
@@ -4764,28 +5048,70 @@ function V.mapHoldTick(now)
         if h then V.mapRelease("every guest finished his rewards") end
         return
     end
-    local maps = V.mapScreensUp()
+    local inHook = via ~= nil
+    local maps = inHook and {} or V.mapScreensUp()
+    local early = nil
+    if #maps == 0 and not h and opt("CouchMapHoldEarly", true) ~= false then
+        -- couch-fix68: the holder's own page (the screen list may not show the map yet)
+        early = V.holderMapPage(inHook)
+        if early then
+            maps = { early }
+            pcall(function() U.mod("couch").markDirty("fix68 run map page") end)
+        end
+    end
     if #maps == 0 and not h then return end
     if not h then
-        h = { at = now, ws = {}, downAt = nil }
+        h = { at = now, ws = {}, downAt = nil, early = early ~= nil }
         S.mapHold = h
         U.log(TAG, "fix32: P1 is on the run map with %s still choosing rewards: the map waits (his node pick held; P1 "
             .. "holds B %d s to leave anyway)", table.concat(wt, ", "),
             math.floor((tonumber(opt("CouchStopForceMs", 2000)) or 2000) / 1000))
-    end
-    for _, w in ipairs(maps) do
-        local k = U.key(w)
-        if not h.ws[k] then
-            h.ws[k] = w
-            local ok = pcall(function() w:SetIsEnabled(false) end)
-            U.log(TAG, "fix32: %s disabled until the guests are done%s", tostring(U.className(w)), ok and "" or " (FAILED)")
+        if early then
+            U.log(TAG, "fix68: the run map is the post-race holder's page (%s, %s) before the screen list shows it: "
+                .. "the hold starts now, before P1's input reaches it (AUTO-163)", V.holderPage.cls,
+                tostring(via or "tick"))
         end
     end
-    U.try(TAG, V.mapNodesHold, h, now)                         -- fix51: the node buttons themselves
     -- couch-fix53: P1's pad off the screen owner's CommonUI router (the path that picked / travelled through fix51)
+    local inputHeld = false
     if opt("CouchMapInputHold", true) ~= false then
-        U.try(TAG, function() U.mod("couch").mapInputHold(true, "P1's run map held for " .. table.concat(wt, ", ")) end)
+        U.try(TAG, function()
+            inputHeld = U.mod("couch").mapInputHold(true, "P1's run map held for " .. table.concat(wt, ", ")) == true
+        end)
     end
+    -- couch-fix66 (AUTO-161): with the input hold in place the live map and its node buttons are never written. Both
+    -- post-race vanishes since fix53 (AUTO-141 round 4, AUTO-161 round 11) were picks on a run map that had been held
+    -- (2 of 28 held-map picks, 0 of 123 others, every round-1..11 log): that map lived through fix32's SetIsEnabled
+    -- false / true and fix51's 138+ node button toggles (re-scanned every 100 ms) while it was the active screen, and
+    -- P1 picked on it 4-7 s after the release. Those writes block nothing the input hold leaves open (AUTO-131: the
+    -- router path ignores them; the Slate path is P1's user 0 on the sink), so they are only the fallback now: no input
+    -- hold (cfg.CouchMapInputHold = false, ids not swapped) = fix32 + fix51 as before. The paddock-map pick that ran
+    -- fine after CONTINUE was on a map built after its hold (the hold was on the planet overview).
+    -- the swap of a guest-owned screen can come a tick after the map: the input hold gets V.HOLD_GRACE_MS to start
+    -- before the fallback writes the map (the live order: ids swapped at the reward screens, the hold at once)
+    local grace = not inputHeld and opt("CouchMapInputHold", true) ~= false and now - (h.at or now) < V.HOLD_GRACE_MS
+    if not inputHeld and not grace then
+        for _, w in ipairs(maps) do
+            local k = U.key(w)
+            if not h.ws[k] then
+                h.ws[k] = w
+                local ok = pcall(function() w:SetIsEnabled(false) end)
+                U.log(TAG, "fix32: %s disabled until the guests are done%s", tostring(U.className(w)), ok and "" or " (FAILED)")
+            end
+        end
+        U.try(TAG, V.mapNodesHold, h, now)                     -- fix51: the node buttons themselves
+    elseif inputHeld and not h.mixedSaid and (next(h.ws) ~= nil or (h.nodes and next(h.nodes) ~= nil)) then
+        -- the fallback ran before the input hold could start (ids not swapped yet): those writes stay until the release
+        h.mixedSaid = true
+        U.log(TAG, "fix66: the input hold came after fix32 / fix51 had disabled the map: those stay until the release")
+    end
+    if inputHeld and not h.inputSaid then
+        h.inputSaid = true
+        U.log(TAG, "fix66: map held by the input hold alone (%d map screen(s)): the map and its node buttons are not "
+            .. "written (no fix32 / fix51 toggles on the live map)", #maps)
+    end
+    h.inputHeld = inputHeld or h.inputHeld
+    if inHook then return end                                   -- fix68: the note / B hold on the next FAST tick
     local note = "WAITING FOR " .. table.concat(wt, ", ") .. " - HOLD B TO LEAVE"
     if V.noteShown ~= note then V.p1Note(note) end
     local bDown = V.p1Keys()
@@ -4794,9 +5120,37 @@ function V.mapHoldTick(now)
         V.mapRelease("P1 held B: leaves the rewards now", true)
     end
 end
+-- couch-fix68 (AUTO-163): couch.lua's CosmeticStateMachine post-hooks (POSTRACE): the map's state was just entered -
+-- the hold starts inside the hook, before the next input event (the release of the press that left the rewards)
+function M.csmChanged(fn)
+    if not (S.open and S.kind == "reward") or S.debug or S.mapHold then return end
+    if opt("CouchMapHoldEarly", true) == false or opt("CouchRewardWaitGuests", true) == false then return end
+    local okQ, q = pcall(function() return U.mod("couch").isQuiet() end)
+    if okQ and q == true then return end
+    if #V.choosing() == 0 then return end
+    U.try(TAG, V.mapHoldTick, St.nowMs(), "state change " .. tostring(fn))
+end
+-- couch-fix68 (AUTO-163): couch.lua's ChooseNextMapNode pre-hook. A pick on the RACE world while a guest still has
+-- open reward stages and no hold is in place cannot be vetoed (UE4SS 3.0): said loudly, with the timing, for the next
+-- test. -> the warning text or nil
+function M.pickWhileChoosing()
+    if not (S.open and S.kind == "reward") or S.debug then return nil end
+    local wt = V.choosing()
+    if #wt == 0 or M.mapHeld() or (S.mapHold and S.mapHold.forced) then return nil end   -- held / P1's forced leave
+    local page = nil
+    pcall(function() page = V.holderMapPage(true) end)
+    local lh = V.lastHold
+    return string.format("AUTO-163: a node pick while %s still choose(s) rewards and the run map is NOT held (map "
+        .. "page %s, last hold %s): the guest's open stages become skip credits",
+        table.concat(wt, ", "), page and V.holderPage.cls or "not the holder's page",
+        (lh and lh.gen == St.worldGen) and string.format("released %d ms ago", math.floor(St.nowMs() - (lh.at or 0)))
+        or "none this post-race")
+end
 -- menubridge: P1's node pick / planet accept on the run map is held now
 function M.mapHeld() local h = S.mapHold; return S.open == true and h ~= nil and not h.forced end
 function M.mapHoldState() local h = S.mapHold; return h and { at = h.at, forced = h.forced, note = V.noteShown } or nil end
+-- couch-fix66: the last released map hold -> { at (ms), maps / buttons re-enabled, inputHeld, forced } or nil
+function M.lastMapHold() return V.lastHold end
 
 -- the player menu showing its build page, else nil
 local function buildPage()
@@ -5520,6 +5874,13 @@ function M.fastTick()
         end
         if not myst then S.mystVisited, S.mystInter, S.mystSeenKey, S.mystSeenAt = nil, nil, nil, nil end
         local shop = findNative(SHOP_MATCH)
+        if V.afterRel then                                                                      -- AUTO-157
+            if shop and not S.shopVisited then
+                if V.comebackTick(now) then return end
+            else
+                U.try(TAG, V.comebackHud, now)
+            end
+        end
         local ready, listOnly = true, false
         if shop and not S.shopVisited then ready, listOnly = shopReady(shop, now) end
         if shop and not S.shopVisited and ready then
@@ -5797,6 +6158,7 @@ end
 -- panel looks and reads the guest's pad the same way.
 M.kit = {
     mk = mk, lin = lin, show = show, place = place, text = text, setText = setText, setInk = setInk, solid = solid,
+    fitSize = M.fitSize, setTextFit = M.setTextFit,
     texOf = texOf, groupDigits = groupDigits, pillImage = pillImage, tagInto = tagInto, chipAt = chipAt, chipRewire = chipRewire, chipFeed = chipFeed, CHIP_CLS = CHIP_CLS,
     padPC = padPC, padHasFocus = padHasFocus, padSetFocus = padSetFocus, padParked = padParked, IMAGE = IMAGE, BUTTON = { "/Script/UMG.Button" }, VIS = VIS, VW = VW, VH = VH,
     SCALE = SCALE, SIZEB = SIZEB, OVER = OVER, PAPER_TEX = PAPER_TEX, own = own, paperCover = paperCover,

@@ -1565,6 +1565,10 @@ local function lobbyCovered()
   return false, nil
 end
 
+-- couch-fix64: the last covered reading of the lobby's poll (couchpage's focus keeper never steals focus from a screen
+-- over the menu)
+function lobby.isCovered() return nav.covered == true end
+
 -- Updates nav.covered (edges logged); on uncover the next poll re-primes (a held A does not fire) and the Back
 -- guard is cleared (the screen it may have opened was seen and closed).
 local function checkCovered()

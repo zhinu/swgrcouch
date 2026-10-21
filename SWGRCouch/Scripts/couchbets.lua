@@ -366,7 +366,8 @@ local function buildBar(H, P, fx, fy, fw, fh)
     local k = kit()
     local s = chipScale(fh)
     local bh = math.floor(72 * s + 0.5)
-    local B = { s = s, h = bh, right = math.floor(fx + fw - 32 * s), y = math.floor(fy + fh - 32 * s - bh) }
+    local B = { s = s, h = bh, right = math.floor(fx + fw - 32 * s), y = math.floor(fy + fh - 32 * s - bh),
+                left = math.floor(fx + 32 * s) }                -- couch-fix63 (AUTO-154b): the bar stays inside his frame
     B.back = k.pillImage(H.tree, "/Game/Griffin/UI/Library/Materials/Common/MI_UI_Pill_FE_Section_CurrencyBacker.MI_UI_Pill_FE_Section_CurrencyBacker",
         { R = 0.0065, G = 0.0065, B = 0.0065, A = 0.9 })
     B.backSlot = k.place(H.cv, B.back, B.right - 400, B.y, 400, bh, 40)
@@ -407,10 +408,12 @@ local function buildBar(H, P, fx, fy, fw, fh)
 end
 
 -- the bar's items right-aligned (text widths from theme.textWidth: Overpass ~ Font_Body)
+-- couch-fix63 (AUTO-154b): x 1.1 - the estimate is the Medium Italic table, the bar's labels are Font_Body's default face
+-- (live shot 130548: the text ran ~10 % past the backer the estimate sized)
 local function textW(t, size)
     local w = #t * size * 0.5
     pcall(function() w = U.mod("theme").textWidth(t, "posterDesc", size) end)
-    return w
+    return w * 1.1
 end
 local function layoutBar(P, items)
     local k, B = kit(), P.bar
@@ -423,10 +426,33 @@ local function layoutBar(P, items)
         if it.glyph and (B.noGlyph or not U.ok(B.g1)) then seq[#seq + 1] = { text = "A" }   -- no texture: the letter
         else seq[#seq + 1] = it end
     end
-    local total = padX * 2
-    for i, it in ipairs(seq) do
-        it.w = it.glyph and gw or textW(it.text, size)
-        total = total + it.w + ((i > 1) and (it.glyph and gap * 3 or gap) or 0)
+    local function measure()
+        local t = padX * 2
+        for i, it in ipairs(seq) do
+            it.w = it.glyph and gw or textW(it.text, size)
+            t = t + it.w + ((i > 1) and (it.glyph and gap * 3 or gap) or 0)
+        end
+        return t
+    end
+    local total = measure()
+    -- couch-fix63 (AUTO-154b, live round 8 shot 130548: "CHALLENGE Soren Zaks -600 CR - CHALLENGED Soren Zaks - WAITING
+    -- FOR P1" ran past his frame's left and the screen's right edge): a bar wider than his frame gets a smaller text
+    local avail = (B.left and (B.right - B.left)) or nil
+    if avail and total > avail then
+        local fixed = total
+        for _, it in ipairs(seq) do if not it.glyph then fixed = fixed - it.w end end
+        local textTotal = total - fixed
+        if textTotal > 0 then
+            size = math.max(math.floor(16 * s), math.floor(size * (avail - fixed) / textTotal))
+            total = measure()
+        end
+    end
+    if B.textSize ~= size then
+        for _, key in ipairs({ "t1", "t2", "t3", "t4", "note" }) do
+            local t = B[key]
+            if t then pcall(function() k.setTextFit(t, "", nil, size, k.FONT_BODY, "posterDesc") end) end
+        end
+        B.textSize = size
     end
     local x = B.right - total + padX
     pcall(function() B.backSlot:SetPosition({ X = B.right - total, Y = B.y }); B.backSlot:SetSize({ X = total, Y = B.h }) end)
@@ -493,7 +519,9 @@ local function render(P)
     local now = St.nowMs()
     local toast = (P.toast and now < (P.toastUntil or 0)) and P.toast or nil
     if P.done then
-        layoutBar(P, { { note = true, text = (toast and (toast .. "  -  ") or "") .. (P.note or "WAITING FOR P1") } })
+        -- couch-fix63 (AUTO-154b): the pick's own toast ("CHALLENGE Soren Zaks -600 CR") said the same as his note
+        -- ("CHALLENGED Soren Zaks - WAITING FOR P1") on one line: the note alone
+        layoutBar(P, { { note = true, text = P.note or "WAITING FOR P1" } })
     elseif toast then
         layoutBar(P, { { note = true, text = toast } })
     else

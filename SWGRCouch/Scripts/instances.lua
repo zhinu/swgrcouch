@@ -1377,6 +1377,75 @@ local function bossOutroTick(now)
 end
 M._bossOutroTick = function(now) if race then return bossOutroTick(now or St.nowMs()) end end
 
+-- couch-fix64 (AUTO-158g, live round 9 12:56:51, shot champ2-post: the boss race's shared RESULTS read 01 Shade (P1),
+-- 01 Goli (P2), 02 Kestar, 04 Kestar - no 03). The table's rows are WBP_Results_Simple_Entry_Presentation (Txt_Position
+-- = its EntryData.EventPosition, the GLOBAL place of one shared grid) while P1's booking was repaired to the team's win
+-- (couchrules: EventPosition 3 -> 1): the gap is the repaired place. The numbers on the rows are made a dense ranking of
+-- what the table shows (equal places stay equal, no gap: 01 01 02 03); nothing booked changes (display only).
+-- pure: the places as shown -> the dense ranking (nil entries kept nil)
+function M.denseRanks(places)
+    local distinct, seen = {}, {}
+    for _, p in pairs(places) do
+        local n = tonumber(p)
+        if n and not seen[n] then seen[n] = true; distinct[#distinct + 1] = n end
+    end
+    table.sort(distinct)
+    local rank = {}
+    for i, n in ipairs(distinct) do rank[n] = i end
+    local out = {}
+    for i, p in pairs(places) do out[i] = tonumber(p) and rank[tonumber(p)] or nil end
+    return out
+end
+-- pure: a rank in the row's own number format ("01" when the game wrote two digits)
+function M.placeText(rank, cur)
+    if type(cur) == "string" and cur:match("^0%d$") then return string.format("%02d", rank) end
+    return tostring(rank)
+end
+
+local RESULT_ROW = "WBP_Results_Simple_Entry_Presentation_C"
+local function bossResultsTick(now)
+    if now - (race.rowsAt or -1e12) < 250 then return end
+    race.rowsAt = now
+    local ok, list = pcall(FindAllOf, RESULT_ROW)
+    if not (ok and type(list) == "table") then return end
+    local rows, places = {}, {}
+    for _, w in ipairs(list) do
+        if U.alive(w) then
+            local vis, pos = false, nil
+            pcall(function() vis = w:IsVisible() == true end)
+            pcall(function() pos = tonumber(w.EntryData.EventPosition) end)
+            if vis and pos then rows[#rows + 1] = w; places[#rows] = pos end
+        end
+    end
+    if #rows < 2 then return end
+    local ranks = M.denseRanks(places)
+    local changed = 0
+    for i, w in ipairs(rows) do
+        if ranks[i] and ranks[i] ~= places[i] then
+            for _, f in ipairs({ "Txt_Position", "Txt_Position_Event" }) do
+                pcall(function()
+                    local t = w[f]
+                    if not U.ok(t) then return end
+                    local cur = U.str(t:GetText())
+                    local want = M.placeText(ranks[i], cur)
+                    if cur ~= want then t:SetText(U.ftext(want)); changed = changed + 1 end
+                end)
+            end
+        end
+    end
+    if changed > 0 and not race.rowsLogged then
+        race.rowsLogged = true
+        local a, b = {}, {}
+        for i = 1, #rows do a[i], b[i] = tostring(places[i]), tostring(ranks[i]) end
+        U.log(TAG, "boss results: the shared table's places %s shown as %s (P1's repaired team win left a gap) (AUTO-158g)",
+            table.concat(a, " "), table.concat(b, " "))
+    end
+end
+M._bossResultsTick = function(now) if race then return bossResultsTick(now or St.nowMs()) end end
+
+-- a boss race raced as copies in this world (its outro is patched here, not hidden by present.lua)
+function M.bossRace() return plan ~= nil and plan.kind == "boss" and race ~= nil and race.gen == St.worldGen end
+
 -- FAST (race): channels, leaving players, views, hazards
 -- couch-fix60 (AUTO-146): instance work only while the race world runs its race (PRERACE / RACING; POSTRACE = the
 -- boss outro): never in LOADING / LEAVING / TRANSIT (main.lua's phase.fastWorldCheck leaves the race first)
@@ -1390,7 +1459,12 @@ function M.fastTick()
     U.try(TAG, M.viewTick, now)
     U.try(TAG, M.hazTick, now)
     if plan and plan.kind == "boss" then
-        if St.phase == "POSTRACE" then U.try(TAG, bossOutroTick, now) else U.try(TAG, bossPaceTick, now) end
+        if St.phase == "POSTRACE" then
+            U.try(TAG, bossOutroTick, now)
+            U.try(TAG, bossResultsTick, now)
+        else
+            U.try(TAG, bossPaceTick, now)
+        end
     end
 end
 
