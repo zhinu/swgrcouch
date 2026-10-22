@@ -36,6 +36,7 @@ INSTALL
 
   Check: Griffin\Binaries\Win64\ue4ss\UE4SS.log shows "SWGRCouch @VERSION@ loading" and, at the latest once
   the COUCH CAMPAIGN page opens or a second pad joins, "native filter loaded: installed=1 reason=ok".
+  "installed=0 reason=mismatch" there = a game update this SWGRCouch does not know: get the newest one.
 
 WHAT THIS ZIP WRITES
   (the ue4ss\... paths below are under Griffin\Binaries\Win64\)
@@ -43,7 +44,8 @@ WHAT THIS ZIP WRITES
   - ue4ss\Mods\SWGRCouch\           the mod: enabled.txt, README.txt (this text), README.md (the full
                                     manual), LICENSE, Scripts\, native\swgr_inputfilter.dll and
                                     native\swgrcouch-cert.pem (the DLL's public certificate)
-  - ue4ss\UE4SS_Signatures\*.lua    SWGRCouch's signature files for the game's 2026-10-12 hotfix
+  - ue4ss\UE4SS_Signatures\*.lua    SWGRCouch's signature files (checked on the game builds CL382493,
+                                    CL382801 and CL386500, the 2026-10-22 update)
   Nothing else: no mods.txt, no mods.json, no UE4SS-settings.ini. Your UE4SS settings and your other
   UE4SS mods stay as they are. SWGRCouch starts through its own Mods\SWGRCouch\enabled.txt: UE4SS
   starts every mod folder that has an enabled.txt, listed in mods.txt or not.

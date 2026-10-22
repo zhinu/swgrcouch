@@ -549,10 +549,15 @@ local function loadNative(players)
         S.native.loaded = true
         local st = readNativeStatus()
         -- 0.10.0: the DLL knows game builds CL381121, CL382493 and CL382801 (hotfixes) and reports the one it matched  V-INP-10
-        U.log(TAG, "native filter loaded: installed=%s reason=%s build=%s", tostring(st.installed), tostring(st.reason),
-            tostring(st.build))
+        -- 1.0.2: + CL386500 (2026-10-22 update); an unknown build is derived from the running game (build=auto,
+        -- derive=used); derive=/derive_reason= say how (or why not)
+        U.log(TAG, "native filter loaded: installed=%s reason=%s build=%s derive=%s (%s, %s ms)", tostring(st.installed),
+            tostring(st.reason), tostring(st.build), tostring(st.derive), tostring(st.derive_reason), tostring(st.derive_ms))
         if st.installed ~= "1" then
             U.warn(TAG, "native filter did not patch (%s): falling back to kbsplit", tostring(st.reason))
+            U.warn(TAG, "IN RACES EVERY PAD WILL STEER EVERY CAR: this SWGRCouch does not know this game build. Update "
+                .. "SWGRCouch (git.jules.my/jules/swgrcouch or Nexus Mods) and UE4SS Galactic Racer Edition; "
+                .. "SplitScreenMod must be off (mods.txt: SplitScreenMod : 0)")
         end
     else
         S.native.err = tostring(ok and r2 or r1) .. (r3 and (" (" .. tostring(r3) .. ")") or "")

@@ -162,6 +162,27 @@ do
   U.log(TAG, "%s %s loading: EngineTickAvailable=%s ProcessEventAvailable=%s GT=%s UE=%s settings=%s (%s)",
     C.MOD, C.VERSION, tostring(EngineTickAvailable), tostring(ProcessEventAvailable), gtName, unreal,
     tostring(settings.path()), (ok and loaded) and "loaded" or "defaults")
+  -- 1.0.2 (player report 2026-10-22): the old SplitScreenMod fights this mod over the split screen and the pads.
+  -- Warn when UE4SS will start it (mods.txt "SplitScreenMod : 1", or its enabled.txt). Plain file reads only.
+  pcall(function()
+    local d = settings.modDir()
+    if type(d) ~= "string" or d == "" then return end
+    local mods = (d:gsub("\\", "/")):gsub("/[^/]+/?$", "")       -- .../ue4ss/Mods
+    local on = false
+    local f = io.open(mods .. "/mods.txt", "r")
+    if f then
+      for line in f:lines() do
+        if line:match("^%s*SplitScreenMod%s*:%s*1") then on = true end
+      end
+      f:close()
+    end
+    local e = io.open(mods .. "/SplitScreenMod/enabled.txt", "rb")
+    if e then e:close(); on = true end
+    if on then
+      U.warn(TAG, "SplitScreenMod is ON: turn it off (mods.txt 'SplitScreenMod : 0' and delete Mods/SplitScreenMod/enabled.txt)"
+        .. " - SWGRCouch does the split screen itself and the two mods fight over the pads")
+    end
+  end)
 end
 
 -- 3. Module init() calls, fixed order (§4.2 main). init() only registers hooks / NotifyOnNewObject /

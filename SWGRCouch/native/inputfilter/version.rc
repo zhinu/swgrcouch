@@ -5,8 +5,8 @@
 // and the fixed PE time stamp (SWGR_IF_TIMESTAMP) in build.sh with them.
 
 1 VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     1,0,2,0
+PRODUCTVERSION  1,0,2,0
 FILEFLAGSMASK   0x3F
 FILEFLAGS       0x0
 FILEOS          0x40004
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "swgrcouch@ju.l3s.pw"
             VALUE "FileDescription",  "SWGRCouch input filter (split-screen pad routing for STAR WARS Galactic Racer)"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      "1.0.2.0"
             VALUE "InternalName",     "swgr_inputfilter"
             VALUE "LegalCopyright",   "MIT License, (c) 2026 jules"
             VALUE "OriginalFilename", "swgr_inputfilter.dll"
             VALUE "ProductName",      "SWGRCouch"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   "1.0.2.0"
             VALUE "Comments",         "Contact: swgrcouch@ju.l3s.pw. MIT-licensed source: SWGRCouch/native/inputfilter."
         END
     END

@@ -4,7 +4,7 @@
 
 **One screen, up to four controllers.** Race with friends in Free Mode, run a Galactic Grand Prix, or play the game's own campaign together.
 
-![Version 1.0.1](https://img.shields.io/badge/version-1.0.1-e8a33d?style=for-the-badge&labelColor=0b0e12)
+![Version 1.0.2](https://img.shields.io/badge/version-1.0.2-e8a33d?style=for-the-badge&labelColor=0b0e12)
 ![Free Mode 1-4 players](https://img.shields.io/badge/free_mode-1--4_players-f2ede4?style=for-the-badge&labelColor=0b0e12)
 ![Couch Campaign 2 players](https://img.shields.io/badge/couch_campaign-2_players-f2ede4?style=for-the-badge&labelColor=0b0e12)
 ![Windows, Linux, Steam Deck](https://img.shields.io/badge/windows_·_linux_·_steam_deck-b8b2a6?style=for-the-badge&labelColor=0b0e12)
@@ -36,7 +36,19 @@
 | **Each player has** | their own pilot, vehicle, loadout, view and HUD | their own vehicle class, racer style, credits, shop, rewards, backer and garage |
 | **Split** | top / bottom or side by side for 2, quarters for 3–4 | top / bottom for 2, quarters for 3–4 |
 
-**New in 1.0.1**
+**New in 1.0.2**
+
+- **Works with the 2026-10-22 game update** (CL386500). The update made every pad steer every car in races; the
+  input filter knows the new build, and from now on it finds what it needs in a game build it does not know yet by
+  itself (`derive=used` in its status), so a future game update should not break split-screen steering again.
+- **UE4SS signature fix.** `GMalloc.lua` now reads GMalloc straight from a GMalloc user: the old one pointed past it
+  on the new build.
+- **Player 2's FAVORS grid shows its cards.** On the couch loadout, player 2's favour grid was an empty panel (only
+  the names and texts on the right); it now shows every card like player 1's.
+- **Clearer log.** When the input filter cannot patch, UE4SS.log says to update SWGRCouch, and it warns when the old
+  SplitScreenMod is switched on (turn it off: the two mods fight over the pads).
+
+**1.0.1**
 
 - **One zip, straight into the game folder.** The new *game-folder* zip has the mod and the input filter DLL laid
   out like the game folder: install UE4SS Galactic Racer Edition, then unzip it into the game folder and play
@@ -249,7 +261,8 @@ descriptions from the game's data (`Scripts/perkdata.lua`).
 
 ### Requirements
 
-- **STAR WARS Galactic Racer** on Steam, build CL 382801 (the 2026-10-12 hotfix) or CL 382493: both are supported.
+- **STAR WARS Galactic Racer** on Steam, build CL 386500 (the 2026-10-22 update; the main menu shows `CL386500` in its
+  bottom-left corner), CL 382801 or CL 382493: all are supported.
 - **[UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) by GenerousMods.** Get
   it from its page, for every download: it is kept up to date after every game update, and most UE4SS mods for this
   game use it.
@@ -258,7 +271,7 @@ descriptions from the game's data (`Scripts/perkdata.lua`).
 
 ### The easy way: unzip into the game folder
 
-Download **`SWGRCouch-1.0.1-gameroot.zip`** from the mod's **Nexus Mods** page or from the release page here. It holds
+Download **`SWGRCouch-1.0.2-gameroot.zip`** from the mod's **Nexus Mods** page or from the release page here. It holds
 the mod and its input filter DLL, already laid out like the game folder. It does not include UE4SS.
 
 1. **Install [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) first**, as its
@@ -292,7 +305,7 @@ folder that has one, listed in `mods.txt` or not). Keep SplitScreenMod off (anot
 Edition ships it off). The two `UE4SS-settings.ini` values the mod needs (`bForceGUObjectArrayForIteration = true`,
 `UseCache = 0`) are already set in UE4SS Galactic Racer Edition.
 
-An all-in-one variant that also carries UE4SS Galactic Racer Edition (`SWGRCouch-1.0.1-gameroot-with-UE4SS.zip`) is
+An all-in-one variant that also carries UE4SS Galactic Racer Edition (`SWGRCouch-1.0.2-gameroot-with-UE4SS.zip`) is
 built as well; it is on the git.jules.my release page only (with GenerousMods' OK), not on Nexus: get UE4SS updates from [its own page](https://www.nexusmods.com/starwarsgalacticracer/mods/2), and please don't re-upload either.
 
 **Updating:** quit the game, then extract the new zip the same way over the old files. Your own files are never in the
@@ -302,7 +315,7 @@ zip, so `settings.txt`, `config_user.lua`, the run and Grand Prix files and the 
 
 For players who would rather place the mod folder by hand. It needs UE4SS Galactic Racer Edition too.
 
-- **Mod folder**: `SWGRCouch-1.0.1-nexus.zip`, the mod folder only (Lua scripts, no DLL, no executable). Install
+- **Mod folder**: `SWGRCouch-1.0.2-nexus.zip`, the mod folder only (Lua scripts, no DLL, no executable). Install
   [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) first, then extract the zip
   into `<game>\Griffin\Binaries\Win64\ue4ss\Mods\`.
 - **Optional file**: `swgr_inputfilter.dll`, into `ue4ss\Mods\SWGRCouch\native\`. It gives each player's car its own
@@ -344,9 +357,10 @@ a value set there also replaces the new layout's own value.
 </details>
 
 ### Check it works
-Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 1.0.1 loading` and `modules=85/85`, and the
+Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 1.0.2 loading` and `modules=85/85`, and the
 main menu has a **FREE MODE** tab with the QUICK RACE, CUSTOM RACE and GALACTIC GRAND PRIX posters. Once a second pad
-joins, the log shows `native filter loaded: installed=1 reason=ok build=382801` (the number is your game build).
+joins, the log shows `native filter loaded: installed=1 reason=ok build=386500` (the number is your game build; `build=auto` means a newer
+game build the filter worked out by itself).
 
 ### Uninstall
 
@@ -464,16 +478,19 @@ UE4SS did not load the mod. On Linux / Steam Deck, check the launch option `WINE
 Then check that `Griffin\Binaries\Win64\dwmapi.dll` and `Griffin\Binaries\Win64\ue4ss\UE4SS.dll` exist (UE4SS Galactic
 Racer Edition is installed) and that `ue4ss\Mods\SWGRCouch\Scripts\main.lua` is there (the zip was extracted into
 the game folder, not into a folder of its own), and open `Griffin/Binaries/Win64/ue4ss/UE4SS.log`:
-it should show `SWGRCouch 1.0.1 loading`.
+it should show `SWGRCouch 1.0.2 loading`.
 
 </details>
 
 <details>
-<summary><b>Every pad steers player 1's car.</b></summary>
+<summary><b>Every pad steers player 1's car (or every car).</b></summary>
 
-The input filter DLL is missing. The lean Nexus zip ships without it: put the optional `swgr_inputfilter.dll` into
-`ue4ss\Mods\SWGRCouch\native\`, or use the game-folder zip. The log shows
-`native filter loaded: installed=1 reason=ok` once it works.
+Look for `native filter loaded:` in `UE4SS.log`. `installed=0 reason=mismatch ...` means a game update this SWGRCouch
+does not know yet (the line then says to update SWGRCouch): get the newest release. Also keep the old SplitScreenMod
+off (`SplitScreenMod : 0` in `ue4ss\Mods\mods.txt`, and no `enabled.txt` in its folder): SWGRCouch warns in the log
+when it is on. No `native filter loaded` line at all: the input filter DLL is missing. The lean Nexus zip ships
+without it: put the optional `swgr_inputfilter.dll` into `ue4ss\Mods\SWGRCouch\native\`, or use the game-folder zip.
+The log shows `native filter loaded: installed=1 reason=ok` once it works.
 
 </details>
 
@@ -531,7 +548,7 @@ Any pad the game sees as a controller. The Xbox layout is tested; DualShock and 
 <summary><b>My virus scanner flags swgr_inputfilter.dll.</b></summary>
 
 A heuristic false positive on a small DLL. It is built from the C source in this repository and rebuilds
-byte-identical, so anyone can check it, and the 1.0.1 copy carries the author's signature (see
+byte-identical, so anyone can check it, and the 1.0.2 copy carries the author's signature (see
 [The input filter DLL](#the-input-filter-dll)).
 
 </details>
@@ -607,7 +624,7 @@ engines flag this one too - a false positive: the DLL rebuilds **byte-identical*
 `SWGRCouch/native/inputfilter/build.sh` rebuilds it from `inputfilter.c` and `version.rc` with the system LLVM
 (`clang`, `lld-link`, `llvm-rc`, `llvm-dlltool`); no Windows SDK is needed.
 
-**Signature (1.0.1).** The DLL in the 1.0.1 downloads is signed by the author with a **self-signed** certificate
+**Signature (1.0.2).** The DLL in the 1.0.2 downloads is signed by the author with a **self-signed** certificate
 (`CN=Jules (SWGRCouch)`): a local signature, not a CA-trusted one, so Windows still shows *unknown publisher*. It
 proves the file is the one the author signed. The game-folder zips carry the certificate next to the DLL
 (`native\swgrcouch-cert.pem`). The public certificate is
@@ -615,10 +632,10 @@ proves the file is the one the author signed. The game-folder zips carry the cer
 (SHA-256 fingerprint `05:FA:00:C4:E0:53:2B:0C:86:62:6A:2E:6B:1D:A6:C4:4C:62:55:97:5D:A7:2E:18:99:76:24:1A:C0:A8:1A:A7`);
 check a download with `osslsigncode verify -in swgr_inputfilter.dll -CAfile swgrcouch-cert.pem`.
 
-| 1.0.1 `swgr_inputfilter.dll` | sha256 |
+| 1.0.2 `swgr_inputfilter.dll` (DLL version 1.0.2.0) | sha256 |
 |---|---|
-| signed (in the zips and the bare download) | `41458d0492a29ae1a2fbd3c67f50b8c268a061d364c3d001be163e2ca26d0928` |
-| unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `42e7b2a4cef5e6d8b5ad6c89ae525df98fc921b74941e70b8f872e8b41f7e8b8` |
+| signed (in the zips and the bare download) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
+| unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `4363c77db01d49160c23e969653861209bb611439c1f98a6931cf68e39a1e300` |
 
 ### Code signing policy
 The input filter DLL is the only file this project signs, and the author's self-signed signature above is the

@@ -12,8 +12,8 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT="$HERE/build"
 DLL="$HERE/../swgr_inputfilter.dll"
-# 2026-10-19 00:00:00 UTC: the 1.0.0.0 DLL (version.rc). Change it together with the version in version.rc.
-SWGR_IF_TIMESTAMP=${SWGR_IF_TIMESTAMP:-1792368000}
+# 2026-10-22 00:00:00 UTC: the 1.0.2.0 DLL (version.rc; 1.0.0.0 was 1792368000). Change it together with the version in version.rc.
+SWGR_IF_TIMESTAMP=${SWGR_IF_TIMESTAMP:-1792627200}
 mkdir -p "$OUT"
 llvm-dlltool -m i386:x86-64 -d "$HERE/kernel32.def" -l "$OUT/kernel32.lib"
 llvm-rc -no-preprocess /nologo /fo "$OUT/version.res" "$HERE/version.rc"

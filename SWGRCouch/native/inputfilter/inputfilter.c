@@ -42,6 +42,10 @@
  * address is hard-coded, once per known build, in the BUILDS table below:
  *     CL381121  488,290,328 bytes  (input-isolation.md)
  *     CL382493  490,551,832 bytes  hotfix (notes/research/inputfilter-hotfix-port.md)
+ *     CL382801  498,240,024 bytes  2026-10-12 hotfix (Steam build 25880680)
+ *     CL386500  494,300,696 bytes  2026-10-22 update (Steam build 26133805, "Auto-386500")
+ * 1.0.2: a build that is in no set is derived from the running image (derive(), "UNKNOWN GAME BUILDS" below; status
+ * build=auto derive=used), so the next game update does not need a new DLL unless the engine layout changes.
  * The hotfix moved only the 6 code pointers (GetDebugName and the 5 handlers). The vtables, the subsystem layout,
  * GUObjectArray and every struct offset are unchanged (static evidence in the port notes; the old DLL's 'wo' bind
  * already worked live on the hotfix, run N1). install() picks the set whose GetDebugName slot (vt[11], a different
@@ -125,9 +129,21 @@ static const Build BUILDS[] = {
     { 382801, 0x14991aa30ULL, 0x1499139c0ULL, 0x48, 0x14300c26aULL,
       { 0x1470f134aULL, 0x1470f1478ULL, 0x140d04678ULL, 0x1470f14e8ULL, 0x1470f1558ULL },
       0x14ac5f920ULL, 0x14ac5f934ULL, 0x14ac5f9c8ULL },
+    /* 2026-10-22 game update (Steam build 26133805, "Auto-386500"): proc vtable +0xa7f0, code and data moved again
+     * (GUObjectArray 0x14ac6c950). Same static method (vtable-derive.py; the subsystem vtable by the masked
+     * fingerprint of its destructor, which reproduces 0x1499139c0 from CL382493 -> CL382801), validated first by
+     * reproducing the 381121, 382493 and 382801 rows exactly; the runtime derivation below gives the same row. */
+    { 386500, 0x149925220ULL, 0x14991e1b0ULL, 0x48, 0x14301555cULL,
+      { 0x1470fecaeULL, 0x1470feddcULL, 0x140cffd38ULL, 0x1470fee4cULL, 0x1470feebcULL },
+      0x14ac6c960ULL, 0x14ac6c974ULL, 0x14ac6ca08ULL },
 };
 #define NBUILD ((int)(sizeof BUILDS / sizeof BUILDS[0]))
 static const Build *g_b;        /* the build install() identified (GetDebugName slot); 0 = unknown */
+/* 1.0.2 runtime derivation (derive(), header "UNKNOWN GAME BUILDS"): the set found in the running image, cl 0 */
+static Build g_derived;
+static const char *g_deriveState = "off";       /* off | used | checked | failed                                  */
+static const char *g_deriveReason = "-";
+static u64 g_deriveMs;
 
 typedef u8 (*HandlerFn)(void *self, void *app, const u8 *ev);
 static HandlerFn g_orig[NSLOT];
@@ -197,8 +213,12 @@ static int uappend(char *b, int n, int cap, u64 v, int hex) {
 }
 
 /* The processor of a subsystem under build b's layout (both vtables checked); 0 = none. */
+static int inImage(u64 a);
 static u64 procOf(const Build *b, u64 s) {
-    if (!readable(s, b->subsysProc + 8) || rd64(s) != b->subsysVtable) return 0;
+    if (!readable(s, b->subsysProc + 8)) return 0;
+    /* a derived set (subsysVtable 0, see derive()) only asks for a vtable inside the game image; the processor's
+     * own vtable check below is the exact one */
+    if (b->subsysVtable ? rd64(s) != b->subsysVtable : !inImage(rd64(s))) return 0;
     u64 p = rd64(s + b->subsysProc);
     return (readable(p, 8) && rd64(p) == b->procVtable) ? p : 0;
 }
@@ -231,14 +251,14 @@ static u64 objItem(const Build *b, u64 obj, u32 *pidx) {
 }
 
 static void writeStatus(void) {
-    static char b[2048]; int n = 0, cap = sizeof b;
+    static char b[3072]; int n = 0, cap = sizeof b;
     HANDLE h = CreateFileW(g_statusPath, 0x40000000 /*GENERIC_WRITE*/, 1 | 2, 0, 2 /*CREATE_ALWAYS*/, 0x80, 0);
     if (h == INVALID_HANDLE) return;
     lockOwners();       /* snapshot of the owner table; the file write itself happens after the unlock */
     n = sappend(b, n, cap, "installed="); n = uappend(b, n, cap, (u64)g_installed, 0);
     n = sappend(b, n, cap, "\nreason="); n = sappend(b, n, cap, g_reason);
     n = sappend(b, n, cap, "\nbuild=");
-    if (g_b) n = uappend(b, n, cap, g_b->cl, 0); else n = sappend(b, n, cap, "unknown");
+    if (g_b && g_b->cl) n = uappend(b, n, cap, g_b->cl, 0); else n = sappend(b, n, cap, g_b ? "auto" : "unknown");
     n = sappend(b, n, cap, "\nbuilds=");
     for (int k = 0; k < NBUILD; k++) { if (k) n = sappend(b, n, cap, ","); n = uappend(b, n, cap, BUILDS[k].cl, 0); }
     n = sappend(b, n, cap, "\nenabled="); n = uappend(b, n, cap, (u64)g_enabled, 0);
@@ -255,6 +275,16 @@ static void writeStatus(void) {
     n = sappend(b, n, cap, "\npadwatch=1\nwatch=");
     for (int k = 0; k < PADW_KEYS; k++) { if (k) n = sappend(b, n, cap, ","); n = uappend(b, n, cap, (u64)g_wKey[k], 0); }
     n = sappend(b, n, cap, "\npad_writes="); n = uappend(b, n, cap, g_padWrites, 0);
+    n = sappend(b, n, cap, "\nderive="); n = sappend(b, n, cap, g_deriveState);
+    n = sappend(b, n, cap, "\nderive_reason="); n = sappend(b, n, cap, g_deriveReason);
+    n = sappend(b, n, cap, "\nderive_ms="); n = uappend(b, n, cap, g_deriveMs, 0);
+    if (g_derived.procVtable) {
+        const Build *d = &g_derived;
+        n = sappend(b, n, cap, "\nderived=proc "); n = uappend(b, n, cap, d->procVtable, 1);
+        n = sappend(b, n, cap, " name "); n = uappend(b, n, cap, d->debugNameFn, 1);
+        for (int k = 0; k < NSLOT; k++) { n = sappend(b, n, cap, k ? "," : " slots "); n = uappend(b, n, cap, d->expect[k], 1); }
+        n = sappend(b, n, cap, " objarray "); n = uappend(b, n, cap, d->objChunks ? d->objChunks - 0x10 : 0, 1);
+    }
     for (int i = 0; i < g_nown; i++) {
         Owner *o = &g_own[i];
         n = sappend(b, n, cap, "\no ctrl="); n = uappend(b, n, cap, (u64)o->ctrl, 0);
@@ -522,6 +552,148 @@ static u8 W_MDown(void *s, void *a, const u8 *e)   { return allow(s, e, 0) ? g_o
 static u8 W_MUp(void *s, void *a, const u8 *e)     { maybeReload(0, 0); return g_orig[K_MUP](s, a, e); }  /* see W_KeyUp */
 static const HandlerFn WRAP[NSLOT] = { W_KeyDown, W_KeyUp, W_Analog, W_MDown, W_MUp };
 
+/* ---- runtime derivation (1.0.2) ----
+ * UNKNOWN GAME BUILDS. A game update moves these addresses (2026-10-22: every pad steered every car until the mod was
+ * updated). When no BUILDS[] set matches, derive() finds the same values in the RUNNING image, the way
+ * work/perf/vtable-derive.py finds them in the exe file:
+ *   1. the UTF-16 string L"GfnRawInput" (NUL-terminated, not the tail of a longer name)              exactly 1
+ *   2. GetDebugName = a `lea rax,[rip+d]` (48 8D 05) aimed at it, with a `ret` (C3) within 16 bytes   exactly 1
+ *   3. the processor vtable = the 8-aligned slot holding that function's address, minus 8*DEBUGNAME_SLOT, whose slots
+ *      2, 3, 4, 6, 7 all point into the game image                                                    exactly 1
+ *   4. GUObjectArray (only for 'wo' binds) = the target of the lea UE4SS's own GUObjectArray signature anchors on:
+ *      48 8D 0D d32 E8 r32 E8 r32 E8 r32 C6 05 d32 01                                                  exactly 1
+ * The handlers to wrap are what the found vtable holds now (they ARE the originals: nothing patched it before this
+ * DLL, and DllMain runs once). The subsystem's own vtable is not derived: procOf() then only asks for a vtable inside
+ * the image, the processor vtable check stays exact. Each step must find exactly one candidate, else nothing is
+ * patched (reason= says which step failed): a wrong guess can only mean "no filter", never a wrong patch. Struct
+ * offsets (UserIndex 0x0c, the processor pointer at subsystem+0x48, FUObjectItem, GUObjectArray +0x10/+0x24/+0xb8)
+ * are engine (UE 5.7.4) layout, the same in all four builds so far. Reads stay inside committed, readable regions of
+ * the image (VirtualQuery), so the scan cannot fault. Cost: a few passes over the ~490 MB image, once, only on an
+ * unknown build (status derive_ms=). Verified on CL381121 / 382493 / 382801 / 386500 (same rows as BUILDS[]).
+ * Test hook: a file swgr_inputfilter.derive next to the DLL makes it derive even on a known build and compare
+ * (status derive=checked, derive_reason=match or the first field that differs); the table set is installed then. */
+#define IMG_BASE 0x140000000ULL
+#define MAXREG 256
+typedef struct { u64 lo, hi; } Reg;
+static Reg g_reg[MAXREG];
+static int g_nreg;
+
+static void mapImage(void) {
+    g_nreg = 0;
+    u64 a = IMG_BASE;
+    for (int guard = 0; guard < 100000; guard++) {
+        MBI m;
+        if (!VirtualQuery((const void *)a, &m, sizeof m) || (u64)m.AllocationBase != IMG_BASE) break;
+        u64 lo = (u64)m.BaseAddress, hi = lo + m.RegionSize;
+        if (m.State == 0x1000 && !(m.Protect & 0x101) && (m.Protect & 0xEE)) {
+            if (g_nreg && g_reg[g_nreg - 1].hi == lo) g_reg[g_nreg - 1].hi = hi;          /* merge neighbours */
+            else if (g_nreg < MAXREG) { g_reg[g_nreg].lo = lo; g_reg[g_nreg].hi = hi; g_nreg++; }
+        }
+        if (hi <= a) break;
+        a = hi;
+    }
+}
+static int inImage(u64 a) {
+    for (int i = 0; i < g_nreg; i++) if (a >= g_reg[i].lo && a < g_reg[i].hi) return 1;
+    return 0;
+}
+static int inImageN(u64 a, u64 n) {
+    for (int i = 0; i < g_nreg; i++) if (a >= g_reg[i].lo && a + n <= g_reg[i].hi) return 1;
+    return 0;
+}
+static i32 rdi32(const u8 *p) { return (i32)((u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24)); }
+
+static const char *deriveFail(const char *why) { g_derived.procVtable = 0; return why; }
+
+/* Fills g_derived; returns 0 on success, else the reason. */
+static const char *derive(void) {
+    static const char nm[] = "GfnRawInput";
+    const int nmLen = 11, strBytes = (11 + 1) * 2;
+    u64 str = 0, dn = 0, vt = 0, objArr = 0; int nStr = 0, nDn = 0, nVt = 0, nObj = 0;
+    memset(&g_derived, 0, sizeof g_derived);
+    mapImage();
+    if (!g_nreg) return deriveFail("derive: image not readable");
+    /* pass 1: the string, and UE4SS's GUObjectArray anchor */
+    for (int r = 0; r < g_nreg; r++) {
+        const u8 *p = (const u8 *)g_reg[r].lo, *end = (const u8 *)g_reg[r].hi;
+        for (; p + 32 <= end; p++) {
+            if (p[0] == 'G' && p[1] == 0) {
+                int ok = 1;
+                for (int k = 0; k < nmLen && ok; k++) ok = p[2 * k] == (u8)nm[k] && p[2 * k + 1] == 0;
+                if (ok && p[2 * nmLen] == 0 && p[2 * nmLen + 1] == 0) {
+                    int prevAl = 0;
+                    if ((u64)p - 2 >= g_reg[r].lo && p[-1] == 0) {
+                        u8 c = p[-2];
+                        prevAl = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+                    }
+                    if (!prevAl) { str = (u64)p; nStr++; }
+                }
+            } else if (p[0] == 0x48 && p[1] == 0x8d && p[2] == 0x0d && p[7] == 0xe8 && p[12] == 0xe8 && p[17] == 0xe8
+                       && p[22] == 0xc6 && p[23] == 0x05 && p[28] == 0x01) {
+                objArr = (u64)p + 7 + (u64)(long long)rdi32(p + 3); nObj++;
+            }
+        }
+    }
+    (void)strBytes;
+    if (nStr != 1) return deriveFail(nStr ? "derive: GfnRawInput string not unique" : "derive: GfnRawInput string not found");
+    /* pass 2: GetDebugName */
+    for (int r = 0; r < g_nreg; r++) {
+        const u8 *p = (const u8 *)g_reg[r].lo, *end = (const u8 *)g_reg[r].hi;
+        for (; p + 24 <= end; p++) {
+            if (p[0] != 0x48 || p[1] != 0x8d || p[2] != 0x05) continue;
+            if ((u64)p + 7 + (u64)(long long)rdi32(p + 3) != str) continue;
+            int ret = 0;
+            for (int k = 7; k < 23 && !ret; k++) ret = p[k] == 0xc3;
+            if (ret) { dn = (u64)p; nDn++; }
+        }
+    }
+    if (nDn != 1) return deriveFail(nDn ? "derive: GetDebugName not unique" : "derive: GetDebugName not found");
+    /* pass 3: the processor vtable */
+    for (int r = 0; r < g_nreg; r++) {
+        u64 a = (g_reg[r].lo + 7) & ~7ULL;
+        for (; a + 8 <= g_reg[r].hi; a += 8) {
+            if (*(const volatile u64 *)a != dn) continue;
+            u64 v = a - 8 * DEBUGNAME_SLOT;
+            if (!inImageN(v, 8 * 16)) continue;
+            int ok = 1;
+            for (int i = 0; i < NSLOT && ok; i++) ok = inImage(rd64(v + 8 * (u64)SLOT[i]));
+            if (ok) { vt = v; nVt++; }
+        }
+    }
+    if (nVt != 1) return deriveFail(nVt ? "derive: processor vtable not unique" : "derive: processor vtable not found");
+    g_derived.cl = 0;
+    g_derived.procVtable = vt;
+    g_derived.subsysVtable = 0;
+    g_derived.subsysProc = 0x48;
+    g_derived.debugNameFn = dn;
+    for (int i = 0; i < NSLOT; i++) g_derived.expect[i] = rd64(vt + 8 * (u64)SLOT[i]);
+    if (nObj == 1 && inImageN(objArr, 0xc0)) {
+        g_derived.objChunks = objArr + 0x10; g_derived.objNum = objArr + 0x24; g_derived.serialCounter = objArr + 0xb8;
+    }   /* else no 'wo' binds (objItem refuses an unreadable 0): the filter itself still works */
+    return 0;
+}
+
+/* derive=checked: the first field where the derived set differs from the table's (subsysVtable is not derived) */
+static const char *deriveCompare(const Build *t) {
+    const Build *d = &g_derived;
+    if (d->procVtable != t->procVtable) return "differs: procVtable";
+    if (d->debugNameFn != t->debugNameFn) return "differs: debugNameFn";
+    for (int i = 0; i < NSLOT; i++) if (d->expect[i] != t->expect[i]) return "differs: handler slot";
+    if (d->objChunks != t->objChunks) return "differs: GUObjectArray";
+    return "match";
+}
+
+static int fileThere(const char *name) {
+    u16 p[600]; u32 n = 0;
+    for (; g_cfgPath[n] && n < 520; n++) p[n] = g_cfgPath[n];
+    while (n && p[n - 1] != '\\' && p[n - 1] != '/') n--;
+    u32 k = 0;
+    for (; name[k] && n + k < 590; k++) p[n + k] = (u16)name[k];
+    p[n + k] = 0;
+    FILEATTR fa;
+    return GetFileAttributesExW(p, 0, &fa) != 0;
+}
+
 /* ---- install ---- */
 /* Build b against the live processor vtable: 0 = matches (unpatched), 1 = already patched by this module,
  * -1 = vtable not readable, -2 = GetDebugName slot differs, -3 = handler slot index *bad differs. */
@@ -537,7 +709,7 @@ static int checkBuild(const Build *b, int *bad) {
 }
 
 /* g_reason when no set matched: the kind of the closest mismatch, then what each set expected. */
-static char g_reasonBuf[512];
+static char g_reasonBuf[768];
 static void mismatchReason(const int *verdict, const int *bad) {
     char *b = g_reasonBuf; int n = 0, cap = sizeof g_reasonBuf, anyHandler = 0, anyName = 0;
     for (int k = 0; k < NBUILD; k++) { if (verdict[k] == -3) anyHandler = 1; if (verdict[k] == -2) anyName = 1; }
@@ -562,6 +734,9 @@ static void mismatchReason(const int *verdict, const int *bad) {
         }
     }
     n = sappend(b, n, cap, ")");
+    /* 1.0.2: what the player should do (the runtime derivation failed too: derive_reason= in the status) */
+    n = sappend(b, n, cap, " - this game build is unknown to this SWGRCouch: update SWGRCouch (git.jules.my/jules/swgrcouch"
+                           " or Nexus Mods); until then every pad steers every car in races");
     g_reason = g_reasonBuf;
 }
 
@@ -573,6 +748,27 @@ static void install(void) {
         bad[k] = 0;
         verdict[k] = checkBuild(&BUILDS[k], &bad[k]);
         if (verdict[k] >= 0 && !pick) { pick = &BUILDS[k]; pv = verdict[k]; }
+    }
+    int anyHandler = 0;
+    for (int k = 0; k < NBUILD; k++) if (verdict[k] == -3) anyHandler = 1;
+    if (pick && fileThere("swgr_inputfilter.derive")) {          /* test hook (derive header): derive + compare */
+        u64 t0 = GetTickCount64();
+        const char *why = derive();
+        g_deriveMs = GetTickCount64() - t0;
+        g_deriveState = "checked";
+        g_deriveReason = why ? why : deriveCompare(pick);
+    }
+    if (!pick && !anyHandler) {
+        /* no known build (header "UNKNOWN GAME BUILDS"): derive the set from the running image */
+        u64 t0 = GetTickCount64();
+        const char *why = derive();
+        g_deriveMs = GetTickCount64() - t0;
+        if (!why) {
+            pick = &g_derived; pv = 0;
+            g_deriveState = "used"; g_deriveReason = "ok";
+        } else {
+            g_deriveState = "failed"; g_deriveReason = why;
+        }
     }
     if (!pick) {
         /* nothing patched; a set whose GetDebugName matched still names the build (status, resolve, 'wo') */

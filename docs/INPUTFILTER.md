@@ -22,13 +22,13 @@ A few heuristic antivirus engines flag the DLL itself; that is a false positive.
 DLL rebuilds **byte-identical** from the C source in this zip (fixed PE time stamp, `lld-link /timestamp` in
 `build.sh`), which anyone can verify by comparing hashes after running `build.sh`.
 
-The DLL version 1.0.0.0 (with its VERSIONINFO: product name SWGRCouch) built with LLVM 23.1.1 (Arch's clang 23.1.1
+The DLL version 1.0.2.0 (with its VERSIONINFO: product name SWGRCouch) built with LLVM 23.1.1 (Arch's clang 23.1.1
 and the official LLVM 23.1.1 Linux release give the same file) has
-`sha256 42e7b2a4cef5e6d8b5ad6c89ae525df98fc921b74941e70b8f872e8b41f7e8b8`. Another LLVM version may produce a
+`sha256 4363c77db01d49160c23e969653861209bb611439c1f98a6931cf68e39a1e300`. Another LLVM version may produce a
 different (equally valid) file.
 
-**Signed copy (1.0.1).** The DLL in the 1.0.1 zips and the bare `swgr_inputfilter.dll` download is that file plus an
-Authenticode signature by the author: `sha256 41458d0492a29ae1a2fbd3c67f50b8c268a061d364c3d001be163e2ca26d0928`.
+**Signed copy (1.0.2).** The DLL in the 1.0.2 zips and the bare `swgr_inputfilter.dll` download is that file plus an
+Authenticode signature by the author: `sha256 ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00`.
 It is a **local signature by the author with a self-signed certificate** (`CN=Jules (SWGRCouch)`), not a CA-trusted
 one: Windows still shows *unknown publisher*. The public certificate is `docs/signing/swgrcouch-cert.pem` in the
 repository (also in the `swgr_inputfilter-<version>.zip`), SHA-256 fingerprint

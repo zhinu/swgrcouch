@@ -12,10 +12,10 @@ Be clear about what that means:
 - The second, independent proof is the **reproducible build**: the DLL rebuilds byte-identical from the public C
   source, so anyone can check that the signed file contains exactly that code (see [Verify a download](#verify-a-download)).
 
-| 1.0.1 `swgr_inputfilter.dll` | sha256 |
+| 1.0.2 `swgr_inputfilter.dll` | sha256 |
 |---|---|
-| signed by the author (shipped in the 1.0.1 zips and as the bare download) | `41458d0492a29ae1a2fbd3c67f50b8c268a061d364c3d001be163e2ca26d0928` |
-| unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `42e7b2a4cef5e6d8b5ad6c89ae525df98fc921b74941e70b8f872e8b41f7e8b8` |
+| signed by the author (shipped in the 1.0.2 zips and as the bare download) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
+| unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `4363c77db01d49160c23e969653861209bb611439c1f98a6931cf68e39a1e300` |
 
 Public certificate: [`docs/signing/swgrcouch-cert.pem`](https://git.jules.my/jules/swgrcouch/src/branch/main/docs/signing/swgrcouch-cert.pem)
 (details in [`docs/signing/README.md`](https://git.jules.my/jules/swgrcouch/src/branch/main/docs/signing/README.md)),

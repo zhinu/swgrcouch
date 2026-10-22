@@ -7,15 +7,15 @@ follows the README's chapters: every chapter opens with its banner image, then t
 
 | Nexus section | file (from the release, `tools/package.sh VERSION` -> `dist/`) | what it is |
 |---|---|---|
-| **Main files** (1st) | `SWGRCouch-1.0.1-gameroot.zip` | the game-folder download: the mod and `swgr_inputfilter.dll` (signed by the author), laid out like the game folder (`Griffin/Binaries/Win64/ue4ss/...`: `Mods/SWGRCouch/` with `README.txt` and `native/swgrcouch-cert.pem`, `UE4SS_Signatures/`) plus `SWGRCouch-INSTALL.txt` in the game folder. No `mods.txt` / `mods.json` (the mod starts through its `enabled.txt`: the player's other UE4SS mods are never switched off). **No UE4SS in it**: players install UE4SS Galactic Racer Edition from its own Nexus page first (set it as a requirement), then extract this zip into the game folder (the one that contains `Griffin`). |
-| **Main files** (2nd) | `SWGRCouch-1.0.1-nexus.zip` | the lean file: the mod folder only, **no DLL and no executable**: `SWGRCouch/` (`enabled.txt`, `Scripts/*.lua`, an empty `native/` with a note), `LICENSE`, `README.txt` (install steps). Extract into `<game>\Griffin\Binaries\Win64\ue4ss\Mods\`. Requires UE4SS Galactic Racer Edition from its own Nexus page. |
+| **Main files** (1st) | `SWGRCouch-1.0.2-gameroot.zip` | the game-folder download: the mod and `swgr_inputfilter.dll` (signed by the author), laid out like the game folder (`Griffin/Binaries/Win64/ue4ss/...`: `Mods/SWGRCouch/` with `README.txt` and `native/swgrcouch-cert.pem`, `UE4SS_Signatures/`) plus `SWGRCouch-INSTALL.txt` in the game folder. No `mods.txt` / `mods.json` (the mod starts through its `enabled.txt`: the player's other UE4SS mods are never switched off). **No UE4SS in it**: players install UE4SS Galactic Racer Edition from its own Nexus page first (set it as a requirement), then extract this zip into the game folder (the one that contains `Griffin`). |
+| **Main files** (2nd) | `SWGRCouch-1.0.2-nexus.zip` | the lean file: the mod folder only, **no DLL and no executable**: `SWGRCouch/` (`enabled.txt`, `Scripts/*.lua`, an empty `native/` with a note), `LICENSE`, `README.txt` (install steps). Extract into `<game>\Griffin\Binaries\Win64\ue4ss\Mods\`. Requires UE4SS Galactic Racer Edition from its own Nexus page. |
 | **Optional files** | `swgr_inputfilter.dll` | the input filter, ~50 KB, for the lean file. Needed for proper per-player pad routing in split screen: without it the pads mix (every pad steers player 1's car); solo play works without it. Goes into `ue4ss\Mods\SWGRCouch\native\`. Built from the public source, byte-identical rebuild; 1.0.1 carries the author's self-signed signature (not CA-trusted: Windows shows unknown publisher; certificate in `docs/signing/`). sha256 signed `41458d04...`, unsigned build `42e7b2a4...` (full hashes in `docs/INPUTFILTER.md`). |
 
 Suggested file descriptions:
-- game-folder zip: "SWGRCouch 1.0.1 - install UE4SS Galactic Racer Edition first, then unzip this into the game
+- game-folder zip: "SWGRCouch 1.0.2 - install UE4SS Galactic Racer Edition first, then unzip this into the game
   folder and play. Includes the input filter DLL. Steam Deck / Linux: UE4SS needs the launch option
   WINEDLLOVERRIDES="dwmapi=n,b" %command%."
-- lean zip: "SWGRCouch 1.0.1 - the mod only (Lua scripts). Requires UE4SS Galactic Racer Edition. Add the optional
+- lean zip: "SWGRCouch 1.0.2 - the mod only (Lua scripts). Requires UE4SS Galactic Racer Edition. Add the optional
   input filter DLL for split screen."
 - DLL: "Input filter DLL - needed for split screen with the lean file (separates the players' pads). Put it into
   ue4ss/Mods/SWGRCouch/native/."
@@ -23,7 +23,7 @@ Suggested file descriptions:
 The other zips (`-no-UE4SS`, `-with-UE4SS`, the mod-only zip with `install.sh`) stay on the GitHub and git.jules.my
 release pages; the description links the repository rather than uploading them.
 
-`tools/package.sh` also builds `SWGRCouch-1.0.1-gameroot-with-UE4SS.zip`, the same game-folder tree plus UE4SS Galactic
+`tools/package.sh` also builds `SWGRCouch-1.0.2-gameroot-with-UE4SS.zip`, the same game-folder tree plus UE4SS Galactic
 Racer Edition (`SWGRCouch-INSTALL.txt` from `tools/gameroot/README-with-UE4SS.txt`; its `mods.txt` / `mods.json` list the same mods). It goes on the git.jules.my release page only
 (GenerousMods agreed, 2026-10-21; his concern: re-uploads with an outdated UE4SS), never on Nexus.
 

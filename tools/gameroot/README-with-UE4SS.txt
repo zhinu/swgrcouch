@@ -31,6 +31,7 @@ INSTALL
 
   Check: Griffin\Binaries\Win64\ue4ss\UE4SS.log shows "SWGRCouch @VERSION@ loading" and, at the latest once
   the COUCH CAMPAIGN page opens or a second pad joins, "native filter loaded: installed=1 reason=ok".
+  "installed=0 reason=mismatch" there = a game update this SWGRCouch does not know: get the newest one.
 
 UPDATING
   Extract the new zip the same way over the old files. Your own files are never in this zip, so they
@@ -87,7 +88,8 @@ CREDITS AND LICENCES
     check there before reporting it to GenerousMods: the copy in this zip may be older.
   - Please do not re-upload this zip, the mod or UE4SS anywhere else: link to the pages instead.
   - UE4SS (RE-UE4SS, https://github.com/UE4SS-RE/RE-UE4SS): MIT licence, ue4ss\LICENSE.
-  - ue4ss\UE4SS_Signatures\: SWGRCouch's signature files for the game's 2026-10-12 hotfix.
+  - ue4ss\UE4SS_Signatures\: SWGRCouch's signature files (checked on the game builds CL382493,
+    CL382801 and CL386500, the 2026-10-22 update).
 
   Full README, source, the other downloads and the code signing policy:
     https://github.com/zhinu/swgrcouch

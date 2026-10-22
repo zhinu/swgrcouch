@@ -1,6 +1,6 @@
 # SWGRCouch: FREE MODE (solo or couch split screen) and self-hosted races for STAR WARS: Galactic Racer
 
-UE4SS Lua mod, version 1.0.1 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
+UE4SS Lua mod, version 1.0.2 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
 5.7.4 shipping, Denuvo, project codename Griffin; hotfix build CL 382493), UE4SS Galactic Racer Edition (open beta,
 2026-10-08). The main-menu tab was called SPLIT SCREEN until 0.10.0; it is now **FREE MODE** (the mod is for one
 player too). This file ships twice: as `docs/REFERENCE.md` and as `SWGRCouch/README.md`, which `install.sh` copies into

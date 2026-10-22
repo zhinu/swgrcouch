@@ -2,7 +2,7 @@
 
 [size=4][b]One screen, up to four controllers.[/b][/size]
 Race with friends in Free Mode, run a Galactic Grand Prix, or play the game's own campaign together.
-[b]Version 1.0.1[/b]  ·  free  ·  fan-made  ·  Free Mode 1-4 players  ·  Couch Campaign 2 players  ·  Windows, Linux, Steam Deck
+[b]Version 1.0.2[/b]  ·  free  ·  fan-made  ·  Free Mode 1-4 players  ·  Couch Campaign 2 players  ·  Windows, Linux, Steam Deck
 
 [img]https://git.jules.my/jules/swgrcouch/raw/branch/main/docs/media/hero-2p-race.gif[/img]
 [i]Two players race on Crait. Each one has their own car, view, HUD and pad.[/i]
@@ -17,7 +17,14 @@ Race with friends in Free Mode, run a Galactic Grand Prix, or play the game's ow
 [*][b]Couch Campaign:[/b] the game's real campaign (paddock, run map, acts, bosses). Verified for [b]2 players[/b]; 3-4 players are [i]experimental[/i]. Each player has their own vehicle class, racer style, credits, shop, rewards, backer and garage.
 [*][b]Split:[/b] top / bottom or side by side for 2 players, quarters for 3-4.
 [/list]
-[b]New in 1.0.1: the big stability update[/b]
+[b]New in 1.0.2: the 2026-10-22 game update[/b]
+[list]
+[*][b]Split-screen steering works again on the new game build (CL386500):[/b] the update made every pad steer every car in races. The input filter knows the new build, and from now on it works out a game build it does not know yet by itself, so the next game update should not break it again.
+[*][b]UE4SS signature fix:[/b] GMalloc.lua reads GMalloc straight from a GMalloc user (the old one pointed past it on the new build).
+[*][b]Player 2's FAVORS grid shows its cards[/b] on the couch loadout (it was an empty panel with only the names and texts on the right).
+[*][b]Clearer log:[/b] UE4SS.log says to update SWGRCouch when the input filter cannot patch, and warns when the old SplitScreenMod is on (turn it off).
+[/list]
+[b]1.0.1: the big stability update[/b]
 [list]
 [*][b]The random race-start crash is gone:[/b] UE4SS keeps a cache of class members that it never clears, and a Blueprint class reloaded at the same address made a member read hit freed memory (about 1 race start in 40). SWGRCouch now keeps the classes it reads loaded for the session: 0 crashes in every test session since. The full report is shared with GenerousMods ([url=https://git.jules.my/jules/ue4ss-gr-findproperty-cache]write-up and repro[/url]).
 [*][b]The post-race map waits for everyone:[/b] player 1 can no longer pick the next node while player 2 still has rewards open, even with a fast A as the map appears, and the first A after the wait always picks the selected node.
@@ -120,9 +127,9 @@ A [b]FREE MODE[/b] tab on the main menu, drawn in the game's own style. Pick a w
 [/list]
 The game is not included: you need a legitimately bought copy (Steam). The mod contains no game code and no game files.
 
-[b]Requirements:[/b] STAR WARS Galactic Racer on Steam (build CL 382801, the 2026-10-12 hotfix, or CL 382493); one pad per player (Xbox layout tested; DualShock through Steam Input works); Windows, or Linux / Steam Deck with Proton; [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] by GenerousMods.
+[b]Requirements:[/b] STAR WARS Galactic Racer on Steam (build CL 386500, the 2026-10-22 update, or the older CL 382801 / CL 382493); one pad per player (Xbox layout tested; DualShock through Steam Input works); Windows, or Linux / Steam Deck with Proton; [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] by GenerousMods.
 
-[b]The easy way: SWGRCouch-1.0.1-gameroot.zip[/b] (the mod and its input filter DLL, laid out like the game folder; no UE4SS in it)
+[b]The easy way: SWGRCouch-1.0.2-gameroot.zip[/b] (the mod and its input filter DLL, laid out like the game folder; no UE4SS in it)
 [list=1]
 [*][b]Install [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] by GenerousMods first[/b], as its page says.
 [*]Find the game folder, the one that contains [font=Courier New]Griffin[/font] (Steam: right-click the game > Manage > Browse local files).
@@ -132,14 +139,14 @@ The game is not included: you need a legitimately bought copy (Steam). The mod c
 [b]Steam Deck:[/b] extract the zip in Desktop Mode (Ark: untick "Extract into subfolder"), set the launch option, go back to Gaming Mode. One pad per extra player; the Deck's own controls are player 1.
 [b]Already using UE4SS for other mods?[/b] Nothing to skip: the zip carries no [font=Courier New]mods.txt[/font], [font=Courier New]mods.json[/font] or [font=Courier New]UE4SS-settings.ini[/font], so your other mods stay as they are. SWGRCouch starts through its own [font=Courier New]Mods\SWGRCouch\enabled.txt[/font]. Keep SplitScreenMod off (another split screen).
 [b]Signed DLL:[/b] its public certificate [font=Courier New]swgrcouch-cert.pem[/font] is next to it in [font=Courier New]native\[/font]. Windows: the DLL's Properties > Digital Signatures shows "Jules (SWGRCouch)" (marked not trusted: expected, it is self-signed). Linux: [font=Courier New]osslsigncode verify -CAfile swgrcouch-cert.pem -in swgr_inputfilter.dll[/font].
-An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.1]git.jules.my release page[/url] (with GenerousMods' OK; please don't re-upload it). On Nexus, get UE4SS from [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]its own page[/url].
+An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.2]git.jules.my release page[/url] (with GenerousMods' OK; please don't re-upload it). On Nexus, get UE4SS from [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]its own page[/url].
 
 [b]The lean way: the mod folder + the optional DLL[/b]
 [list]
-[*][b]Mod folder[/b] (SWGRCouch-1.0.1-nexus.zip): the mod folder only, no DLL or executable. Install [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] first, then extract into [font=Courier New]Griffin\Binaries\Win64\ue4ss\Mods\[/font].
+[*][b]Mod folder[/b] (SWGRCouch-1.0.2-nexus.zip): the mod folder only, no DLL or executable. Install [url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] first, then extract into [font=Courier New]Griffin\Binaries\Win64\ue4ss\Mods\[/font].
 [*][b]Optional file[/b] (swgr_inputfilter.dll): into [font=Courier New]ue4ss\Mods\SWGRCouch\native\[/font]. It gives each player's car its own pad; without it every pad steers player 1's car in split screen.
 [/list]
-[b]Check it works:[/b] the main menu has a FREE MODE tab, and [font=Courier New]ue4ss\UE4SS.log[/font] shows [font=Courier New]SWGRCouch 1.0.1 loading[/font].
+[b]Check it works:[/b] the main menu has a FREE MODE tab, and [font=Courier New]ue4ss\UE4SS.log[/font] shows [font=Courier New]SWGRCouch 1.0.2 loading[/font].
 [b]Uninstall:[/b] delete or rename [font=Courier New]Griffin\Binaries\Win64\dwmapi.dll[/font] (Windows), or remove the launch option (Linux / Steam Deck).
 
 
@@ -169,7 +176,7 @@ An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the [
 [*][b]The game stopped starting after a game update?[/b] Turn the mod off, update UE4SS Galactic Racer Edition, and look for a new SWGRCouch version.
 [*][b]Online play?[/b] No. Steam Offline Mode, Steam Cloud off, and your pre-mod Saved folder back before you go online.
 [*][b]Steam Deck?[/b] Yes, through Proton: UE4SS Galactic Racer Edition, the game-folder zip and the launch option. Connect one pad per extra player.
-[*][b]My virus scanner flags the DLL?[/b] A heuristic false positive: the DLL rebuilds byte-identical from the public C source. The 1.0.1 copy is signed by the author with a self-signed certificate (Windows still shows unknown publisher; the certificate and hashes are in the repository's docs/signing/).
+[*][b]My virus scanner flags the DLL?[/b] A heuristic false positive: the DLL rebuilds byte-identical from the public C source. The 1.0.2 copy is signed by the author with a self-signed certificate (Windows still shows unknown publisher; the certificate and hashes are in the repository's docs/signing/).
 [/list]
 
 
@@ -183,7 +190,7 @@ An all-in-one variant that also carries UE4SS Galactic Racer Edition is on the [
 [list]
 [*][b]SWGRCouch[/b] by Jules, [b]made with the help of Claude[/b] (Anthropic). MIT licence.
 [*][url=https://www.nexusmods.com/starwarsgalacticracer/mods/2]UE4SS Galactic Racer Edition[/url] by [b]GenerousMods[/b] (the UE4SS build the mod runs on), and [url=https://github.com/UE4SS-RE/RE-UE4SS]UE4SS[/url] (MIT).
-[*]All downloads with their sha256: [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.1]git.jules.my release 1.0.1[/url].
+[*]All downloads with their sha256: [url=https://git.jules.my/jules/swgrcouch/releases/tag/v1.0.2]git.jules.my release 1.0.2[/url].
 [*]Source, full README and the code signing policy: [url=https://github.com/zhinu/swgrcouch]github.com/zhinu/swgrcouch[/url] and [url=https://git.jules.my/jules/swgrcouch]git.jules.my/jules/swgrcouch[/url].
 [/list]
 [i]Fan-made and unofficial. SWGRCouch is not affiliated with, endorsed by or sponsored by Lucasfilm, Disney, Fuse Games or Secret Mode. STAR WARS and STAR WARS Galactic Racer are trademarks of their respective owners. No game files are distributed.[/i]

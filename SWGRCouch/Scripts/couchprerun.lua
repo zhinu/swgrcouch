@@ -1583,6 +1583,11 @@ local function openPick(P, k)
         if not okL then U.warn(TAG, "P%s favour grid: the copy's TV_Favours refused its AllFavours", tostring(P.pnum)) end
     end
     pcall(function() N.scr.VS_MidPanelSwitcher:SetActiveWidget(N.scr.B_Favours) end)
+    -- couch-fix71 (player report 2026-10-22, live 21:35 UTC shot 233558-l6): P2's FAVORS grid was an empty veil, only
+    -- the info panel showed the focused favour's name and text. Decoded SwitchToFavourSelectForSlot: after the
+    -- switcher it sets B_LoadoutContextContent Visible - the grid's container, Hidden in the widget's defaults. P1's
+    -- screen gets it from the game; the copy never runs that function (see the header), so the copy does it here.
+    pcall(function() N.scr.B_LoadoutContextContent:SetVisibility(C.E.Vis.Visible) end)
     pcall(favActive, P)
     -- the top row's UP: back to the slot he came from
     for c = 1, math.min(FAV_COLS, #N.pickVms) do
@@ -1791,6 +1796,18 @@ local function poll(P, now)
     P.prevA = pressed
     if P.toast and now >= (P.toastUntil or 0) then P.toast = nil; render(P) end
     if P.native and P.zone == "start" and now >= (P.native.headAt or 0) then startHead(P, false) end
+    -- couch-fix71: while his grid is open its container stays Visible (live 21:38 UTC: after an inactivity pause the
+    -- copy's B_LoadoutContextContent was Hidden again; openPick sets it at every open, this re-asserts it twice a second)
+    if P.pickOpen and P.native and now >= (P.native.ctxAt or 0) then
+        P.native.ctxAt = now + 500
+        local scr = P.native.scr
+        if U.alive(scr) then
+            pcall(function()
+                local w = scr.B_LoadoutContextContent
+                if U.ok(w) and w:GetVisibility() ~= C.E.Vis.Visible then w:SetVisibility(C.E.Vis.Visible) end
+            end)
+        end
+    end
     hoverRetry(P, now)
 end
 
