@@ -149,6 +149,237 @@ local function restoreCvars(keep)
     return n, usDirty
 end
 
+---------------------------------------------------------------------------------------------------- the user's ini
+-- couch-fix76 (AUTO-173, live 2026-10-24): GameUserSettings.ini held the split preset (sg.ViewDistance / Shadow / GI /
+-- Reflection / Effects 3 -> 1/1/0/0/1) after a session WITHOUT any hot reload (the file was written in start 4, the
+-- reloads were in start 5): the game saves its settings natively during a split race (UGameUserSettings::SaveSettings
+-- -> Scalability::SaveState reads the LIVE sg.* cvars; the same file carried LastCameraMode, a race-time value). That
+-- C++ call never passes the SaveSettings hook (the takedown guard never fired in ~300 sessions, hook audit H47), so
+-- the split values can reach the player's ini in any normal couch session, and the next start loads them.
+-- Guard (cfg.GfxIniGuard, default true), console and usersettings modes alike:
+--   1. while a split preset is applied, the user's sg.* values (and the split ones) are written to <ModDir>/
+--      gfx-user.txt (a game killed / crashed mid-split leaves it behind);
+--   2. SLOW loop while applied: the ini's [ScalabilityGroups] is read; a value that is no longer the user's = the game
+--      saved the split one: the user's values are written back into the file at once (only those lines change);
+--   3. front end (restore): after the cvars are back, a game-side save seen this session (or an ini that still differs)
+--      -> GameUserSettings:SaveSettings() once (cfg.GfxIniResave: the game's own save of the now-restored values, so
+--      its config cache holds them too), verified by a re-read (a patch if it still differs); gfx-user.txt emptied;
+--   4. boot (first front end): a non-empty gfx-user.txt = the last session ended inside a split race: every ini value
+--      still equal to the split one goes back to the user's through the game's own setters (Set<G>Quality +
+--      ApplyNonResolutionSettings + SaveSettings), else by a file patch.
+-- VERIFY(V-GFX-08): a split race with a camera change (RB) / pause-menu settings: "the game saved the split preset into
+--   GameUserSettings.ini ... written back"; after the race the ini's [ScalabilityGroups] = the player's values.
+local INI_SECTION = "ScalabilityGroups"
+
+local function readFile(p)
+    local f = p and io.open(p, "rb")
+    if not f then return nil end
+    local s = f:read("a")
+    f:close()
+    return s
+end
+M._readFile = readFile
+M._writeFile = function(p, s)
+    local f = io.open(p, "wb")
+    if not f then return false end
+    f:write(s)
+    f:close()
+    return true
+end
+M._getenv = function(k) return os.getenv(k) end
+
+local iniPathCache = nil
+--- The live GameUserSettings.ini (the first candidate that opens), nil when none
+function M.iniPath()
+    if iniPathCache and readFile(iniPathCache) then return iniPathCache end
+    local rel = "/StarWarsGalacticRacer/Saved/Config/Windows/GameUserSettings.ini"
+    local cands = {}
+    if type(cfg.GfxIniPath) == "string" and cfg.GfxIniPath ~= "" then cands[#cands + 1] = cfg.GfxIniPath end
+    local lad = M._getenv("LOCALAPPDATA")
+    if lad and lad ~= "" then cands[#cands + 1] = (lad:gsub("\\", "/")) .. rel end
+    local cd = M._getenv("STEAM_COMPAT_DATA_PATH")
+    if cd and cd ~= "" then cands[#cands + 1] = "Z:" .. cd .. "/pfx/drive_c/users/steamuser/AppData/Local" .. rel end
+    cands[#cands + 1] = "C:/users/steamuser/AppData/Local" .. rel
+    for _, p in ipairs(cands) do
+        if readFile(p) then iniPathCache = p; return p end
+    end
+    return nil
+end
+
+--- [ScalabilityGroups] of an ini text -> { ["sg.X"] = number } (pure)
+function M.parseSg(text)
+    local out, inSec = {}, false
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        local sec = line:match("^%s*%[(.-)%]%s*$")
+        if sec then inSec = (sec == INI_SECTION)
+        elseif inSec then
+            local k, v = line:match("^%s*(sg%.[%w_]+)%s*=%s*([%-%d%.]+)")
+            if k then out[k] = tonumber(v) end
+        end
+    end
+    return out
+end
+
+--- text with the sg.* lines of `want` ({["sg.X"] = n}) set inside [ScalabilityGroups] (pure; other bytes unchanged)
+--- -> newText, count changed
+function M.patchSg(text, want)
+    text = tostring(text or "")
+    local out, inSec, n = {}, false, 0
+    local pos = 1
+    while pos <= #text do
+        local e = text:find("\n", pos, true)
+        local line = e and text:sub(pos, e) or text:sub(pos)
+        pos = e and (e + 1) or (#text + 1)
+        local body = line:gsub("[\r\n]+$", "")
+        local sec = body:match("^%s*%[(.-)%]%s*$")
+        if sec then inSec = (sec == INI_SECTION)
+        elseif inSec then
+            local k, v = body:match("^%s*(sg%.[%w_]+)%s*=%s*([^\r\n]*)$")
+            local w = k and want[k]
+            if w ~= nil and tonumber(v) ~= math.floor(w) then
+                line = k .. "=" .. tostring(math.floor(w)) .. line:sub(#body + 1)
+                n = n + 1
+            end
+        end
+        out[#out + 1] = line
+    end
+    return table.concat(out), n
+end
+
+-- the sg.* values the mod saved before its first change -> { ["sg.X"] = user }, { ["sg.X"] = split }
+local function userSg(g)
+    local user, split = {}, {}
+    local p = M.presetFor(g.appliedViews or 0) or {}
+    for name, v in pairs(g.saved or {}) do
+        if name:sub(1, 3) == "sg." then user[name] = math.floor(v); split[name] = p[name] end
+    end
+    for name, rec in pairs(g.savedUS or {}) do
+        if name:sub(1, 3) == "sg." then user[name] = math.floor(rec.level); split[name] = p[name] end
+    end
+    return user, split
+end
+
+local function sidecarPath()
+    local ok, d = pcall(settings.modDir)
+    if not ok or type(d) ~= "string" or d == "" then return nil end
+    return d .. "/gfx-user.txt"
+end
+
+local function writeSidecar(user, split)
+    local p = sidecarPath()
+    if not p then return false end
+    local lines = {}
+    for k, v in pairs(user) do lines[#lines + 1] = string.format("%s=%d:%s", k, v, split[k] ~= nil and tostring(math.floor(split[k])) or "") end
+    table.sort(lines)
+    return M._writeFile(p, table.concat(lines, "\n") .. (#lines > 0 and "\n" or ""))
+end
+
+-- -> { ["sg.X"] = { user = n, split = n|nil } } (empty table when none)
+function M.readSidecar()
+    local s = readFile(sidecarPath())
+    local out = {}
+    for k, u, sp in tostring(s or ""):gmatch("(sg%.[%w_]+)=(%-?%d+):(%-?%d*)") do
+        out[k] = { user = tonumber(u), split = tonumber(sp) }
+    end
+    return out
+end
+
+local function iniGuardOn() return cfg.GfxIniGuard ~= false end
+
+-- the keys whose ini value is not the user's: { "sg.X=1 (user 3)", ... }, the ini text
+local function iniDiff(user)
+    local p = M.iniPath()
+    local text = readFile(p)
+    if not text then return nil, nil, p end
+    local ini = M.parseSg(text)
+    local d = {}
+    for k, u in pairs(user) do
+        if ini[k] ~= nil and math.floor(ini[k]) ~= u then d[#d + 1] = string.format("%s=%s (user %d)", k, tostring(ini[k]), u) end
+    end
+    table.sort(d)
+    return d, text, p
+end
+
+local function patchIni(user, why)
+    local d, text, p = iniDiff(user)
+    if not (d and #d > 0) then return 0 end
+    local nt, n = M.patchSg(text, user)
+    if n > 0 and M._writeFile(p, nt) then
+        U.log(TAG, "GameUserSettings.ini: %d split value(s) replaced by the player's (%s) (V-GFX-08)", n, why)
+        return n
+    end
+    U.warn(TAG, "GameUserSettings.ini could not be rewritten (%s): %s", tostring(why), tostring(p))
+    return 0
+end
+
+local function gameSave(why)
+    if cfg.GfxIniResave == false then return false end
+    local s = userSettings()
+    if not s then return false end
+    local ok, err = pcall(function() s:SaveSettings() end)
+    U.log(TAG, "GameUserSettings:SaveSettings() after the restore (%s): %s (V-GFX-08)", tostring(why),
+        ok and "ok" or tostring(err))
+    return ok
+end
+
+--- SLOW loop (main.lua): watch the ini while a split preset is applied; the boot check once in the front end
+function M.slowTick()
+    if not iniGuardOn() then return end
+    local g = G()
+    if not g.bootChecked and St.phase == "FRONTEND" then
+        g.bootChecked = true
+        if not (g.saved or g.savedUS) then U.try(TAG, M.bootRepair) end
+    end
+    if (g.appliedViews or 0) < 2 or not (g.saved or g.savedUS) then return end
+    local user = userSg(g)
+    if next(user) == nil then return end
+    local d = iniDiff(user)
+    if d and #d > 0 then
+        g.iniSaves = (g.iniSaves or 0) + 1
+        U.warn(TAG, "the game saved the split preset into GameUserSettings.ini (%s; save #%d this session): the player's "
+            .. "values written back (V-GFX-08, AUTO-173)", table.concat(d, ", "), g.iniSaves)
+        patchIni(user, "split race")
+    end
+end
+
+--- a gfx-user.txt left by a session that ended inside a split race: the ini values still equal to the split ones go back
+--- to the player's (the game's own setters + save, else a file patch). -> count repaired
+function M.bootRepair()
+    local sc = M.readSidecar()
+    if next(sc) == nil then return 0 end
+    local text = readFile(M.iniPath())
+    local ini = text and M.parseSg(text) or {}
+    local fix = {}
+    for k, r in pairs(sc) do
+        if r.user and ini[k] ~= nil and math.floor(ini[k]) ~= r.user and (r.split == nil or math.floor(ini[k]) == r.split) then
+            fix[k] = r.user
+        end
+    end
+    local n = 0
+    if next(fix) ~= nil then
+        local s = userSettings()
+        local okSet = s ~= nil
+        if s then
+            for k, v in pairs(fix) do
+                local group = SG_GROUP[k]
+                if group then okSet = usSet(s, group, v) and okSet else okSet = false end
+            end
+            if okSet then okSet = usApply(s) end
+            if okSet then okSet = pcall(function() s:SaveSettings() end) end
+        end
+        for _ in pairs(fix) do n = n + 1 end
+        local left = text and select(1, iniDiff(fix)) or nil
+        if left and #left > 0 then patchIni(fix, "boot repair") end
+        U.warn(TAG, "boot: the last session ended inside a split race with %d split value(s) in GameUserSettings.ini: "
+            .. "the player's values back (%s) (V-GFX-08, AUTO-173)", n, okSet and "the game's own settings save" or "file patch")
+    else
+        U.log(TAG, "boot: gfx-user.txt from an interrupted split race; GameUserSettings.ini already holds the player's values")
+    end
+    local p = sidecarPath()
+    if p then M._writeFile(p, "") end
+    return n
+end
+
 function M.applyForViews(nViews)
     local g = G()
     nViews = nViews or 1
@@ -195,6 +426,10 @@ function M.applyForViews(nViews)
         M.setTakedownCameras(g.savedTakedown) -- setting turned back on mid-race: give the user's value back
     end
     g.appliedViews = nViews
+    if iniGuardOn() then                    -- couch-fix76 AUTO-173: the user's values outlive a crash
+        local user, split = userSg(g)
+        if next(user) ~= nil then U.try(TAG, writeSidecar, user, split) end
+    end
 end
 
 userSettings = function()
@@ -290,10 +525,22 @@ end
 
 function M.restore()
     local g = G()
+    local user = (g.saved or g.savedUS) and userSg(g) or {}
     local n, usDirty = restoreCvars(nil)
     if usDirty then
         local s = userSettings()
         if s then usApply(s) end
+    end
+    -- couch-fix76 AUTO-173: a game-side save during the split left its values in the player's ini (see "the user's ini")
+    if iniGuardOn() and next(user) ~= nil then
+        local d = iniDiff(user)
+        if (g.iniSaves or 0) > 0 or (d and #d > 0) then
+            U.try(TAG, gameSave, "split values were saved by the game this session")
+            d = iniDiff(user)
+            if d and #d > 0 then U.try(TAG, patchIni, user, "front end, after the game's save") end
+        end
+        local p = sidecarPath()
+        if p then M._writeFile(p, "") end
     end
     if g.savedTakedown ~= nil then
         local s = userSettings()

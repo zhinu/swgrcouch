@@ -22,15 +22,21 @@
 #                                            SWGRCouch-INSTALL.txt                     (tools/gameroot/README.txt; a name
 #                                              no other mod's README.txt overwrites; the same text is the mod folder's
 #                                              README.txt)
-#                                            Griffin/Binaries/Win64/ue4ss/UE4SS_Signatures/*.lua,
-#                                              ue4ss/Mods/SWGRCouch/ (as below, the DLL included)
+#                                            Griffin/Binaries/Win64/ue4ss/Mods/SWGRCouch/ (as below, the DLL included)
+#                                          1.0.3: of our UE4SS_Signatures/ ONLY the two UE4SS Galactic Racer Edition
+#                                          V0.9.4 does not ship ($SIG_ADD: GNatives.lua, GUObjectHashTables.lua): his
+#                                          four (FName_Constructor, FName_ToString, GUObjectArray identical to ours, his
+#                                          GMalloc resolving to the same address) are never replaced - the build dies
+#                                          if the UE4SS copy has a file of the same name. Without the two, V0.9.4 logs
+#                                          "GNatives not found" / "Failed to find FUObjectHashTables::Get" and the game
+#                                          crashed at every couch race load on CL386500 (live 2026-10-24, 3 of 3;
+#                                          0 of 6 races with them).
 #                                          NO mods.txt / mods.json (1.0.1 round 13: the zip's copies replaced the
 #                                          player's and switched his other UE4SS mods off): UE4SS Galactic Racer Edition
 #                                          (3.0.1 e3ba1016) starts every Mods/<name>/ folder that has an enabled.txt,
 #                                          also when mods.txt does not list it or says 0 (live 2026-10-09: "Mod
 #                                          'SWGRCouch' has enabled.txt, starting mod." with "SWGRCouch : 0" in mods.txt).
-#                                          Checked: nothing outside ue4ss/Mods/SWGRCouch/ and UE4SS_Signatures/*.lua
-#                                          besides SWGRCouch-INSTALL.txt.
+#                                          Checked: nothing outside ue4ss/Mods/SWGRCouch/ besides SWGRCouch-INSTALL.txt.
 #                                          no dwmapi.dll, no UE4SS.dll, no UE4SS-settings.ini, no UE4SS LICENSE:
 #                                          one binary (swgr_inputfilter.dll), checked
 #   dist/SWGRCouch-VERSION-gameroot-with-UE4SS.zip
@@ -39,13 +45,14 @@
 #                                          tools/gameroot/README-with-UE4SS.txt:
 #                                            SWGRCouch-INSTALL.txt (+ the same text as Mods/SWGRCouch/README.txt)
 #                                            Griffin/Binaries/Win64/dwmapi.dll         (UE4SS loader)
-#                                            Griffin/Binaries/Win64/ue4ss/             (UE4SS Galactic Racer Edition as
-#                                              shipped, its LICENSE included, + ue4ss_signatures/*.lua in
-#                                              UE4SS_Signatures/, mods.txt / mods.json edited as install.sh does:
-#                                              SWGRCouch : 1 first, ConsoleEnablerMod : 1, SplitScreenMod and
-#                                              BPModLoaderMod 0, mods.json with the same entries in the same order
-#                                              (checked); UE4SS-settings.ini checked for the two keys
-#                                              install.sh sets: bForceGUObjectArrayForIteration = true, UseCache = 0)
+#                                            Griffin/Binaries/Win64/ue4ss/             (1.0.3: UE4SS Galactic Racer Edition
+#                                              EXACTLY as its author ships it - LICENSE, UE4SS_Signatures/, settings,
+#                                              mods - every file byte-identical to the UE4SS copy (checked), except
+#                                              mods.txt / mods.json: his files with "SWGRCouch : 1" added first (and
+#                                              SplitScreenMod forced to 0 if a copy ever ships it on), mods.json the
+#                                              same entries in the same order (checked); UE4SS-settings.ini checked
+#                                              for the two keys the mod needs: bForceGUObjectArrayForIteration = true,
+#                                              UseCache = 0)
 #                                            .../ue4ss/Mods/SWGRCouch/                 enabled.txt, LICENSE, README.md
 #                                              (= docs/REFERENCE.md, checked: no relative link), README.txt (the install
 #                                              text), Scripts/*.lua, native/swgr_inputfilter.dll (the DLL slot below)
@@ -63,7 +70,8 @@
 # checked for a relative link to a file the zip does not carry.
 # The DLL zip also carries docs/signing/swgrcouch-cert.pem (the PUBLIC certificate of the author's signature); with
 # SWGR_SIGNED_DLL every zip with the DLL in SWGRCouch/native/ carries it next to the DLL (the install text's verify lines).
-# UE4SS_DIR holds dwmapi.dll and ue4ss/, or is a *-with-UE4SS.zip to take its ue4ss-build/ from; default: the
+# UE4SS_DIR holds dwmapi.dll and ue4ss/, or is the UE4SS Galactic Racer Edition zip as its author ships it (dwmapi.dll
+# and ue4ss/ at its top level), or a *-with-UE4SS.zip to take its ue4ss-build/ from; default: the
 # ue4ss-build/ folder of the newest dist/*-with-UE4SS.zip (the build every release since 0.10.1 ships; a fresh
 # worktree has no dist/: pass the previous release's zip, e.g. ../swgrcouch-rel10/dist/SWGRCouch-1.0.0-with-UE4SS.zip).
 # Re-runnable: it reads only the checked-out tree, so after another fix branch is merged, run it again with the same
@@ -185,7 +193,13 @@ relcheck "$P/README.md" "$P"
 relcheck "$P/SWGRCouch/README.md" "$P/SWGRCouch"
 
 # 3. UE4SS for the with-UE4SS and gameroot zips
-if [ -z "$U" ] || [ "${U%.zip}" != "$U" ]; then
+if [ -n "$U" ] && [ "${U%.zip}" != "$U" ] && unzip -Z1 "$U" 2>/dev/null | grep -qx 'ue4ss/UE4SS.dll'; then
+  # 1.0.3: the author's own UE4SS Galactic Racer Edition zip (dwmapi.dll + ue4ss/ at the top), taken whole
+  mkdir -p "$WORK/u/ue4ss-build"
+  (cd "$WORK/u/ue4ss-build" && unzip -q "$U")
+  echo "UE4SS from $(basename "$U") (the author's zip)"
+  U="$WORK/u/ue4ss-build"
+elif [ -z "$U" ] || [ "${U%.zip}" != "$U" ]; then
   last="$U"
   [ -n "$last" ] || last=$(ls -1t "$DIST"/*-with-UE4SS.zip 2>/dev/null | grep -v -- '-gameroot-with-UE4SS\.zip$' | head -1 || true)
   case "$last" in *-gameroot-with-UE4SS.zip) die "pass a *-with-UE4SS.zip with ue4ss-build/, not the gameroot one";; esac
@@ -197,9 +211,12 @@ if [ -z "$U" ] || [ "${U%.zip}" != "$U" ]; then
   echo "UE4SS from $(basename "$last")"
 fi
 [ -f "$U/dwmapi.dll" ] && [ -d "$U/ue4ss" ] || die "no dwmapi.dll + ue4ss/ in $U"
+UMD5=$(md5sum "$U/ue4ss/UE4SS.dll" | cut -d' ' -f1)
+echo "UE4SS.dll md5 $UMD5"
 
 # 4. zips (an existing one is kept under a dated name)
 DLLNAME="swgr_inputfilter-$VER"
+SIG_ADD="${SWGR_SIG_ADD:-GNatives.lua GUObjectHashTables.lua}"   # 1.0.3: the signatures UE4SS GR Edition V0.9.4 lacks
 mkdir -p "$DIST"
 for z in "$NAME.zip" "$NAME-no-UE4SS.zip" "$NAME-with-UE4SS.zip" "$DLLNAME.zip" "$NAME-nexus.zip" swgr_inputfilter.dll; do
   [ -e "$DIST/$z" ] && mv "$DIST/$z" "$DIST/$z.$(date +%Y%m%d-%H%M%S)"
@@ -254,7 +271,11 @@ PY
 GR="$WORK/$NAME-gameroot"
 GW="$GR/Griffin/Binaries/Win64"
 mkdir -p "$GW/ue4ss/Mods" "$GW/ue4ss/UE4SS_Signatures"
-cp -p "$P"/ue4ss_signatures/*.lua "$GW/ue4ss/UE4SS_Signatures/"
+for sig in $SIG_ADD; do
+  [ -f "$P/ue4ss_signatures/$sig" ] || die "ue4ss_signatures/$sig missing"
+  [ ! -e "$U/ue4ss/UE4SS_Signatures/$sig" ] || die "the UE4SS copy ships UE4SS_Signatures/$sig: never replace it (drop it from SIG_ADD)"
+  cp -p "$P/ue4ss_signatures/$sig" "$GW/ue4ss/UE4SS_Signatures/"
+done
 GM="$GW/ue4ss/Mods/SWGRCouch"
 mkdir -p "$GM/Scripts" "$GM/native"
 cp -p "$P"/SWGRCouch/Scripts/*.lua "$GM/Scripts/"
@@ -263,7 +284,7 @@ cp -p LICENSE "$GM/"
 cp -p "$P/$DLL" "$GM/native/"                                    # the DLL SLOT copy (signed when SWGR_SIGNED_DLL)
 [ ! -f "$CERT" ] || cp -p "$CERT" "$GM/native/"                  # its public certificate (signed only)
 relcheck "$GM/README.md" "$GM"
-# the with-UE4SS variant: GR + the UE4SS copy (its own mods.txt / mods.json replaced by the edited ones below)
+# the with-UE4SS variant: GR + the UE4SS copy as its author ships it (only SWGRCouch added to mods.txt / mods.json)
 GRU="$WORK/$NAME-gameroot-with-UE4SS"
 GUW="$GRU/Griffin/Binaries/Win64"
 mkdir -p "$GUW"
@@ -271,9 +292,9 @@ cp -p "$U/dwmapi.dll" "$GUW/"
 cp -rp "$U/ue4ss" "$GUW/ue4ss"
 [ -f "$GUW/ue4ss/LICENSE" ] || die "the UE4SS copy has no ue4ss/LICENSE (MIT: it must ship with the binaries)"
 cp -rp "$GR/Griffin" "$GRU/"                                      # merges over the UE4SS copy
-# mods.txt / mods.json (with-UE4SS only: GR ships neither, SWGRCouch starts through its enabled.txt): the edits
-# install.sh makes (its step 3) on the UE4SS copy's files, mods.json with the same entries in the same order;
-# UE4SS-settings.ini is only checked for the two keys install.sh sets (step 4)
+# mods.txt / mods.json (with-UE4SS only: GR ships neither, SWGRCouch starts through its enabled.txt): 1.0.3 = the
+# author's files with "SWGRCouch : 1" first (SplitScreenMod forced off only if a copy ships it on), mods.json the same
+# entries in the same order; UE4SS-settings.ini is only checked for the two keys the mod needs
 python3 -I - "$GUW/ue4ss" "$U/ue4ss/UE4SS-settings.ini" <<'PY' || die "mods.txt / mods.json / UE4SS-settings.ini edit failed"
 import json, os, re, sys
 u = sys.argv[1]
@@ -284,11 +305,11 @@ lines = [l for l in raw.replace("\r\n", "\n").split("\n")]
 if lines and lines[-1] == "":
     lines.pop()
 def name(l): return l.split(":", 1)[0].strip() if ":" in l and not l.lstrip().startswith(";") else None
-lines = [l for l in lines if name(l) not in ("SWGRCouch", "ConsoleEnablerMod")]
+lines = [l for l in lines if name(l) != "SWGRCouch"]
 for i, l in enumerate(lines):
-    if name(l) in ("SplitScreenMod", "BPModLoaderMod"):
+    if name(l) == "SplitScreenMod":
         lines[i] = name(l) + " : 0"
-lines = ["SWGRCouch : 1", "ConsoleEnablerMod : 1"] + lines
+lines = ["SWGRCouch : 1"] + lines
 assert name(lines[-1]) == "Keybinds", "mods.txt: Keybinds must stay the last line"
 open(mt, "wb").write((eol.join(lines) + eol).encode("utf-8"))
 # mods.json: the same mods, switches and order as mods.txt (round 13: it had no SWGRCouch / ConsoleEnablerMod entry)
@@ -330,9 +351,29 @@ cp -p "$GRU/SWGRCouch-INSTALL.txt" "$GUW/ue4ss/Mods/SWGRCouch/README.txt"
 for f in "$GW/ue4ss/Mods/mods.txt" "$GW/ue4ss/Mods/mods.json" "$GR/README.txt"; do
   [ ! -e "$f" ] || die "the gameroot zip would ship $f (it would replace the player's file)"
 done
-other=$(cd "$GR" && find . -type f ! -path './Griffin/Binaries/Win64/ue4ss/Mods/SWGRCouch/*' \
-        ! -path './Griffin/Binaries/Win64/ue4ss/UE4SS_Signatures/*.lua' ! -name SWGRCouch-INSTALL.txt)
-[ -z "$other" ] || die "the gameroot zip carries files outside the mod folder / signatures: $other"
+other=$(cd "$GR" && find . -type f ! -path './Griffin/Binaries/Win64/ue4ss/Mods/SWGRCouch/*' ! -name SWGRCouch-INSTALL.txt \
+        ! -path './Griffin/Binaries/Win64/ue4ss/UE4SS_Signatures/*')
+[ -z "$other" ] || die "the gameroot zip carries files outside the mod folder: $other"
+sigs=$(cd "$GW/ue4ss/UE4SS_Signatures" && ls | sort | tr '\n' ' ')
+[ "$sigs" = "$(echo $SIG_ADD | tr ' ' '\n' | sort | tr '\n' ' ')" ] || die "gameroot UE4SS_Signatures holds '$sigs', want only $SIG_ADD"
+# 1.0.3: the with-UE4SS tree holds the author's UE4SS byte for byte (only mods.txt / mods.json carry SWGRCouch's line)
+python3 -I - "$U" "$GUW" <<'PY' || die "the gameroot-with-UE4SS zip does not hold UE4SS exactly as shipped"
+import hashlib, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+def h(p): return hashlib.sha256(open(p, "rb").read()).hexdigest()
+bad = []
+for root, _, files in os.walk(src):
+    for f in files:
+        rel = os.path.relpath(os.path.join(root, f), src)
+        if rel in (os.path.join("ue4ss", "Mods", "mods.txt"), os.path.join("ue4ss", "Mods", "mods.json")):
+            continue
+        d = os.path.join(dst, rel)
+        if not os.path.isfile(d) or h(d) != h(os.path.join(root, f)):
+            bad.append(rel)
+if bad:
+    print("changed / missing UE4SS files:", bad, file=sys.stderr); sys.exit(1)
+PY
+echo "gameroot-with-UE4SS: UE4SS identical to the source (mods.txt / mods.json + SWGRCouch only)"
 [ ! -e "$GRU/README.txt" ] || die "the gameroot-with-UE4SS zip would put a README.txt into the game root"
 # never a player's file: an extract over an existing install must keep them (and no program besides the DLLs)
 for T in "$GR" "$GRU"; do

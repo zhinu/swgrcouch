@@ -499,13 +499,38 @@ local function buildNativeCfg(players)
     }
     -- couch-4p: each subsystem keeps its player's ORIGINAL pad id while couch.lua swaps the ids for a shared screen
     -- (the paddock walker reads P1's subsystem: only P1's physical pad, whichever PC carries it now)
+    -- couch-fix72 (player reports #7 / #3): a car STILL RACING always hears the pad on its PC's LIVE id - the pad the
+    -- engine routes that PC's Enhanced Input from (Boost press, ChangeBoost, TriggerAbility). The original id while a
+    -- couch shared-screen swap is on (P1's pad on P2's PC) split one car between two pads: raw steering / throttle on
+    -- P2's pad, the Enhanced Input actions on P1's. couch.lua no longer swaps while a local human races (V-CC-72); this
+    -- keeps the two paths on ONE pad if anything else ever moves the ids under a racing car (V-INP-13, logged once per
+    -- race). cfg.InputFixLiveIdWhileRacing = false: the original id always (pre-fix72).
     local cm = package.loaded["couch"]
+    local liveRule = opt("InputFixLiveIdWhileRacing", true) ~= false and isRacePhase()
     for _, p in ipairs(players) do
         local a = U.key(p.sub)
         local id = p.ctrlId
         if type(cm) == "table" and type(cm.originalIdOf) == "function" then
             local okO, o = pcall(cm.originalIdOf, p.pc)
-            if okO and type(o) == "number" then id = o end
+            if okO and type(o) == "number" and o ~= id then
+                local keepLive = false
+                if liveRule and p.car then
+                    local okR, r = pcall(M._stillRacing, p.pc, p.index)
+                    keepLive = okR and r == true
+                end
+                if keepLive then
+                    S.liveIdLogged = S.liveIdLogged or {}
+                    local lk = tostring(St.worldGen) .. ":" .. tostring(p.index)
+                    if not S.liveIdLogged[lk] then
+                        S.liveIdLogged[lk] = true
+                        U.warn(TAG, "P%s still races while the pad ids are swapped (live id %d, original %d): its raw input "
+                            .. "follows the live id, the same pad as its Enhanced Input (fix72, V-INP-13)", tostring(p.index),
+                            id, o)
+                    end
+                else
+                    id = o
+                end
+            end
         end
         if a ~= 0 then lines[#lines + 1] = string.format("p %d 0x%x", id, a) end
     end
@@ -553,6 +578,11 @@ local function loadNative(players)
         -- derive=used); derive=/derive_reason= say how (or why not)
         U.log(TAG, "native filter loaded: installed=%s reason=%s build=%s derive=%s (%s, %s ms)", tostring(st.installed),
             tostring(st.reason), tostring(st.build), tostring(st.derive), tostring(st.derive_reason), tostring(st.derive_ms))
+        pcall(function()                       -- couch-fix75 (#8): the game build in the session trail
+            local tr = package.loaded["trail"]
+            if type(tr) == "table" then tr.note("native filter: installed=%s build=%s derive=%s", tostring(st.installed),
+                tostring(st.build), tostring(st.derive)) end
+        end)
         if st.installed ~= "1" then
             U.warn(TAG, "native filter did not patch (%s): falling back to kbsplit", tostring(st.reason))
             U.warn(TAG, "IN RACES EVERY PAD WILL STEER EVERY CAR: this SWGRCouch does not know this game build. Update "
@@ -625,6 +655,17 @@ local function localPlayers()
         end
     end
     return out
+end
+
+-- couch-fix72 (#13 REASSIGN CONTROLLERS): the owner table rewritten NOW (the ids just moved; the DLL's reload thread
+-- picks it up within 250 ms). -> true when the DLL is loaded
+function M.refreshNative(why)
+    if not S.native.loaded then return false end
+    S.native.seq = S.native.seq + 1
+    U.localPlayersForget()
+    writeNativeCfg(buildNativeCfg(localPlayers()))
+    U.log(TAG, "native owner table rewritten (%s)", tostring(why))
+    return true
 end
 
 -- Loads the DLL now (front end, one local player: the lazy join needs it before any guest exists). -> loaded
@@ -739,7 +780,9 @@ function M.padImcForFill()
 end
 
 local function desiredCtx(p, list, kbsplit)
-    local isP1 = (p.ctrlId == 0)
+    -- couch-fix72: P1 = the FIRST local player (a reassignment can put him on another pad id than 0)
+    local isP1
+    if p.index ~= nil then isP1 = (p.index == 1) else isP1 = (p.ctrlId == 0) end
     local p1Rule = opt("InputFixKbSplitP1", "kbp1")
     local dropKb = kbsplit and not isP1
     local dropPad = kbsplit and isP1 and (p1Rule == "always" or (p1Rule == "kbp1" and keyboardIsP1()))
@@ -879,6 +922,7 @@ local P1_VEH_IMCS = { "IMC_Vehicle_Default", "IMC_Vehicle_Alternative", "IMC_Veh
 local P1G = { raised = {}, checked = false, nextMs = 0 }
 
 local function imcUi()
+    if type(U.imcUi) == "function" then return (U.imcUi()) end   -- couch-fix76 AUTO-171: by name when the path misses
     local o = U.findLoaded(IMC_UI_PATH)            -- cached (see imcByName)
     return U.ok(o) and o or nil
 end
@@ -918,6 +962,13 @@ local function stillRacing(pc, index)
     if not comp then return true end          -- unknown: guard it (a guard on a non-racer only costs priority)
     local ok, r = U.pcallFn(comp, "/Script/Griffin.PlayerRaceEventComponent:IsStillRacing", "IsStillRacing")
     return not ok or r ~= false
+end
+-- couch-fix72 (buildNativeCfg's live-id rule): true only when the racer component says so (unknown = not racing)
+function M._stillRacing(pc, index)
+    local comp = racerComp(pc, index)
+    if not comp then return false end
+    local ok, r = U.pcallFn(comp, "/Script/Griffin.PlayerRaceEventComponent:IsStillRacing", "IsStillRacing")
+    return ok and r == true
 end
 
 function M.p1UiRelease(why)
@@ -1218,7 +1269,9 @@ end
 local function padPlayerCount(players)
     local n = 0
     for _, p in ipairs(players) do
-        if p.car and (p.ctrlId ~= 0 or not keyboardIsP1()) then n = n + 1 end
+        local isP1                                                       -- couch-fix72: by local index
+        if p.index ~= nil then isP1 = (p.index == 1) else isP1 = (p.ctrlId == 0) end
+        if p.car and (not isP1 or not keyboardIsP1()) then n = n + 1 end
     end
     return n
 end

@@ -576,8 +576,32 @@ local function dropTag(k)
     tags[k] = nil
 end
 
+-- couch-fix73 #11: "<racer> eliminated" / "Knocked Out" (cfg.HudSplitNoticeMsgs) render-scaled in split views like the
+-- eliminator widgets (hud.noticeScale); every other message on a pooled widget gets scale 1 back. Routed copies only
+-- (uxsplit routes in split races). Address -> scale written.
+local msgScaled = {}
+function M.msgScaleFor(id)
+    local ids = cfg.HudSplitNoticeMsgs
+    if type(ids) ~= "table" or not ids[id] then return 1 end
+    local okH, hud = pcall(U.mod, "hud")
+    if not okH or type(hud) ~= "table" or type(hud.noticeScale) ~= "function" then return 1 end
+    local views = tonumber(St.race.localViews) or #U.localPlayersRO()
+    local ok, sc = pcall(hud.noticeScale, views, St.race.singleView)
+    return ok and tonumber(sc) or 1
+end
+local function scaleMsg(w, k, id)
+    local want = M.msgScaleFor(id)
+    local cur = msgScaled[k]
+    if cur == want or (cur == nil and want == 1) then return end
+    if pcall(function()
+        w:SetRenderTransformPivot({ X = 0.5, Y = 0.5 })
+        w:SetRenderScale({ X = want, Y = want })
+    end) then msgScaled[k] = want end
+end
+
 local function tagCopy(w, k, text, e, c, grp, res)
     if tags[k] then dropTag(k) end
+    if U.ok(w) and grp then scaleMsg(w, k, grp.id) end
     local pr = pre[k]
     if pr then                                   -- #94: collapsed at its Initialise; applyTag below decides (same call)
         pre[k] = nil
@@ -1563,6 +1587,37 @@ end
 -- "own": each HUD root is tinted from ITS player's state, written only on a change (UserWidget:SetColorAndOpacity
 -- multiplies every child; WBP_Hud_Race's animations target children only). Last crash (health 1) wins over ramjet.
 local TINTS = { none = FX.TintNone, danger = FX.TintLastCrash, ramjet = FX.TintRamjet, overheat = FX.TintOverheat }
+
+-- couch-fix73 #2 (player couple, 1.0.2: "the ramjet HUD stays red after redlining stops while it cools down inside the
+-- redline heat zone; it should go back to orange as soon as redlining stops"). ERamjetState (usmap): 0 NotReady,
+-- 1 Ready, 2 Engaging, 3 Active, 4 CriticalWarning, 5 GraceTime, 6 Overheated, 7 Exploded. EVERY burn ends in state
+-- 6 (the cool-down: RJDIAG logs 2026-10-15, 173 samples, also after a release at heat 0.49 that never redlined) and
+-- stays there until the heat is back down (up to ~5 s), and the tint used to cover 4-6. The game's own redline
+-- warning (WBP_Hud_RamjetOverheatWarning, decoded) shows ONLY in state 4, and its "Redlining" trait
+-- (TRT_CriticalRamjetPower) is state 4 too. Red now = cfg.UxSplitOverheatStates (default 4 redlining + 5 grace time,
+-- both still on the throttle at full heat); the cool-down (6) is the plain orange HUD. The bar's own red box still
+-- fades with the heat exactly like solo (hud.ramjetParams = the game's GetEngineOverheatingPercentage mapping).
+local OVERHEAT_DEFAULT = { 4, 5 }
+function M.overheatState(rs)
+    if type(rs) ~= "number" then return false end
+    local list = cfg.UxSplitOverheatStates
+    if type(list) ~= "table" then list = OVERHEAT_DEFAULT end
+    for _, v in ipairs(list) do if v == rs then return true end end
+    return false
+end
+
+-- pure (sim): the tint one HUD wants from its car. hp = VehicleHealth, bs = BoostState, rs = RamjetState
+function M.tintFor(hp, bs, rs, colours, ramjet)
+    if colours and hp == 1 then return "danger" end
+    if ramjet then
+        -- 0.13.0 (Jules: "second box in red, as in warning stop accelerating"): REDLINING turns THIS view red;
+        -- firing keeps the blue tint
+        if M.overheatState(rs) then return "overheat" end
+        if type(bs) == "number" and bs >= 3 then return "ramjet" end   -- EBoostState: 3 MovingToRamjet, 4 Ramjet
+    end
+    return "none"
+end
+
 local function tintTick(ps)
     for _, e in ipairs(E.list) do
         local want = "none"
@@ -1571,18 +1626,13 @@ local function tintTick(ps)
             local comp = st.comp
             local hp
             if comp then pcall(function() hp = comp.VehicleHealth end) end      -- the BP's own test: Health == 1
-            if A.colours and hp == 1 then
-                want = "danger"
-            elseif A.ramjet then
+            local bs, rs
+            if A.ramjet and not (A.colours and hp == 1) then
                 local vs = st.vs
-                local bs, rs
-                if vs then pcall(function() bs = vs.BoostState end) end        -- EBoostState: 3 MovingToRamjet, 4 Ramjet
+                if vs then pcall(function() bs = vs.BoostState end) end
                 if vs then pcall(function() rs = tonumber(vs.RamjetState) end) end
-                -- 0.13.0 (Jules: "second box in red, as in warning stop accelerating"): the ramjet OVERHEAT (RamjetState
-                -- 4-6, bypass filling toward the explosion) turns THIS view red; firing (<=3) keeps the blue tint
-                if type(rs) == "number" and rs >= 4 and rs <= 6 then want = "overheat"
-                elseif type(bs) == "number" and bs >= 3 then want = "ramjet" end
             end
+            want = M.tintFor(hp, bs, rs, A.colours, A.ramjet)
         end
         -- review 0.7.0: validated first; and a HUD with no record gets TintNone once too (a tint left by a quiet disarm
         -- or a hot reload is cleared; white = the UserWidget default, its animations target children only)
@@ -2065,7 +2115,7 @@ function M.init()
     end
     -- "leaving" fires synchronously inside the LoadMap / seamless-travel / RequestReturnToMenus pre-hooks: the hooks go
     -- before the map changes (run H crash rule). POSTRACE: the world is alive, tints / fades / copies are given back.
-    St.on("leaving", TAG, function(reason) M.disarm("leaving: " .. tostring(reason), true) end)
+    St.on("leaving", TAG, function(reason) msgScaled = {}; M.disarm("leaving: " .. tostring(reason), true) end)
     St.on("phase", TAG, function(new)
         if new ~= "PRERACE" and new ~= "RACING" then M.disarm("phase " .. tostring(new), new ~= "POSTRACE") end
     end)

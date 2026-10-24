@@ -103,6 +103,7 @@ local CAM_TAG = "VehicleCustomisationCamera"
 local EXIT_MS = 3000            -- the exit must be complete (machine Idle, P1's view back...) within this time ...
 local EXIT_POLL_MS = 200        -- ... checked this often; then the fallbacks
 local BRIDGE_MS = 150           -- a press the game did not act on within this time is bridged
+local HELD_A_SETTLE_MS = 150    -- couch-fix76 AUTO-174: the standing offer's held A counts as released after this
 local FOREIGN_MS = 400          -- a tab change without his press within this time = P1's pad (or the game)
 local FOREIGN_SCREEN_MS = 1500  -- the same for a screen change (seen through couch's screen cache: up to ~0.7 s late)
 local ENTRY_RETRY_MS = 120      -- a new option page: his focus re-checked / re-given on an entry this often ...
@@ -431,7 +432,9 @@ local function garageScreens()
 end
 
 -- couchpanel: a guest chose GARAGE on the run map -> true when the native turn started (else the compact panel)
-function M.start(g, arch)
+-- opts.heldA (rel103, the standing offer): his A is still held when the turn starts - its release is not a press
+-- in the garage (live 2026-10-24: the hold's own A entered CHOOSE MODEL through the accept bridge)
+function M.start(g, arch, opts)
     if opt("CouchGarageNative", true) ~= true then return false end
     if disabledWhy then
         U.logOnce("garagenative.disabled", TAG, "native garage off for this session (%s): the compact garage", disabledWhy)
@@ -523,9 +526,11 @@ function M.start(g, arch)
         end)
     end
     T = { pnum = g.pnum, ctrlId = g.ctrlId, arch = arch, backup = b, written = written, mine = mine, at = St.nowMs(),
-          seen = false, world = St.worldGen, opened = okS, prev = {}, pend = {}, lastPress = -1e12, reopens = 0,
+          seen = false, world = St.worldGen, opened = okS, prev = (type(opts) == "table" and opts.heldA) and { [IA_ACCEPT] = true } or {},
+          pend = {}, lastPress = -1e12, reopens = 0,
           reenters = 0, tabsBack = 0, bridged = { back = 0, tab = 0, accept = 0 }, native = { back = 0, tab = 0, accept = 0 },
-          locked = {}, lockedN = 0, lockPresses = 0, ownCache = {}, buys = 0 }
+          locked = {}, lockedN = 0, lockPresses = 0, ownCache = {}, buys = 0,
+          heldA = (type(opts) == "table" and opts.heldA) and { since = St.nowMs() } or nil }
     toast(string.format("P%s'S GARAGE - P%s DRIVES", tostring(g.pnum), tostring(g.pnum)))
     U.log(TAG, "P%s garage turn: P1's %d slot(s) backed up, his %s loaded in %d, pads %s, garage %s (%s)", tostring(g.pnum),
         (function() local n = 0; for _ in pairs(b.slots) do n = n + 1 end; return n end)(), tostring(t.RecipeName), wrote,
@@ -1700,6 +1705,159 @@ local function offerTick(now)
     end
 end
 
+-- couch-fix74 (player report v1.0.2 #1: "P2 cannot customize their vehicle in the Couch Campaign. The guest garage
+-- doesn't seem to work for us"). The guests' garage turn was ONLY offered right after P1 had been in his OWN paddock
+-- garage (FINDING #4 C), for 15 s, once: a couple who never opens P1's garage never sees a way to P2's car (the
+-- run-map GARAGE hint is off since FINDING #10). The game's garage BPs are unchanged in CL386500 (WBP_Paddock_
+-- VehicleCust / SelectVehicleCust decoded from the 2026-10-22 paks: the same 28 / 15 functions, the same members).
+-- STANDING OFFER (cfg.CouchGarageStanding): while the team walks the paddock (a PaddockGameState, nothing but HUDs
+-- activated, pad ids normal, no pause menu, no turn / offer / P1 garage visit), the first guest's hint spot shows
+-- "P2: HOLD A FOR YOUR GARAGE" (3-4 players: "P2-P4: ..."); a guest HOLDING his A for cfg.CouchGarageStandingHoldMs
+-- starts his own native garage turn (M.start, as the offer's A). A hold, never a tap: a short A is the game's own.
+local STAND = { since = nil, shown = false, down = {}, up = {}, warned = false }
+local FREE_CLS = { "^WBP_Hud", "^WBP_HUD", "Paddock_HUD" }
+-- pure: only HUD classes activated (the team walks the paddock)
+function M.paddockFree(classes)
+    for _, cn in ipairs(classes or {}) do
+        local hud = false
+        for _, pat in ipairs(FREE_CLS) do if tostring(cn):find(pat) then hud = true; break end end
+        if not hud then return false end
+    end
+    return true
+end
+-- pure: the hint's text for the joined guests' numbers
+function M.standingText(pnums)
+    table.sort(pnums)
+    if #pnums == 0 then return nil end
+    local who = (#pnums == 1) and ("P" .. pnums[1]) or ("P" .. pnums[1] .. "-P" .. pnums[#pnums])
+    return who .. ": HOLD A FOR YOUR GARAGE"
+end
+local function standHide(why)
+    if STAND.shown then
+        if not OFFER then offerHintClose() end              -- the offer after P1's garage owns the hint now
+        U.dbg(TAG, "standing garage hint hidden (%s)", tostring(why))
+    end
+    STAND.shown, STAND.since, STAND.down, STAND.up = false, nil, {}, {}
+end
+M._stand = function() return STAND end
+
+-- couch-fix76 (AUTO-175, live 2026-10-24 13:05:52 / 13:06:35, after a REASSIGN CONTROLLERS): two garage turns of P2
+-- started with nobody holding A (pad watch: both pads up). The guest PC's IsInputKeyDown(A) read true: a key state left
+-- on a PlayerController whose ControllerId moved (the shared-screen swap / the garage hold / a reassignment move ids
+-- while keys change) - the PlayerInput never saw that release. Now (1) the A must have been seen UP since the hint came
+-- up (an A already down - stale, or the A that closed the last screen - is no hold), and (2) with the input DLL's pad
+-- watch the PHYSICAL pad the guest holds (padmap: ident -> pad) must hold A too (cfg.CouchGarageStandingPadWatch).
+local function standPhysDown(g)
+    if opt("CouchGarageStandingPadWatch", true) == false then return nil end
+    local IF = package.loaded["inputfix"]
+    if not (type(IF) == "table" and type(IF.padWatch) == "function" and type(IF.padPresses) == "function") then return nil end
+    local okW, on = pcall(IF.padWatch)
+    if not (okW and on == true) then return nil end
+    local pad = g.ctrlId
+    local PM = package.loaded["padmap"]
+    if type(PM) == "table" and type(PM.padOfIdent) == "function" then
+        local okP, p = pcall(PM.padOfIdent, g.ctrlId)
+        if okP and type(p) == "number" then pad = p end
+    end
+    local off = 0
+    pcall(function() if U.GMS().bOffsetPlayerGamepadIds == true then off = 1 end end)
+    local okR, pads = pcall(IF.padPresses)
+    if not (okR and type(pads) == "table") then return nil end
+    local e = pads[pad - off]
+    if type(e) ~= "table" then return false end
+    return ((tonumber(e.down) or 0) & 1) ~= 0
+end
+
+local function standFree(now)
+    if opt("CouchGarageStanding", true) == false or opt("CouchGarageNative", true) ~= true then return false, "off" end
+    if St.phase ~= "OTHER" then return false, "phase" end
+    if T or OFFER or P1V or exitWatch then return false, "busy" end
+    if now - lastTurnEnd < 2500 then return false, "turn just ended" end
+    local okA, act = pcall(function() return couch().active() end)
+    if not (okA and act == true) then return false, "couch rules off" end
+    if not U.isA(U.gs(), "/Script/Griffin.PaddockGameState") then return false, "not the paddock" end
+    local sw = false
+    pcall(function() sw = couch().swapped() == true end)
+    if sw then return false, "a guest-owned screen" end
+    local menu = false
+    pcall(function() menu = couch().menuOver() == true end)
+    if menu then return false, "menu" end
+    local cls = {}
+    pcall(function() for _, e in ipairs(couch().activeScreens()) do cls[#cls + 1] = e.cls end end)
+    if not M.paddockFree(cls) then return false, "a screen is up" end
+    local cp = package.loaded["couchpanel"]
+    if type(cp) == "table" and type(cp.isOpen) == "function" then
+        local okO, o = pcall(cp.isOpen)
+        if okO and o == true then return false, "a guest panel is open" end
+    end
+    return true
+end
+
+local function standTick(now)
+    local free, why = standFree(now)
+    if not free then if STAND.shown or STAND.since then standHide(why) end; return end
+    local gl = guestsList()
+    if #gl == 0 then standHide("no guest"); return end
+    STAND.since = STAND.since or now
+    if now - STAND.since < 1500 then return end              -- a screen that just closed: no flicker
+    if not STAND.shown then
+        local nums = {}
+        for _, g in ipairs(gl) do nums[#nums + 1] = g.pnum end
+        local first = gl[1]
+        for _, g in ipairs(gl) do if g.pnum < first.pnum then first = g end end
+        local ok, cp = pcall(U.mod, "couchpanel")
+        local okS, r = false, false
+        if ok and type(cp) == "table" and cp.garageOfferShow then
+            okS, r = pcall(cp.garageOfferShow, first, M.standingText(nums), nil)
+        end
+        STAND.shown = okS and r == true
+        if STAND.shown then
+            U.log(TAG, "standing garage hint up in the paddock: %s", tostring(M.standingText(nums)))
+        elseif not STAND.warned then
+            STAND.warned = true
+            U.warn(TAG, "standing garage hint NOT drawn (the guests' HOLD A still works)")
+        end
+    end
+    local hold = tonumber(opt("CouchGarageStandingHoldMs", 800)) or 800
+    local ui = U.mod("ui")
+    for _, g in ipairs(gl) do
+        local a = false
+        pcall(function() a = ui.keyDown(padOf(g), "Gamepad_FaceButton_Bottom") == true end)
+        local k = tostring(g.ctrlId)
+        local phys = standPhysDown(g)
+        if a and phys == false then
+            if not STAND.ghost then
+                STAND.ghost = true
+                U.log(TAG, "P%d's PlayerController reads A down but his pad (pad watch) does not: a stale key state, no "
+                    .. "garage hold (AUTO-175)", g.pnum)
+            end
+            a = false
+        end
+        if not a then STAND.down[k] = nil; STAND.up[k] = true
+        elseif not STAND.up[k] then
+            STAND.down[k] = nil                                     -- down since before the hint: release it first
+        else
+            STAND.down[k] = STAND.down[k] or now
+            if now - STAND.down[k] >= hold then
+                standHide("P" .. g.pnum .. " holds A")
+                local arch = nil
+                pcall(function() arch = U.mod("couchrun").archOf(g.ctrlId, g.pnum) end)
+                local okT = M.start(g, arch, { heldA = true })
+                if okT then
+                    U.log(TAG, "P%d held A in the paddock: his native garage turn starts (standing offer)", g.pnum)
+                else
+                    local okC = false
+                    pcall(function() okC = U.mod("couchpanel").garageCompact({ g }, "his native garage turn could not start") == true end)
+                    U.warn(TAG, "P%d's native garage turn could not start (standing offer): %s", g.pnum,
+                        okC and "the compact garage instead" or "no garage")
+                end
+                lastTurnEnd = now                                 -- no second start before the turn shows up
+                return
+            end
+        end
+    end
+end
+
 -- P1's own garage: seen activated (no guest turn), its end, then the offers
 local function p1VisitTick(now)
     if St.phase ~= "OTHER" then P1V = nil; return end
@@ -1735,6 +1893,7 @@ function M.fastTick()
     if not T then
         U.try(TAG, p1VisitTick, St.nowMs())
         U.try(TAG, offerTick, St.nowMs())
+        U.try(TAG, standTick, St.nowMs())                  -- couch-fix74 (#1): the paddock's standing offer
         return
     end
     if T.world ~= St.worldGen then M.finish("world changed"); return end
@@ -1755,6 +1914,33 @@ function M.fastTick()
     -- pad only): one more witness of his own back
     local bKey = false
     if U.ok(p1) then pcall(function() bKey = p1:IsInputKeyDown({ KeyName = U.fname(KEY_OF_IA[IA_BACK]) }) == true end) end
+    -- couch-fix76 (AUTO-174, live 2026-10-24 11:22:57): the standing offer's held A. The engine hands his still-held A
+    -- to P1's PC (now on his pad id) a few frames AFTER the id change: Triggered again while held -> an accept edge ->
+    -- CHOOSE MODEL / THEME entered through the accept bridge. rel103's "A marked down" covered the first tick only. Now
+    -- every A of the turn is ignored until his physical A has been up for HELD_A_SETTLE_MS (P1's PC IsInputKeyDown on his
+    -- pad id, and the DLL's pad watch for his pad), at most cfg.CouchGarageHeldAMaxMs.
+    if T.heldA then
+        local h = T.heldA
+        local down = false
+        if U.ok(p1) then pcall(function() down = p1:IsInputKeyDown({ KeyName = U.fname(KEY_OF_IA[IA_ACCEPT]) }) == true end) end
+        if not down then
+            pcall(function()
+                local IF = U.mod("inputfix")
+                if IF.padWatch() then
+                    local e = IF.padPresses()[(T.ctrlId or -1) - (U.GMS().bOffsetPlayerGamepadIds and 1 or 0)]
+                    down = type(e) == "table" and ((tonumber(e.down) or 0) & 1) ~= 0
+                end
+            end)
+        end
+        if down then h.upAt = nil; h.seenDown = true else h.upAt = h.upAt or now end
+        acts[IA_ACCEPT], ltw[IA_ACCEPT] = nil, nil
+        local maxMs = tonumber(opt("CouchGarageHeldAMaxMs", 4000)) or 4000
+        if (h.upAt and now - h.upAt >= HELD_A_SETTLE_MS) or now - h.since >= maxMs then
+            U.log(TAG, "P%s's held A (the standing offer) %s after %d ms: his A works in the garage now (AUTO-174)",
+                tostring(T.pnum), h.upAt and "released" or "still down: given up", math.floor(now - h.since))
+            T.heldA = nil
+        end
+    end
     local edge = {}
     for _, n in ipairs({ IA_BACK, IA_PREV, IA_NEXT, IA_ACCEPT }) do
         local missed = T.ltw ~= nil and ltw[n] ~= nil and T.ltw[n] ~= nil and ltw[n] > T.ltw[n] + 1e-4

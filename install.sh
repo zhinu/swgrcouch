@@ -152,19 +152,21 @@ install_mod() {
     echo "      or build it with SWGRCouch/native/inputfilter/build.sh, then re-run install.sh." >&2
   fi
 
-  # 2b. Custom AOB signatures for this build (mod/ue4ss_signatures, first live run 2026-10-06). A different existing
-  #     file gets a dated copy before it is replaced.
+  # 2b. Custom AOB signatures (mod/ue4ss_signatures, first live run 2026-10-06), for a UE4SS that has none.
+  #     1.0.3: UE4SS Galactic Racer Edition V0.9.4 ships its own UE4SS_Signatures/ (FName_Constructor, FName_ToString,
+  #     GUObjectArray identical to ours, its GMalloc resolving to the same address): an existing file is NEVER
+  #     replaced, only a missing one is added.
   if [ -d "$HERE/ue4ss_signatures" ]; then
     mkdir -p "$BIN/ue4ss/UE4SS_Signatures"
-    local sig dst
+    local sig dst added=0 kept=0
     for sig in "$HERE"/ue4ss_signatures/*.lua; do
       [ -f "$sig" ] || continue
       dst="$BIN/ue4ss/UE4SS_Signatures/$(basename "$sig")"
-      if [ -f "$dst" ] && cmp -s "$sig" "$dst"; then continue; fi
-      backup "$dst"
+      if [ -f "$dst" ]; then kept=$((kept + 1)); continue; fi
       cp "$sig" "$dst"
+      added=$((added + 1))
     done
-    echo "UE4SS signatures: $(ls "$HERE"/ue4ss_signatures/*.lua | wc -l) file(s) -> $BIN/ue4ss/UE4SS_Signatures"
+    echo "UE4SS signatures: $added added, $kept already there (kept: UE4SS's own) -> $BIN/ue4ss/UE4SS_Signatures"
   fi
 
   # 3. mods.txt (CRLF file): SWGRCouch first (above "Keybinds : 1", which must stay last), SplitScreenMod off,

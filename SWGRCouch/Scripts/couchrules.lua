@@ -2121,6 +2121,11 @@ function M.fastTick(fromHook)
         if not R then return end
     end
     if not U.ok(R.run) then R = nil; return end
+    if (R.reqOpen or 0) > 0 then                       -- couch-fix74: a requirement post-hook that never came
+        R.reqOpen = 0
+        if R.gate and R.gateClosed == true then pcall(function() R.run.bHasJustCompletedPlaneTest = true end) end
+        U.warn(TAG, "race-finish requirement: no post-hook seen - the gate's flag put back")
+    end
     -- couch-fix33 (racegc): the two lists are only made on a tick where a human stops racing (NONE: shared, never
     -- written), and no table per human per FAST tick for his previous state
     local newWreck, newDone = NONE, NONE
@@ -3273,6 +3278,39 @@ function M.onRacerOut(recParam)
     end
 end
 
+-- couch-fix74 (player report v1.0.2 #6: "both picked FEET FIRST and finished the first three tour events: P2 got his
+-- ABILITY PACK, P1 did NOT"). P1's native race-count favours (Feet First = RaceFinishRequirementConfig IsFinite,
+-- NumRacesCount 1/2/3, OnlyCountCoreCampaignRaces, Standard/HighRisk) count in URaceFinishRequirement::OnRacerFinished
+-- (exec 0x1470b5f2e -> 0x142fb857c, CL381121): the racer must be the passive's owner (P1), then, with
+-- OnlyCountCoreCampaignRaces, CampaignRun::IsPlayingCoreEvent (0x1471e9544 = THE GATE of N3) must be true, the node's
+-- Activity in AllowedNodeTypes -> mCompletedCount += 1, the one-time effects (the reward round) at NumRacesCount. It is
+-- bound to UGameplayActionSubsystem.OnRacerFinished (+0x80), broadcast by NotifyRacerFinished (0x140b9e658) from
+-- FinishRacer (call 0x140fec63b) BEFORE the ingestion (0x140fec7ff). So whenever the gate was closed at P1's finish (a
+-- guest booked first in a place race, 2+ humans in an elimination, "p1" rule after a guest's booking...) P1's race did
+-- not count: solo parity broken (in solo the gate never closes in a core event). Fix: the delegate call is a
+-- ProcessEvent of a native UFunction (hookable): around it the gate shows the run's own value (open), and is put back
+-- closed right after - the ingestion that follows still sees the closed gate.
+M.REQ_FINISH_FN = "/Script/Griffin.RaceFinishRequirement:OnRacerFinished"
+M.reqOpens = 0
+function M.onFinishReqPre()
+    if not (R and R.gate and R.gateClosed == true and R.gateOrig == false) then return end
+    if not U.ok(R.run) then return end
+    local ok = pcall(function() R.run.bHasJustCompletedPlaneTest = false end)
+    if ok then
+        R.reqOpen = (R.reqOpen or 0) + 1
+        M.reqOpens = M.reqOpens + 1
+        U.log(TAG, "race-finish favour requirement (P1's own count, e.g. FEET FIRST): the gate shows the run's own value "
+            .. "for its check (solo parity)")
+    end
+end
+function M.onFinishReqPost()
+    if not (R and (R.reqOpen or 0) > 0) then return end
+    R.reqOpen = R.reqOpen - 1
+    if R.gate and R.gateClosed == true and U.ok(R.run) then
+        pcall(function() R.run.bHasJustCompletedPlaneTest = true end)
+    end
+end
+
 M.CONTINUE_FNS = { "/Script/Griffin.FrontEndGameMode:CampaignSelected",
                    "/Script/Griffin.FrontEndGameMode:TravelToContinueRaceEvent",
                    "/Script/Griffin.CampaignSubsystem:ContinueCurrentMapNodeEvent" }
@@ -3315,6 +3353,9 @@ function M.init()
         post = function() U.try(TAG, M.checkMysteryGrid) end,
     }, TAG)
     M.finishHooked = U.hook(M.FINISH_FN, { pre = function(rec) U.try(TAG, M.onRacerOut, rec) end }, TAG)
+    -- couch-fix74 (#6): P1's race-count favours see the native gate value during their own check
+    U.hook(M.REQ_FINISH_FN, { pre = function() U.try(TAG, M.onFinishReqPre) end,
+                              post = function() U.try(TAG, M.onFinishReqPost) end }, TAG)
     U.log(TAG, "init: CouchTeamResult=%s CouchIngestGate=%s CouchWreckToken=%s CouchChampionGrid=%s CouchBossInstances=%s "
         .. "CouchRivalRaces=%s CouchRivalInstances=%s", M.rule(), tostring(opt("CouchIngestGate", true)),
         tostring(opt("CouchWreckToken", "all")), tostring(opt("CouchChampionGrid", true)),

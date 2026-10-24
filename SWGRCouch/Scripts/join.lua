@@ -354,18 +354,41 @@ end
 -- are normalised here (couch.normalIds: P1 on 0, every other PC on its own id when free, else the lowest free one:
 -- the one id left over is the screen owner's own). Not during a garagenative turn (its own held ids).
 -- -> list, true when the ids were normalised
+-- couch-fix72 (#13 REASSIGN CONTROLLERS): a player moved onto another pad (padmap.lua) keeps the id he is KNOWN by (his
+-- "ident": P1 0, a guest his join id) whatever pad id he carries; nil = no reassignment (the usual case)
+local function padMap()
+    local ok, PM = pcall(require, "padmap")
+    if ok and type(PM) == "table" and type(PM.active) == "function" then
+        local okA, on = pcall(PM.active)
+        if okA and on == true then return PM end
+    end
+    return nil
+end
+M.padMap = padMap
+
 local function localPlayersOrig()
     local lps = U.localPlayers()
     local c = couchSwap()
     local cm = package.loaded["couch"]
+    local pm = padMap()
     local out, unknown = lps, false
-    if c then
+    if c or pm then
         out = {}
         for i = 1, #lps do
             local e = lps[i]
             local id = nil
-            pcall(function() id = c.originalIdOf(e.pc) end)
-            if type(id) ~= "number" and U.ok(e.pc) then unknown = true end
+            -- the ident first (couch-fix72): it never depends on the ids the PCs carry
+            local mapped = false
+            if pm then
+                pcall(function()
+                    local x = pm.padOfEntry(e)
+                    if x ~= nil then id, mapped = pm.identOf(e), true end
+                end)
+            end
+            if not mapped and c then
+                pcall(function() id = c.originalIdOf(e.pc) end)
+                if type(id) ~= "number" and U.ok(e.pc) then unknown = true end
+            end
             out[i] = { lp = e.lp, pc = e.pc, ctrlId = (type(id) == "number") and id or e.ctrlId, index = e.index }
         end
     end
@@ -410,12 +433,22 @@ end
 local function pcFor(id, world)
     local c = couchSwap()
     if c then
-        local okO, own = pcall(c.pcOfOriginalId, id)
+        -- rel103 (live 2026-10-24 10:15:54): the swap's original ids are PAD ids; after a REASSIGN CONTROLLERS the
+        -- guest's ident is another player's pad (P2's ident 1 = P1's pad): ident -> pad first, else his ident found
+        -- P1's PC and P2 dropped out of the joined list (shown as "P3", his rewards / panels lost)
+        local pad = id
+        local pm = padMap()
+        if pm then
+            local okP, x = pcall(pm.padOfIdent, id)
+            if okP and type(x) == "number" then pad = x end
+        end
+        local okO, own = pcall(c.pcOfOriginalId, pad)
         if okO and U.ok(own) then return own end
     end
     -- couch-fix65 (AUTO-159): swapped, or ids left abnormal: the PC known by this original / normalised id
+    -- couch-fix72: or a reassignment (padmap): the PC known by this ident, whatever pad it carries
     local lps, norm = localPlayersOrig()
-    if c or norm then
+    if c or norm or padMap() then
         for i = 1, #lps do
             local e = lps[i]
             if e.index ~= 1 and e.ctrlId == id and U.ok(e.pc) then return e.pc end
@@ -433,6 +466,12 @@ end
 local function padPcFor(id, world)
     world = world or U.world()
     if not U.ok(world) then return nil end
+    -- couch-fix72: id is a guest's ident; the pad he holds may be another one (padmap: a reassignment)
+    local pm = padMap()
+    if pm then
+        local okP, pad = pcall(pm.padOfIdent, id)
+        if okP and type(pad) == "number" then id = pad end
+    end
     local pc = U.GS():GetPlayerControllerFromID(world, id)
     if U.ok(pc) then return pc end
     -- couch.lua's PARK (cfg.CouchSwapPark): during a guest split no PC carries the screen owner's pad id; the PC that
@@ -1278,6 +1317,9 @@ function M.poll()
         if s then
             U.tryEvery("join.poll", nil, TAG, function()
                 local pc = U.GS():GetPlayerControllerFromID(world, id)
+                -- couch-fix72: slot ids are idents; after a reassignment (padmap) the guest's own PC carries another
+                -- pad id: his PC by ident (pcFor), never the PC that happens to sit on that id
+                if padMap() then pc = pcFor(id, world) or CreateInvalidObject() end
                 if not U.ok(pc) then
                     s.prevA, s.prevB, s.prevStart = false, false, false
                     s.aWas = false                                      -- no stale "A down" for guestPressWithin
@@ -1587,6 +1629,8 @@ function M.hotplugToP1(ctrlId, why)
     if mode == nil then mode = "front" end
     if mode == "off" or mode == false then return false, "off" end
     if M.padsEnabled() then return false, "couch pads enabled" end
+    -- couch-fix72: the players chose their pads (REASSIGN CONTROLLERS): a hot-plugged pad never takes P1 over that
+    if padMap() then return false, "controllers reassigned" end
     if St.phase ~= "FRONTEND" and mode ~= "always" then
         pendingP1 = ctrlId
         U.log(TAG, "hot-plugged pad ctrlId %d: takes P1 at the next front end (%s)", ctrlId, tostring(why))
@@ -1650,6 +1694,17 @@ function M.onDeviceState(st, uid, dev, source)
     end
     -- pad presence for cfg.GuestCreate "connected" (join.poll creates the guest; never from this callback)
     if type(presence) == "number" then padHook[presence] = connected end
+    -- couch-fix72: the device names a PAD; after a reassignment (padmap) that pad is another player's: his ident keys
+    -- the slot (and P1's pad is P1's whatever id it carries)
+    local pm = padMap()
+    if pm then
+        local okI, ident = pcall(pm.identOfPad, ctrlId)
+        if okI and type(ident) == "number" and ident ~= ctrlId then
+            U.log(TAG, "device: pad id %d is held by ident %d (controllers reassigned)", ctrlId, ident)
+            ctrlId = ident
+            if ident == 0 then presence = 0 - kb end
+        end
+    end
     if ctrlId < 1 or ctrlId > maxGuestId() then
         if not connected and presence ~= nil and presence + kb == 0 then status("P1 CONTROLLER DISCONNECTED") end
         return

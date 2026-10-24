@@ -118,6 +118,10 @@ local function campaignSelected(why)
     local okC, err = pcall(function() gm:CampaignSelected() end)
     if not okC then U.warn(TAG, "%s: CampaignSelected failed: %s", why, tostring(err)); return false end
     U.log(TAG, "%s: the game's CampaignSelected ran with %d local player(s)", why, #U.localPlayers())
+    -- rel103 (live 2026-10-24 10:04:17, also 2026-10-14 / round 6b): the MAIN phase poll (250 ms) can miss the short
+    -- seamless TRANSIT world (0.4 s) and see FRONTEND -> PRERACE: couch.lua's continue grid patch (on TRANSIT) never
+    -- runs and P2 sits the race out. Until the run's world is up, the phase is polled on the FAST loop (main.lua).
+    St.continueFastUntil = St.nowMs() + 90000
     -- fix16: a run saved at a couch race end holds the result gate's flag (couchrules.repairResume); the phase hooks
     -- repeat this once the run world is up
     pcall(function() U.mod("couchrules").repairResume(why) end)

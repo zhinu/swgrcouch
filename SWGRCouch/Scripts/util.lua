@@ -28,6 +28,8 @@ end
 local function emitLine(tag, level, msg)
     -- print() does not add a newline in UE4SS [API§12]
     print("[" .. C.MOD .. "][" .. tostr(tag or "?") .. "] " .. level .. msg .. "\n")
+    -- couch-fix75 (#8): WARN / ERROR lines also go to the session trail (trail.lua sets U.trailHook; never throws)
+    if level ~= "" and level ~= "dbg " and U.trailHook ~= nil then pcall(U.trailHook, tag, level, msg) end
 end
 
 function U.log(tag, f, ...)  emitLine(tag, "", render(f, ...)) end
@@ -494,6 +496,55 @@ function U.findLoaded(path, missTtl)
     return findObjectCached(path, missTtl)
 end
 
+--- couch-fix76 (AUTO-171): the game's UI mapping context IMC_UI. Live 2026-10-22 / 10-24 (hotfix CL386500): its
+--- 1.0.x path never resolved ("IMC_UI not in memory" / "owner IMC_UI not loaded" in every session on that build), so
+--- no guest got UI input on his own pause menu (his D-pad = his vehicle's ability slots: the row highlight went, A only
+--- resumed through menubridge), the shared screens' owner boost and P1's vehicle-over-UI guard were dead too.
+--- Order: the paths (cached finds, U.IMC_UI_PATHS); at most every 30 s one FindAllOf("InputMappingContext") by name
+--- (U.IMC_UI_NAMES). cfg.ImcUiFallback = false: the paths only. (Reading UEnhancedPlayerInput.AppliedInputContexts was
+--- tried live: UE4SS returned nothing, and the next hot reload crashed in UE4SS's Lua VM - never read it.)
+--- -> imc, how ("path" | "scan") | nil, why   (CL386500: IMC_UI_PadAndDefaultKB, see U.IMC_UI_PATHS)
+--- LIVE 2026-10-24 14:28 (fix76, CL386500): the hotfix split IMC_UI into IMC_UI_PadAndDefaultKB (pads + default keys)
+--- and IMC_UI_KB_QWERTY (keyboard layout), both at 500 on P1 (HasMappingContext); no "IMC_UI" exists any more and
+--- AppliedInputContexts reads empty through UE4SS. The pad context is the guests' UI context now: by path first.
+U.IMC_UI_PATH = "/Game/Griffin/Config/Input/UI/IMC_UI.IMC_UI"
+U.IMC_UI_PATHS = { "/Game/Griffin/Config/Input/UI/IMC_UI_PadAndDefaultKB.IMC_UI_PadAndDefaultKB", U.IMC_UI_PATH }
+U.IMC_UI_NAMES = { IMC_UI_PadAndDefaultKB = true, IMC_UI = true }
+local imcUi = { obj = nil, how = nil, scanAt = -1e12, logged = {} }
+local function imcUiNamed(o)
+    return o ~= nil and U.ok(o) and U.IMC_UI_NAMES[U.objName(o)] == true
+end
+local function imcUiFound(o, how)
+    imcUi.obj, imcUi.how = o, how
+    if not imcUi.logged[how] then
+        imcUi.logged[how] = true
+        local p = ""
+        pcall(function() p = U.pathOf(o) end)
+        U.log("util", "IMC_UI found by %s: %s (V-PAU-10, AUTO-171)", how, tostring(p))
+    end
+    return o, how
+end
+function U.imcUi()
+    if imcUiNamed(imcUi.obj) then return imcUi.obj, imcUi.how end
+    imcUi.obj, imcUi.how = nil, nil
+    for _, p in ipairs(U.IMC_UI_PATHS) do
+        local o = findObjectCached(p, 1000)
+        if o then return imcUiFound(o, "path") end
+    end
+    local okC, C = pcall(require, "config")
+    if okC and type(C) == "table" and C.ImcUiFallback == false then return nil, "not at its path (fallback off)" end
+    local now = St.nowMs()
+    if now - imcUi.scanAt < 30000 then return nil, "not at its paths (scan again in < 30 s)" end
+    imcUi.scanAt = now
+    local all = nil
+    pcall(function() all = FindAllOf("InputMappingContext") end)
+    for _, imc in ipairs(type(all) == "table" and all or {}) do
+        if imcUiNamed(imc) then return imcUiFound(imc, "scan") end
+    end
+    return nil, "not in memory (paths, scan)"
+end
+function U._imcUiReset() imcUi.obj, imcUi.how, imcUi.scanAt, imcUi.logged = nil, nil, -1e12, {} end
+
 --- LoadAsset(assetPath) on the game thread, at most once per LOAD_RETRY_MS per path. 3 returns [API§10].
 local function tryLoad(assetPath)
     if not inGameThread() then return false end
@@ -673,14 +724,18 @@ end
 -- GetFullName per class ADDRESS for the session (clsNever / pinnedK: a native class never unloads and a pinned one never
 -- does either, so neither address is ever handed to another class); every later U.ok / getField of a known object is
 -- one GetAddress (a built-in: no wrapper) + a table read. Never pinned: native classes, level script classes (keeping one
--- would keep its whole map), subobject classes (a ':' in the path). Bounded: cfg.ClassPinCap (default 400) classes, one
+-- would keep its whole map), subobject classes (a ':' in the path). Bounded: cfg.ClassPinCap (default 1500; 400 until
+-- couch-fix75: live sessions reached ~300 within an hour and every class past the cap is unprotected again) classes, one
 -- WARN when reached; cfg.ClassPinAuto = false keeps only the named pins of fix63. Per world: one summary line
 -- ("N Blueprint classes kept loaded"), and a sweep of the classes the mod looked up (U.class / U.findLoaded caches) that
 -- are loaded now - pinned before the new world's first member read. The hooked Blueprint functions' classes too.
 local pinnedW = setmetatable({}, { __mode = "k" })   -- wrapper -> true (no GetAddress per call on a cached wrapper)
 local pinnedK = {}                                   -- class address -> path (kept for the session)
+local pinnedObj = {}                                 -- couch-fix75: class address -> its wrapper (re-pin after a loss)
 local pinScanned, pinBroken = false, nil
 local pinCount, pinCapped = 0, false
+local pinLastIdx = 0                                 -- couch-fix75: the highest ReferencedObjects index holding one of ours
+local pinLost = 0                                    -- couch-fix75: pins found gone from ReferencedObjects (session total)
 local clsNever = {}                                  -- class address -> true: a native / non-generated class
 local clsSkip, clsSkipGen = {}, nil                  -- class address -> reason, re-decided in every world
 local objSeen, objSeenN, objSeenGen = {}, 0, nil     -- object address -> true: its class was decided in this world
@@ -692,7 +747,7 @@ local LSA_PATH = "/Script/Engine.LevelScriptActor"
 
 local function pinCap()
     local n = tonumber(cfg.ClassPinCap)
-    if not n or n < 1 then n = 400 end
+    if not n or n < 1 then n = 1500 end
     return n
 end
 
@@ -719,7 +774,7 @@ local function appendPin(cls, k, path)
             local okE, o = pcall(getField, arr, i)
             if okE and U.ok(o) then
                 local ok2 = U.key(o)
-                if ok2 ~= 0 and not pinnedK[ok2] then pinnedK[ok2] = U.pathOf(o); pinCount = pinCount + 1 end
+                if ok2 ~= 0 and not pinnedK[ok2] then pinnedK[ok2] = U.pathOf(o); pinCount = pinCount + 1; pinLastIdx = i end
             end
         end
         if pinnedK[k] then return true end
@@ -732,8 +787,83 @@ local function appendPin(cls, k, path)
             .. "(AUTO-152)", path, pinBroken)
         return false
     end
+    if n + 1 > pinLastIdx then pinLastIdx = n + 1 end
     return true, n + 1
 end
+
+-- couch-fix75 (#8 triage, long sessions): the pins only protect while they are IN GameInstance.ReferencedObjects. If the
+-- game (or anything else) empties or rewrites that array, pinnedK still says "kept" and keepClass never appends the
+-- class again: every class would be open to the AUTO-152 crash again for the rest of the session, silently. Checked at
+-- each world turn, each phase change and right at "leaving" (BEFORE the travel's GC can unload anything): the array
+-- still reaches pinLastIdx and that slot is one of ours (count + one read: cheap). Else the array is re-read and every
+-- class of ours missing from it is appended again at once from its kept wrapper (U.ok + its full name unchanged = the
+-- same live class); a class that is gone is forgotten (decided again on its next read). One WARN per loss. Runs with
+-- pinBusy set: its own U.ok calls pin nothing.
+local function checkPinsKeptInner()
+    if pinCount == 0 or pinBroken or pinLastIdx == 0 or cfg.ClassPinLossCheck == false then return end
+    local gi = U.gi()
+    if not U.ok(gi) then return end
+    local okA, arr = pcall(getField, gi, "ReferencedObjects")
+    if not (okA and type(arr) == "userdata") then return end
+    local n = U.arrayCount(arr)
+    if n >= pinLastIdx then
+        local okE, o = pcall(getField, arr, pinLastIdx)
+        if okE and U.ok(o) and pinnedK[U.key(o)] then return end      -- intact (the common case)
+    end
+    local still, lastIdx = {}, 0
+    for i = 1, n do
+        local okE, o = pcall(getField, arr, i)
+        if okE and U.ok(o) then
+            local k = U.key(o)
+            if pinnedK[k] then still[k] = true; lastIdx = i end
+        end
+    end
+    pinLastIdx = lastIdx
+    local lost, again, gone = 0, 0, 0
+    local keys = {}
+    for k in pairs(pinnedK) do if not still[k] then keys[#keys + 1] = k end end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        lost = lost + 1
+        local cls, path = pinnedObj[k], pinnedK[k]
+        local okF, full = false, nil
+        if cls ~= nil and U.ok(cls) then okF, full = pcall(callMethod, cls, "GetFullName") end
+        local same = okF and type(full) == "string" and ssub(full, -#path) == path and U.key(cls) == k
+        local done = false
+        if same then
+            local m = U.arrayCount(arr)
+            local okW = pcall(function() arr[m + 1] = cls end)
+            local okR, back = pcall(getField, arr, m + 1)
+            done = okW and okR and U.ok(back) and U.key(back) == k
+            if done then pinLastIdx = m + 1 end
+        end
+        if done then
+            again = again + 1
+        else
+            pinnedK[k], pinnedObj[k] = nil, nil
+            pinCount = pinCount - 1
+            gone = gone + 1
+        end
+    end
+    if lost == 0 then return end
+    pinLost = pinLost + lost
+    if gone > 0 then
+        pinCapped = false
+        pinnedW = setmetatable({}, { __mode = "k" })
+        clsSkip, clsSkipGen = {}, nil
+    end
+    U.warn("util", "class pins: %d of our Blueprint classes were no longer in GameInstance.ReferencedObjects (%d "
+        .. "entries): %d appended again, %d gone (pinned again on their next read); %d lost this session (AUTO-152)",
+        lost, n, again, gone, pinLost)
+end
+local function checkPinsKept(why)
+    if pinBusy then return end
+    pinBusy = true
+    local ok, err = pcall(checkPinsKeptInner)
+    pinBusy = false
+    if not ok then U.logEvery("util.pinCheck", 60000, "util", "class pin check (%s) failed: %s", tostr(why), tostr(err)) end
+end
+U._checkPinsKept = checkPinsKept
 
 -- Decide (and pin) one class. why = the caller's label (U.pinClass: logged) or nil (automatic: one Debug line).
 -- -> true kept loaded, false never pinned (native / not pinnable / cap / refused), nil undecided (retried later)
@@ -777,6 +907,7 @@ local function keepClass(cls, why)
     if not done then return false end
     if pinnedK[k] then return true end                         -- found by the hot-reload re-scan
     pinnedK[k] = path
+    pinnedObj[k] = cls
     pinCount = pinCount + 1
     pinWorld.new = pinWorld.new + 1
     if #pinWorld.names < PIN_NAMES_MAX then pinWorld.names[#pinWorld.names + 1] = shortOfPath(path) end
@@ -803,6 +934,7 @@ end
 
 local function worldTurn(gen)
     objSeen, objSeenN, objSeenGen = {}, 0, gen
+    pcall(checkPinsKeptInner)                    -- couch-fix75 (worldTurn runs inside the pin code: pinBusy is set)
     if pinCount > 0 or pinWorld.new > 0 then
         local names = ""
         if pinWorld.new > 0 then
@@ -892,7 +1024,7 @@ end
 
 --- diag / sim: { pinned, cap, capped, broken, seen (objects decided in this world) }
 function U.pinStats()
-    return { pinned = pinCount, cap = pinCap(), capped = pinCapped, broken = pinBroken, seen = objSeenN }
+    return { pinned = pinCount, cap = pinCap(), capped = pinCapped, broken = pinBroken, seen = objSeenN, lost = pinLost }
 end
 
 --- Local players in GameInstance.LocalPlayers order: array of {lp, pc, ctrlId, index}.
@@ -952,6 +1084,10 @@ function U.localPlayersRO()
     if seq ~= nil and lpCache.seq == seq and lpCache.list then return lpCache.list end
     return l
 end
+pcall(function()   -- couch-fix75: the class pins checked before a travel's GC (leaving) and at every phase change
+    St.on("leaving", "util.pins", function() checkPinsKept("leaving") end)
+    St.on("phase", "util.pins", function(new) checkPinsKept(new) end)
+end)
 pcall(function()
     St.on("players", "util.lp", function() U.localPlayersForget() end)
     St.on("world", "util.lp", function() U.localPlayersForget() end)
@@ -1416,6 +1552,36 @@ local function registerNow(path)
     return true
 end
 
+-- rel103 (hook audit 2026-10-24, notes/hook-audit/HOOK-AUDIT.md finding A): this game's UE4SS prints at every start
+-- "ProcessLocalScriptFunction is not available": a RegisterHook on a Blueprint (/Game/) UFunction returns ids and the
+-- callback NEVER runs (0 fires in ~300 sessions). U.hook refuses /Game/ paths while that line is in UE4SS.log
+-- (cfg.BlueprintHooks "auto"; "on" = register anyway, "off" = always refuse), with ONE WARN naming them, so a feature
+-- can never again rely on a silent hook. Natives (/Script/) are not affected. The simulator has no UE4SS.log: "auto"
+-- registers there as before.
+local bpDead = nil                                    -- nil = not decided yet
+local bpRefused, bpWarned = {}, false
+local function bpHooksDead()
+    if bpDead ~= nil then return bpDead end
+    local mode = cfg.BlueprintHooks
+    if mode == "on" or mode == true then bpDead = false; return false end
+    if mode == "off" or mode == false then bpDead = true; return true end
+    bpDead = false
+    pcall(function()
+        local okS, S = pcall(require, "settings")
+        local dir = okS and type(S) == "table" and type(S.modDir) == "function" and S.modDir() or nil
+        if type(dir) ~= "string" then return end
+        local f = io.open(dir .. "/../../UE4SS.log", "rb")
+        if not f then return end
+        local head = f:read(400000) or ""
+        f:close()
+        if sfind(head, "ProcessLocalScriptFunction is not available", 1, true) then bpDead = true end
+    end)
+    return bpDead
+end
+U.bpHooksDead = bpHooksDead
+function U.bpHooksRefused() return bpRefused end
+function U._bpReset() bpDead, bpRefused, bpWarned = nil, {}, false end   -- tests
+
 --- Subscribe to a UFunction. spec = {pre = fn, post = fn}. Returns true when the UE4SS hook is in place,
 --- false when queued (or failed). A second call with the same path and tag replaces that subscriber.
 --- VERIFY(V-CORE-07): BP hooks fire (log lines from tab click, button click, Go).
@@ -1423,6 +1589,20 @@ function U.hook(path, spec, tag)
     tag = tag or "hook"
     if type(path) ~= "string" or type(spec) ~= "table" or (type(spec.pre) ~= "function" and type(spec.post) ~= "function") then
         U.err("hook", "U.hook(%s, spec, %s): bad arguments", tostr(path), tostr(tag))
+        return false
+    end
+    if ssub(path, 1, 6) == "/Game/" and bpHooksDead() then
+        if not bpRefused[path] then
+            bpRefused[path] = tag
+            if not bpWarned then
+                bpWarned = true
+                U.warn("hook", "Blueprint hooks refused: UE4SS.log says ProcessLocalScriptFunction is not available, so a "
+                    .. "hook on a /Game/ function would never fire (cfg.BlueprintHooks; hook audit 2026-10-24). First: %s (%s)",
+                    path, tostr(tag))
+            else
+                U.dbg("hook", "Blueprint hook refused (never fires in this UE4SS): %s (%s)", path, tostr(tag))
+            end
+        end
         return false
     end
     local list = hookSubs[path]

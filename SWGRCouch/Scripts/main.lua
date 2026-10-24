@@ -61,9 +61,9 @@ local MODULES = { "phase", "fastboot", "ui", "theme", "menu_tab", "lobby", "join
                   "builder", "launch", "inputfix", "hud", "uxsplit", "subsplit", "present", "ignition", "ignpad", "wreck",
                   "crashcam", "nametags", "gfx", "pause",
                   "roster", "takeover", "net", "netfix", "diag", "keyq", "keys", "testcmd", "viewguard", "menubridge",
-                  "restart", "feowner", "backprompt", "run", "runpage", "couch", "couchrules", "couchsolo", "soloscore", "precision", "finishplate", "instances", "couchrun", "couchpanel",
+                  "restart", "padmap", "reassign", "feowner", "backprompt", "run", "runpage", "couch", "couchrules", "couchsolo", "soloscore", "precision", "finishplate", "instances", "friendly", "couchrun", "couchpanel",
                   "couchfence", "couchrewards", "couchflow", "couchbacker", "couchpenalty", "couchbackerui", "couchfaults", "couchfavours", "couchlayout", "couchprerun", "couchroot", "couchbets", "couchmeta", "debugai", "garagenative", "couchacts", "couchpage", "solocamp", "gpdata", "gp", "gppage",
-                  "custdata", "garage", "garage4", "garage4ui", "gctune", "progress" }
+                  "custdata", "garage", "garage4", "garage4ui", "gctune", "progress", "trail" }
 local mods = {}
 for _, name in ipairs(MODULES) do
   local ok, m = pcall(require, name)
@@ -202,10 +202,10 @@ end
 --    present (0.4.0): listeners only (cfg.PresentFromMain = true; with false hud.lua initialises and ticks it).
 --    wreck (2026-10-07): listeners only ("leaving" / FRONTEND give the cvars back); its custom property is registered
 --    lazily on the game thread (first armed race timeout), never here.
-local INIT_ORDER = { "gctune", "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
+local INIT_ORDER = { "trail", "gctune", "phase", "fastboot", "menu_tab", "ui", "join", "builder", "roster", "takeover", "inputfix",
                      "uxsplit", "subsplit", "hud", "present", "wreck", "crashcam", "gfx", "pause", "net", "netfix", "diag",
-                     "testcmd", "viewguard", "menubridge", "restart", "feowner", "run", "runpage", "couch", "couchrules", "couchsolo",
-                     "soloscore", "precision", "finishplate", "couchrun", "couchbacker", "couchpenalty", "couchpanel", "couchfaults", "couchfavours", "couchprerun", "couchroot", "couchbets", "gp", "gppage", "garage",
+                     "testcmd", "viewguard", "menubridge", "restart", "reassign", "feowner", "run", "runpage", "couch", "couchrules", "couchsolo",
+                     "soloscore", "precision", "finishplate", "friendly", "couchrun", "couchbacker", "couchpenalty", "couchpanel", "couchfaults", "couchfavours", "couchprerun", "couchroot", "couchbets", "gp", "gppage", "garage",
                      "garage4", "progress" }
 for _, name in ipairs(INIT_ORDER) do
   if name ~= "present" or cfg.PresentFromMain == true then call(name, "init") end
@@ -227,7 +227,7 @@ call("keys", "init")
 --     duplicate page/HUD; cvars are restored in the next front end.
 local SHARED_PREFIX = C.MOD .. "."
 local PERSIST_MODULES = { "join", "net", "gfx", "takeover", "launch", "inputfix", "wreck", "crashcam", "subsplit",
-                          "vpreview", "perkapply", "restart" }
+                          "vpreview", "perkapply", "restart", "reassign" }
 
 local function sharedPut(name, v)
   local ok, err = pcall(function() ModRef:SetSharedVariable(SHARED_PREFIX .. name, v) end)
@@ -301,6 +301,14 @@ local function fastTick()
   -- couch-fix60 (AUTO-146): the race world checked before any race module (a silent seamless travel collects the race's
   -- pawns before the MAIN poll sees the new world): gone = the phase poll ran now, no race module this tick
   local raceGone = false
+  -- rel103: after a campaign CONTINUE the phase is polled here until the travel left the front end (couchpage.lua)
+  if St.continueFastUntil ~= nil then
+    if (St.phase == "FRONTEND" or St.phase == "LAUNCHING" or St.phase == "TRANSIT") and St.nowMs() < St.continueFastUntil then
+      call("phase", "tick")
+    elseif St.phase ~= "FRONTEND" and St.phase ~= "LAUNCHING" and St.phase ~= "TRANSIT" or St.nowMs() >= St.continueFastUntil then
+      St.continueFastUntil = nil
+    end
+  end
   if isRace() then
     local okW, gone = call("phase", "fastWorldCheck")
     raceGone = okW == true and gone == true
@@ -329,6 +337,8 @@ local function fastTick()
     -- 0.11.0: RESTART RACE (placed by pause.lua's calls): hook arming, the re-check of the row, the confirmed request ->
     -- RequestResetRace; after menubridge (a bridged Accept on the confirm dialog lands in this tick's pause state)
     call("restart", "fastTick")
+    -- couch-fix72 (#13): REASSIGN CONTROLLERS (placed by pause.lua's calls): the row's press, each pad's A, the apply
+    call("reassign", "fastTick")
     call("inputfix", "bindPoll")   -- a car re-pointed by the game is re-bound within one FAST tick
     call("inputfix", "p1UiGuard")  -- 0.9.0: P1's vehicle IMC over IMC_UI while racing (LB / R3), released at once on pause
     if cfg.PresentFromMain == true then call("present", "fastTick") end   -- ignition: ignpad pad poll + replay (0.5.1)
@@ -342,6 +352,7 @@ local function fastTick()
     call("couchbacker", "raceTick") -- couch-fix21 #90: each guest's own backer contract counted from his own car
     call("couchfaults", "fastTick") -- couch-fix27 #109: a guest's critical malfunction faults HIS part, not P1's
     call("instances", "fastTick")  -- #59: the guests' copies back on their own collision channel after a game profile switch
+    call("friendly", "fastTick")   -- couch-fix75 #12: friendly fire OFF - a human's bolt lock on a teammate held at 0
     -- 0.15 COUCH CAMPAIGN: the pre-race /CHALLENGES (side bets) split - each guest's own challenges screen, P1's bridge
     call("couchbets", "fastTick")
     -- 0.5.1: a local human's crash (not a wreck): guest crash view, fades, emulated slow-mo (wreck.lua owns wrecks)
@@ -353,6 +364,7 @@ local function fastTick()
     call("ignpad", "raceTick")     -- 0.13.0: P1's B recovers a critical malfunction (fed like a guest's)
     call("hud", "fastAfterburner") -- 0.13.0: guests' boost bars read their own car (the game reads player 0)
     call("hud", "fastRamjet")     -- 0.13.0: every player's ramjet bar shows its own car's heat (split races)
+    call("hud", "fastMateTags")   -- couch-fix73 #10: the teammates' car tags in every split view
     call("progress", "fastTick")  -- #38: every guest's own race-progress strip (top centre, his own car's view)
     -- 0.7.0: hidden message copies kept hidden, waiting copies matched, per-player danger tints / fades (~100 ms)
     call("uxsplit", "fastTick")
@@ -374,6 +386,7 @@ end
 local function mainTick()
   call("phase", "tick")
   call("couch", "tick")         -- 0.15 COUCH CAMPAIGN: shared-screen pad routing (paddock + post-race)
+  call("reassign", "mainTick")  -- couch-fix72: a hot-reloaded pad map matched to the live local players
   -- #82 couch-gauntlet (a TestCommands build only: loaded by testcmd): the next step armed on the run map's nodes
   local gt = package.loaded["gauntlet"]
   if type(gt) == "table" and type(gt.armTick) == "function" then U.try("gauntlet", gt.armTick) end
@@ -431,6 +444,7 @@ local function slowTick()
   end
   call("diag", "periodic")
   call("garagenative", "slowTick")   -- repairs P1's garage after an interrupted guest turn
+  call("gfx", "slowTick")            -- couch-fix76 AUTO-173: the split preset never stays in the player's GameUserSettings.ini
 end
 
 local FAST = sched.every("fast", cfg.FastPollMs, fastTick)

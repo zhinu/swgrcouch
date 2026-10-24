@@ -54,9 +54,16 @@ local function panel() local c = package.loaded["couchpanel"]; return type(c) ==
 -- the local PC holding pad id 0 (P1's physical pad, wherever the swap put it)
 local function holderOf0()
     local GS = U.cdo("GameplayStatics")
+    -- couch-fix72: P1's physical pad = couch.p1Pad() (0 unless REASSIGN CONTROLLERS moved him)
+    local p1pad = 0
+    local c = couch()
+    if c and type(c.p1Pad) == "function" then
+        local okP, v = pcall(c.p1Pad)
+        if okP and type(v) == "number" then p1pad = v end
+    end
     for _, lp in ipairs(U.localPlayers()) do
         local ok, id = pcall(function() return GS:GetPlayerControllerID(lp.pc) end)
-        if ok and id == 0 then return lp.pc end
+        if ok and id == p1pad then return lp.pc end
     end
     return nil
 end
@@ -68,8 +75,21 @@ local function inside(w, pc)
     return has
 end
 
+-- couch-fix72: a PAD id -> the ident of the guest holding it (padmap.lua; the same id without a reassignment). The
+-- panels are keyed by ident; this module reads pads (GetPlayerControllerID / couch.parkedFor)
+local function identOfPad(id)
+    if id == nil then return nil end
+    local okM, PM = pcall(require, "padmap")
+    if okM and type(PM) == "table" and type(PM.identOfPad) == "function" then
+        local ok, v = pcall(PM.identOfPad, id)
+        if ok and type(v) == "number" then return v end
+    end
+    return id
+end
+
 -- a guest's area still choosing for pad id `ctrlId`: (his selected button, all his buttons), else nil
 local function areaButtons(ctrlId)
+    ctrlId = identOfPad(ctrlId)
     local cp = panel()
     if not (cp and cp.isOpen and cp.isOpen() == true and cp._panels) then return nil end
     for _, P in ipairs(cp._panels()) do
@@ -93,7 +113,7 @@ local function giveBack(ctrlId, pc, why)
     local b = areaButtons(ctrlId)
     local ok = false
     if b and cp.kit and cp.kit.padSetFocus then
-        ok = cp.kit.padSetFocus(b, ctrlId, pc, true) == true
+        ok = cp.kit.padSetFocus(b, identOfPad(ctrlId), pc, true) == true      -- the kit takes idents (couch-fix72)
         why = why .. ": back on his own area"
     elseif c and c.sinkGuestPad then
         ok = c.sinkGuestPad(ctrlId, pc, why) == true

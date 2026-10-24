@@ -5,10 +5,13 @@ This is the "game folder" download: the mod and its input filter DLL, laid out l
 folder. It does NOT include UE4SS: install UE4SS Galactic Racer Edition first.
 (This text is SWGRCouch-INSTALL.txt in the game folder and README.txt in the mod's folder.)
 
-REQUIRED FIRST: UE4SS Galactic Racer Edition (by GenerousMods)
+REQUIRED FIRST: UE4SS Galactic Racer Edition V0.9.4 or newer (by GenerousMods)
   Install UE4SS Galactic Racer Edition from its Nexus page first, as that page says:
       https://www.nexusmods.com/starwarsgalacticracer/mods/2
   It is kept up to date after every game update, and most UE4SS mods for this game use it.
+  SWGRCouch @VERSION@ was tested with V0.9.4. This zip adds the two signature files V0.9.4 does not
+  ship (UE4SS_Signatures\GNatives.lua and GUObjectHashTables.lua: without them the game crashed at
+  every couch race start on the 2026-10-22 build) and never replaces UE4SS's own.
   Steam Deck / Linux (Proton): it needs the Steam launch option (Properties > General >
   Launch options)
       WINEDLLOVERRIDES="dwmapi=n,b" %command%
@@ -41,12 +44,14 @@ INSTALL
 WHAT THIS ZIP WRITES
   (the ue4ss\... paths below are under Griffin\Binaries\Win64\)
   - SWGRCouch-INSTALL.txt           this text, in the game folder
+  - ue4ss\UE4SS_Signatures\GNatives.lua, GUObjectHashTables.lua
+                                    the two signature files UE4SS Galactic Racer Edition V0.9.4 lacks
+                                    (checked on CL386500, the 2026-10-22 update)
   - ue4ss\Mods\SWGRCouch\           the mod: enabled.txt, README.txt (this text), README.md (the full
                                     manual), LICENSE, Scripts\, native\swgr_inputfilter.dll and
                                     native\swgrcouch-cert.pem (the DLL's public certificate)
-  - ue4ss\UE4SS_Signatures\*.lua    SWGRCouch's signature files (checked on the game builds CL382493,
-                                    CL382801 and CL386500, the 2026-10-22 update)
-  Nothing else: no mods.txt, no mods.json, no UE4SS-settings.ini. Your UE4SS settings and your other
+  Nothing else: no mods.txt, no mods.json, no UE4SS-settings.ini, none of UE4SS's own signature
+  files. Your UE4SS settings and your other
   UE4SS mods stay as they are. SWGRCouch starts through its own Mods\SWGRCouch\enabled.txt: UE4SS
   starts every mod folder that has an enabled.txt, listed in mods.txt or not.
   OTHER UE4SS MODS: keep SplitScreenMod off (it is another split screen; UE4SS Galactic Racer Edition
@@ -86,7 +91,7 @@ INPUT FILTER DLL (@DLLSTATE@)
 CREDITS AND LICENCES
   - SWGRCouch by Jules, made with the help of Claude (Anthropic). MIT licence:
     ue4ss\Mods\SWGRCouch\LICENSE.
-  - Runs on UE4SS Galactic Racer Edition by GenerousMods (not included, get it from its page):
+  - Runs on UE4SS Galactic Racer Edition V0.9.4 by GenerousMods (not included, get it from its page):
     https://www.nexusmods.com/starwarsgalacticracer/mods/2 . Thanks to GenerousMods for
     maintaining it. UE4SS itself: RE-UE4SS, https://github.com/UE4SS-RE/RE-UE4SS (MIT).
 

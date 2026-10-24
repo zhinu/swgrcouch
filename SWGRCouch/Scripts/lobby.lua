@@ -2864,8 +2864,15 @@ lobby.FIX36 = {
       .. "players</>: a guest's Broker changes the shared map for everybody. <H1>Owner only</>: a guest's Broker is his "
       .. "own rule (his races outside the top 3 earn him no reward round). P1's own Broker is the game's and always "
       .. "changes the shared map. The Hutt's penalty (2 crashes fewer) is always the player's own car." },
+  -- couch-fix75 (player request #12, friendly.lua): the local humans as one team
+  cbff = { key = "CouchFriendlyFire", label = "Friendly fire", values = { "on", "off" },
+    words = { on = "ON", off = "OFF" },
+    body = "What your own abilities do to the other players on the couch. <H1>On</>: as in solo, an Ion Bolt, a "
+      .. "Multi-Bolt, an Ion Blast or a Shockwave hits every car near you, your teammates too. <H1>Off</>: you are one "
+      .. "team: your bolts never lock on a teammate, your blasts, shockwaves and attacking vents pass through him. The "
+      .. "AI cars are hit as before, and the AI still hits everybody. Collisions and mines are not filtered." },
 }
-for _, id in ipairs({ "cbbroker" }) do
+for _, id in ipairs({ "cbbroker", "cbff" }) do
   local r = lobby.FIX36[id]
   local function word(v) return r.words[v] or string.upper(tostring(v)) end
   local ids = lobby.SUBS.couch.ids

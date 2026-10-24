@@ -427,6 +427,65 @@ local function navSet(b, nb)
     end
 end
 
+-- couch-fix74 (#5): the game's RACER STYLE grid (WBP_PreRun_LoadoutSelect.Tile_RacerStyles, a FuseTileView of
+-- 216 x 216 entries, TileAlignment CenterAligned) shows cfg.CouchStyleGridCols (4) styles a row, the last row centred
+-- (P1's own screen, solo photo jules-favors-224009: 4 / 4 / 4 / 2 for 14 styles).
+function M.styleCols()
+    local c = math.floor(tonumber(opt("CouchStyleGridCols", 4)) or 4)
+    return c >= 1 and c or 4
+end
+
+-- vpos[i] = the 1-based place of item i in a centre-aligned tile view of `count` entries, `cols` a row -> nb[i] =
+-- { left, right, up, down } (item indexes; nil = none), and the first item of the bottom row. Left / Right step the
+-- items in the grid's order (a row end continues on the next row, the tile view's horizontal wrap); Up / Down go to
+-- the item of the row above / below nearest to it on screen (a centred short row: its middle columns).
+function M.gridNav(vpos, count, cols)
+    cols = math.max(1, math.floor(tonumber(cols) or 1))
+    local order = {}
+    for i, v in pairs(vpos) do order[#order + 1] = { i = i, v = v } end
+    table.sort(order, function(a, b) return a.v < b.v end)
+    local total = math.max(math.floor(tonumber(count) or 0), order[#order] and order[#order].v or 0)
+    local R = math.ceil(total / cols)
+    local function rowOf(v) return (v - 1) // cols end
+    local function xOf(v)
+        local r = rowOf(v)
+        local w = (r == R - 1) and (total - (R - 1) * cols) or cols
+        return (cols - w) / 2 + (v - 1) % cols
+    end
+    local rows = {}                                              -- row -> { {i, x} } in screen order
+    for _, o in ipairs(order) do
+        local r = rowOf(o.v)
+        rows[r] = rows[r] or {}
+        rows[r][#rows[r] + 1] = { i = o.i, x = xOf(o.v) }
+    end
+    local rowIds = {}
+    for r in pairs(rows) do rowIds[#rowIds + 1] = r end
+    table.sort(rowIds)
+    local rank = {}
+    for k, r in ipairs(rowIds) do rank[r] = k end
+    local function nearest(r, x)
+        local best, bd = nil, nil
+        for _, e in ipairs(rows[r] or {}) do
+            local d = math.abs(e.x - x)
+            if not bd or d < bd - 1e-9 then best, bd = e.i, d end
+        end
+        return best
+    end
+    local nb = {}
+    for k, o in ipairs(order) do
+        local r, x = rowOf(o.v), xOf(o.v)
+        local ru, rd = rowIds[rank[r] - 1], rowIds[rank[r] + 1]
+        nb[o.i] = {
+            left = order[k - 1] and order[k - 1].i or nil,
+            right = order[k + 1] and order[k + 1].i or nil,
+            up = ru and nearest(ru, x) or nil,
+            down = rd and nearest(rd, x) or nil,
+        }
+    end
+    local lastRow = rowIds[#rowIds]
+    return nb, lastRow and rows[lastRow][1] and rows[lastRow][1].i or nil
+end
+
 local function setNav(P)
     -- the vehicle half draws the classes as one row of cards (native copy) or a vertical list (garage4ui rows):
     -- every direction steps it
@@ -441,6 +500,20 @@ local function setNav(P)
     local nT, cols = #P.tiles, P.cols
     local F = P.favBtns
     local lastRow0 = (math.ceil(nT / cols) - 1) * cols + 1      -- the first tile of the last row
+    -- couch-fix74 (v1.0.2 player report #5): with the game's own RACER STYLE look (the copy), his buttons must step
+    -- the copy's grid, not the mod panel's hidden one (7 x 2 for 14 styles in a half: "Right stops at Afterburner
+    -- although a style is to its right; Down from it jumps to the favours; Favours -> Up lands right of it")
+    local NV = P.native
+    if NV and not NV.pending and type(NV.vpos) == "table" and next(NV.vpos) ~= nil then
+        local nb, last0 = M.gridNav(NV.vpos, NV.vcount or nT, M.styleCols())
+        for i, T in ipairs(P.tiles) do
+            local t = {}
+            for dir, j in pairs(nb[i] or {}) do t[dir] = P.tiles[j] and P.tiles[j].btn or nil end
+            if not t.down and F and U.ok(F[1]) then t.down = F[1] end          -- the bottom row -> favours
+            navSet(T.btn, t)
+        end
+        if last0 and P.tiles[last0] then lastRow0 = last0 end
+    else
     for i, T in ipairs(P.tiles) do
         local c = (i - 1) % cols
         local nb = {
@@ -453,6 +526,7 @@ local function setNav(P)
         for dir, j in pairs(nb) do t[dir] = P.tiles[j] and P.tiles[j].btn or nil end
         if not t.down and F and U.ok(F[1]) then t.down = F[1] end              -- the bottom row -> favours
         navSet(T.btn, t)
+    end
     end
     for k, b in ipairs(F or {}) do
         navSet(b, { left = F[k - 1], right = F[k + 1], up = P.tiles[lastRow0] and P.tiles[lastRow0].btn or nil,
@@ -636,17 +710,23 @@ local function nativeMap(P, items, native)
     local N = P.native
     if not (N and N.pending) then return end
     N.pending = nil
-    local svm = {}
+    local svm, vpos, vcount = {}, {}, 0
     pcall(function()
         local arr = N.scr.LoadoutVM.RacerStyles
-        for i = 1, U.arrayCount(arr) do
+        vcount = U.arrayCount(arr)
+        for i = 1, vcount do
             local v = arr[i]
             local key = nil
             pcall(function() key = styleKeyOf(v.RacerStyle) end)
             local j = key and indexOf(items, key)
-            if j and (not svm[j] or (v.bIsLocked ~= true)) then svm[j] = svm[j] and (v.bIsLocked ~= true and v or svm[j]) or v end
+            if j and (not svm[j] or (v.bIsLocked ~= true)) then
+                local keep = svm[j] and (v.bIsLocked ~= true and v or svm[j]) or v
+                if keep == v then vpos[j] = i end                 -- couch-fix74: where the copy's grid shows it
+                svm[j] = keep
+            end
         end
     end)
+    N.vpos, N.vcount = vpos, vcount
     local mapped = 0
     for _ in pairs(svm) do mapped = mapped + 1 end
     if mapped == 0 then

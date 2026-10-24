@@ -4,7 +4,7 @@
 
 **One screen, up to four controllers.** Race with friends in Free Mode, run a Galactic Grand Prix, or play the game's own campaign together.
 
-![Version 1.0.2](https://img.shields.io/badge/version-1.0.2-e8a33d?style=for-the-badge&labelColor=0b0e12)
+![Version 1.0.3](https://img.shields.io/badge/version-1.0.3-e8a33d?style=for-the-badge&labelColor=0b0e12)
 ![Free Mode 1-4 players](https://img.shields.io/badge/free_mode-1--4_players-f2ede4?style=for-the-badge&labelColor=0b0e12)
 ![Couch Campaign 2 players](https://img.shields.io/badge/couch_campaign-2_players-f2ede4?style=for-the-badge&labelColor=0b0e12)
 ![Windows, Linux, Steam Deck](https://img.shields.io/badge/windows_·_linux_·_steam_deck-b8b2a6?style=for-the-badge&labelColor=0b0e12)
@@ -36,7 +36,34 @@
 | **Each player has** | their own pilot, vehicle, loadout, view and HUD | their own vehicle class, racer style, credits, shop, rewards, backer and garage |
 | **Split** | top / bottom or side by side for 2, quarters for 3–4 | top / bottom for 2, quarters for 3–4 |
 
-**New in 1.0.2**
+**New in 1.0.3** (a couple's report from 1.0.2, 13 points)
+
+- **Controllers.** No more swapped pads when player 1 crashes out while player 2 still races (player 2's afterburner
+  and engine switch stayed on player 1's pad); player 1's boost no longer reaches player 2's car. New in the race pause
+  menu: **REASSIGN CONTROLLERS**, for pads that came back on each other's slots after a disconnect (each player presses
+  A on the pad he holds, player 1 first).
+- **HUD.** The ramjet bar is red only while you redline, not through every cool-down; Ion Bolt lock-on reticles show in
+  every player's view; a name tag over your teammate's car in each split view; the eliminator and ramjet notices are
+  smaller in split screen.
+- **Couch campaign.** Player 2's garage is always one *hold A* away in the paddock (*P2: HOLD A FOR YOUR GARAGE*);
+  player 2's "Complete Pre-Race Checks" and "Trigger opponents' System Malfunction" backer contracts now count;
+  player 2's RACER STYLE grid follows the D-pad as drawn; FEET FIRST pays player 1 too when player 2 finished first.
+- **Friendly fire** option (OPTIONS › COUCH CAMPAIGN): OFF makes the couch one team, your bolts, blasts and
+  shockwaves pass your teammates.
+- **Crash reports.** Fewer "Fatal Error after several races" (the class pins hold 1500 classes and repair themselves),
+  and `Mods/SWGRCouch/session-trail.txt` keeps a short record of the last two sessions for a bug report.
+- **Found in the 1.0.3 test sessions.** Player 2's own pause menu follows his D-pad again on the 2026-10-22 game build
+  (the update renamed the game's menu input set, so no menu ever got a guest's pad there); the split-screen graphics
+  never stay in your `GameUserSettings.ini` (the game saves its settings during a race, e.g. on a camera change:
+  SWGRCouch writes your values back at once, and at the next start after a crash); the *hold A* that opens player 2's
+  garage no longer also opens CHOOSE MODEL, and a key the game still thinks is held no longer opens his garage by
+  itself; the REASSIGN CONTROLLERS row shows its own description.
+- **UE4SS Galactic Racer Edition V0.9.4.** The game-folder zip no longer replaces any of UE4SS's signature files; it
+  adds only the two V0.9.4 does not ship (`GNatives.lua`, `GUObjectHashTables.lua`: without them the game crashed at
+  every couch race start on the 2026-10-22 build). The all-in-one zip carries V0.9.4 exactly as GenerousMods ships it,
+  plus those two files.
+
+**1.0.2**
 
 - **Works with the 2026-10-22 game update** (CL386500). The update made every pad steer every car in races; the
   input filter knows the new build, and from now on it finds what it needs in a game build it does not know yet by
@@ -124,7 +151,7 @@ safe; put it back when you want your solo run again (game closed, Steam offline,
 | Backer contract | the game's own CHOOSE A BACKER CONTRACT | the same choice in their own area, with its signing bonus on their own credits |
 | Rewards after an event | the game's own CHOOSE AN UPGRADE | their own reward area beside P1's: the same kind of reward as P1's round, or SKIP for credits. A friend who **wrecked** is treated like a solo wreck: no finish pay and no reward round (in an eliminator, a wreck that cost the team no token counts as being eliminated at their place); their area shows only what the race still did to their credits (a settled challenge, backer or favour lines), and opens only when there is such a line |
 | Shops | the game's shop | the game's shop screen in their own area with the same kind of stock as player 1's: parts for their own class, the **UPGRADE PACK** and **ABILITY PACK** (pick one of the pack's choices) and **RESTOCK**, at the game's prices, paid with their own credits (earned by finish position); **LEAVE THE SHOP** or **B** leaves (an unopened pack waits for the next visit). Like player 1, friends shop at the shops the run visits (Hibi's shop, the scrap dealer); there is no shop on the run map (`CouchMapGuestShop = true`: a friend's **A** on the run map opens their own shop at any time) |
-| Their car | the game's own garage (Customize) | their own **GARAGE**: when player 1 leaves his own garage in the paddock, each friend in turn gets *P2: PRESS A FOR YOUR GARAGE* (**A** = their turn in the game's garage, **B** = no thanks): model, livery and colours of their car. It is their car in every race; player 1's garage is never touched (`CouchMapGuestGarage = true`: a *GARAGE* hint on the run map opens a compact garage panel instead) |
+| Their car | the game's own garage (Customize) | their own **GARAGE**: whenever the team walks the paddock, *P2: HOLD A FOR YOUR GARAGE* is shown under the friends' credits (**hold A** = their turn in the game's garage); also, when player 1 leaves his own garage in the paddock, each friend in turn gets *P2: PRESS A FOR YOUR GARAGE* (**A** = their turn in the game's garage, **B** = no thanks): model, livery and colours of their car. It is their car in every race; player 1's garage is never touched (`CouchMapGuestGarage = true`: a *GARAGE* hint on the run map opens a compact garage panel instead) |
 | Pre-race CHALLENGES (side bets) | the game's own screen | the same screen in their own area: same racers and stakes, their own credits; A challenges, HOLD A declines |
 | Mystery encounters | the game's choices | the same choices in their own area; the deal applies to their own run (run-wide choices stay P1's) |
 
@@ -207,7 +234,8 @@ right player.*
   build. A guest's **Y** picks one at random.
 - **AI you can tune.** Choose from six tiers, or *Match the players*, so a maxed group meets maxed opponents.
 - **Per-player everything in the race:** HUD, boost and ramjet bars, subtitles, name tags and pause menu.
-  **RESTART RACE** sits in the pause menu.
+  **RESTART RACE** sits in the pause menu. **REASSIGN CONTROLLERS** (last row of the race pause menu) fixes pads that
+  came back swapped after a disconnect: each player presses A on the pad he holds, P1 first.
 
 <details>
 <summary><b>How to play, step by step</b></summary>
@@ -271,11 +299,11 @@ descriptions from the game's data (`Scripts/perkdata.lua`).
 
 ### The easy way: unzip into the game folder
 
-Download **`SWGRCouch-1.0.2-gameroot.zip`** from the mod's **Nexus Mods** page or from the release page here. It holds
+Download **`SWGRCouch-1.0.3-gameroot.zip`** from the mod's **Nexus Mods** page or from the release page here. It holds
 the mod and its input filter DLL, already laid out like the game folder. It does not include UE4SS.
 
-1. **Install [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) first**, as its
-   page says. You then have `Griffin\Binaries\Win64\dwmapi.dll` and `Griffin\Binaries\Win64\ue4ss\UE4SS.dll` next to
+1. **Install [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) V0.9.4 or newer
+   first**, as its page says. You then have `Griffin\Binaries\Win64\dwmapi.dll` and `Griffin\Binaries\Win64\ue4ss\UE4SS.dll` next to
    `SWGR-Win64-Shipping.exe`.
 2. Find the game folder, the one that contains the `Griffin` folder. In Steam: right-click the game › Manage › Browse
    local files (usually `...\steamapps\common\STAR WARS Galactic Racer\`).
@@ -298,15 +326,16 @@ the mod and its input filter DLL, already laid out like the game folder. It does
 > player; the Deck's own controls are player 1.
 
 **What the zip writes into `ue4ss\`:** only the mod folder `Mods\SWGRCouch\` (with its `README.txt` = the install
-notes, and `native\swgrcouch-cert.pem`, the DLL's public certificate) and SWGRCouch's signature files in
-`UE4SS_Signatures\`. It ships **no** `mods.txt`, `mods.json` or `UE4SS-settings.ini`, so your other UE4SS mods and
+notes, and `native\swgrcouch-cert.pem`, the DLL's public certificate). It ships **no** `mods.txt`, `mods.json`,
+`UE4SS-settings.ini`, and of `UE4SS_Signatures\` only `GNatives.lua` and `GUObjectHashTables.lua` (the two UE4SS Galactic
+Racer Edition V0.9.4 lacks; never one of its own), so your other UE4SS mods and
 settings stay as they are: SWGRCouch starts through its own `Mods\SWGRCouch\enabled.txt` (UE4SS starts every mod
 folder that has one, listed in `mods.txt` or not). Keep SplitScreenMod off (another split screen; UE4SS Galactic Racer
 Edition ships it off). The two `UE4SS-settings.ini` values the mod needs (`bForceGUObjectArrayForIteration = true`,
 `UseCache = 0`) are already set in UE4SS Galactic Racer Edition.
 
-An all-in-one variant that also carries UE4SS Galactic Racer Edition (`SWGRCouch-1.0.2-gameroot-with-UE4SS.zip`) is
-built as well; it is on the git.jules.my release page only (with GenerousMods' OK), not on Nexus: get UE4SS updates from [its own page](https://www.nexusmods.com/starwarsgalacticracer/mods/2), and please don't re-upload either.
+An all-in-one variant that also carries UE4SS Galactic Racer Edition V0.9.4 exactly as GenerousMods ships it (only
+`SWGRCouch : 1` added to its `mods.txt` / `mods.json`; `SWGRCouch-1.0.3-gameroot-with-UE4SS.zip`) is built as well; it is on the git.jules.my release page only (with GenerousMods' OK), not on Nexus: get UE4SS updates from [its own page](https://www.nexusmods.com/starwarsgalacticracer/mods/2), and please don't re-upload either.
 
 **Updating:** quit the game, then extract the new zip the same way over the old files. Your own files are never in the
 zip, so `settings.txt`, `config_user.lua`, the run and Grand Prix files and the game's saves stay.
@@ -315,7 +344,7 @@ zip, so `settings.txt`, `config_user.lua`, the run and Grand Prix files and the 
 
 For players who would rather place the mod folder by hand. It needs UE4SS Galactic Racer Edition too.
 
-- **Mod folder**: `SWGRCouch-1.0.2-nexus.zip`, the mod folder only (Lua scripts, no DLL, no executable). Install
+- **Mod folder**: `SWGRCouch-1.0.3-nexus.zip`, the mod folder only (Lua scripts, no DLL, no executable). Install
   [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) first, then extract the zip
   into `<game>\Griffin\Binaries\Win64\ue4ss\Mods\`.
 - **Optional file**: `swgr_inputfilter.dll`, into `ue4ss\Mods\SWGRCouch\native\`. It gives each player's car its own
@@ -346,7 +375,8 @@ Edition from its page first. If it warns that the installed UE4SS is 3.0.1-1160,
 2. Install [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2) by GenerousMods as
    its page says (its files go into that folder).
 3. Copy `SWGRCouch\` into `ue4ss\Mods\` (so you get `ue4ss\Mods\SWGRCouch\Scripts\main.lua`), replacing old files.
-4. Copy the `ue4ss_signatures\*.lua` files into `ue4ss\UE4SS_Signatures\`.
+4. Only for a UE4SS older than Galactic Racer Edition V0.9.4: copy the `ue4ss_signatures\*.lua` files that
+   `ue4ss\UE4SS_Signatures\` does not have yet (never replace UE4SS's own; `install.sh` does the same).
 5. Nothing to edit in `ue4ss\Mods\mods.txt`: `SWGRCouch\enabled.txt` starts the mod (a `SWGRCouch : 1` line there,
    above the last line `Keybinds : 1`, does the same; `install.sh` adds it).
 
@@ -357,7 +387,7 @@ a value set there also replaces the new layout's own value.
 </details>
 
 ### Check it works
-Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 1.0.2 loading` and `modules=85/85`, and the
+Start the game. `Griffin/Binaries/Win64/ue4ss/UE4SS.log` shows `SWGRCouch 1.0.3 loading` and `modules=90/90`, and the
 main menu has a **FREE MODE** tab with the QUICK RACE, CUSTOM RACE and GALACTIC GRAND PRIX posters. Once a second pad
 joins, the log shows `native filter loaded: installed=1 reason=ok build=386500` (the number is your game build; `build=auto` means a newer
 game build the filter worked out by itself).
@@ -394,6 +424,10 @@ game build the filter worked out by itself).
   too).
 - *P1's rewards*: OWN PLACE, or BEST CARRIES EVERYONE (the best human result pays P1 too).
 - *Broker penalty: Eliminators*: BOTH PLAYERS or OWNER ONLY.
+- *Friendly fire*: ON (as in solo: your Ion Bolt, Multi-Bolt, Ion Blast or Shockwave hits every car, teammates too)
+  or OFF (the players on the couch are one team: your bolts never lock on a teammate, your blasts, shockwaves and
+  attacking vents pass through him; the AI is hit as before and still hits everybody; collisions and mines are not
+  filtered).
 
 **Opponents** (RACE SETUP › MODE › Opponents) sets the AI tier (1 to 6) or *Match the players*. It is kept in
 `settings.txt` as `OpponentTier`, with your other choices.
@@ -478,7 +512,7 @@ UE4SS did not load the mod. On Linux / Steam Deck, check the launch option `WINE
 Then check that `Griffin\Binaries\Win64\dwmapi.dll` and `Griffin\Binaries\Win64\ue4ss\UE4SS.dll` exist (UE4SS Galactic
 Racer Edition is installed) and that `ue4ss\Mods\SWGRCouch\Scripts\main.lua` is there (the zip was extracted into
 the game folder, not into a folder of its own), and open `Griffin/Binaries/Win64/ue4ss/UE4SS.log`:
-it should show `SWGRCouch 1.0.2 loading`.
+it should show `SWGRCouch 1.0.3 loading`.
 
 </details>
 
@@ -548,7 +582,7 @@ Any pad the game sees as a controller. The Xbox layout is tested; DualShock and 
 <summary><b>My virus scanner flags swgr_inputfilter.dll.</b></summary>
 
 A heuristic false positive on a small DLL. It is built from the C source in this repository and rebuilds
-byte-identical, so anyone can check it, and the 1.0.2 copy carries the author's signature (see
+byte-identical, so anyone can check it, and the 1.0.2 copy (unchanged in 1.0.3) carries the author's signature (see
 [The input filter DLL](#the-input-filter-dll)).
 
 </details>
@@ -572,6 +606,18 @@ That is the game's own inactivity pause: about a minute without input from any p
 2. Play until it happens again.
 3. Send **`Griffin/Binaries/Win64/ue4ss/UE4SS.log`** (every mod line starts with `[SWGRCouch]`) plus any
    `crash_*.dmp` next to it. Say how many players you were and what was on screen.
+
+**After a "Fatal Error"**: copy these **before you start the game again** (the next start overwrites `UE4SS.log`):
+
+- `Griffin/Binaries/Win64/ue4ss/UE4SS.log` and the newest `crash_*.dmp` in that folder;
+- `ue4ss/Mods/SWGRCouch/session-trail.txt` and `session-trail-prev.txt` (the mod's short record of the last two
+  sessions: it survives a restart, so send it even if you already played again);
+- the game's own crash folder: `%LOCALAPPDATA%\StarWarsGalacticRacer\Saved\Crashes\`, the newest
+  `UECC-Windows-…` folder (`CrashContext.runtime-xml` and `UEMinidump.dmp`). On Linux / Steam Deck it is in
+  `steamapps/compatdata/4078430/pfx/drive_c/users/steamuser/AppData/Local/StarWarsGalacticRacer/Saved/Crashes/`.
+
+A `.dmp` file can contain bits of your PC's memory (your Windows user name, for example): send it in a private
+message, not in a public post.
 
 The full list of checks with their log lines is in [docs/REFERENCE.md](docs/REFERENCE.md) §9.
 
@@ -624,7 +670,7 @@ engines flag this one too - a false positive: the DLL rebuilds **byte-identical*
 `SWGRCouch/native/inputfilter/build.sh` rebuilds it from `inputfilter.c` and `version.rc` with the system LLVM
 (`clang`, `lld-link`, `llvm-rc`, `llvm-dlltool`); no Windows SDK is needed.
 
-**Signature (1.0.2).** The DLL in the 1.0.2 downloads is signed by the author with a **self-signed** certificate
+**Signature (1.0.2, unchanged in 1.0.3).** The DLL in the 1.0.2 and 1.0.3 downloads is signed by the author with a **self-signed** certificate
 (`CN=Jules (SWGRCouch)`): a local signature, not a CA-trusted one, so Windows still shows *unknown publisher*. It
 proves the file is the one the author signed. The game-folder zips carry the certificate next to the DLL
 (`native\swgrcouch-cert.pem`). The public certificate is
@@ -634,7 +680,7 @@ check a download with `osslsigncode verify -in swgr_inputfilter.dll -CAfile swgr
 
 | 1.0.2 `swgr_inputfilter.dll` (DLL version 1.0.2.0) | sha256 |
 |---|---|
-| signed (in the zips and the bare download) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
+| signed (in the 1.0.2 and 1.0.3 zips and the bare download) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
 | unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `4363c77db01d49160c23e969653861209bb611439c1f98a6931cf68e39a1e300` |
 
 ### Code signing policy

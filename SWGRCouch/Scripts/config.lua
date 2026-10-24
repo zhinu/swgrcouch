@@ -146,7 +146,19 @@ cfg.LoopErrorLogEveryMs = 5000      -- a failing loop logs at most one error lin
 cfg.ClassPinAuto        = true      -- couch-fix67 (AUTO-152): the class of every Blueprint object the mod reads by name
                                     --   is kept loaded for the session (UE4SS's member cache crash after a class reload);
                                     --   false = only the race HUD / ignition classes (couch-fix63)
-cfg.ClassPinCap         = 400       -- couch-fix67: at most this many Blueprint classes kept loaded (> 0; a WARN when reached)
+cfg.BlueprintHooks      = "auto"    -- rel103 (hook audit): "auto" = U.hook refuses /Game/ (Blueprint) functions when UE4SS.log
+                                    --   says "ProcessLocalScriptFunction is not available" (they never fire there); "on" | "off"
+cfg.ClassPinCap         = 1500      -- couch-fix67: at most this many Blueprint classes kept loaded (> 0; a WARN when reached).
+                                    --   couch-fix75 (#8 triage): was 400 - the 1-hour live rounds 13/14 (2026-10-20) already
+                                    --   kept 295-296 (frontend 71, paddock 87, race 87, then +1..+20 per new planet / event
+                                    --   / ability variant) and a class past the cap is open to the AUTO-152 crash again; VRAM
+                                    --   stayed flat (~7 GB) over those sessions, so the pins are not the memory risk
+cfg.ClassPinLossCheck   = true      -- couch-fix75: the pins re-checked in GameInstance.ReferencedObjects at each phase change
+                                    --   / leaving / world (an emptied array = the classes appended again before the GC)
+cfg.SessionTrail        = true      -- couch-fix75 (#8): Mods/SWGRCouch/session-trail.txt (+ -prev.txt = the session before),
+                                    --   phase changes / class pins / WARN+ERROR lines that survive a crash and a restart
+cfg.TrailMaxLines       = 3000      -- couch-fix75: trail lines per session (phase changes, worlds, warnings)
+cfg.TrailMaxWarnLines   = 300       -- couch-fix75: of which WARN / ERROR lines (each cut at 300 characters)
 cfg.DiagPeriodicMs      = 0         -- > 0: diag.dump() at that interval
 -- couch-racegc (gctune.lua): the mod's Lua garbage collector. Every UE4SS wrapper is a finalizable userdata and Lua 5.4's
 -- incremental collector walks all of them in one indivisible atomic step: the 10-20 ms race stalls of 2026-10-15.
@@ -332,6 +344,29 @@ cfg.MemoryLapMode         = "collapse" -- Memory HUD guest lap counters: "collap
                                        --   shows in campaign memories / bUseMemoryHud arcade events) | "hook" (opt-in:
                                        --   rewritten from the UpdateCurrentLap post-hook every frame once it fires,
                                        --   collapsed until then)                                    VERIFY(V-HUD-04c)
+cfg.HudLockFix            = "auto"     -- couch-fix73 #9: a split HUD whose vehicle markers are not bound to its player's
+                                       --   Ion Bolt family abilities (no lock-on reticles) gets its marker container rebuilt
+                                       --   once per race | "diag" (log only) | "off"                       VERIFY(V-HUD-21)
+cfg.HudLockDiag           = true       -- LOCKDIAG lines (1/s per HUD while a local targeting ability is active)
+cfg.HudMateTags           = "on"       -- couch-fix73 #10: the game's car tag (name / position) over every OTHER local human's
+                                       --   car in each split view (the game draws no marker over a local human) | "off".
+                                       --   Also off with FREE MODE > OPTIONS > NAME TAGS off                V-HUD-22
+cfg.HudMateTagZ           = 250        -- tag height above the car's origin (uu)
+cfg.HudMateTagMaxDist     = 0          -- hide the tag beyond this distance between the two cars (uu; 0 = always shown)
+cfg.HudMateTagScale       = 1.0        -- render scale of the teammate tag (> 0)
+cfg.HudSplitNoticeScale   = 0.6        -- couch-fix73 #11: eliminator / ramjet-distance / bonus-time notices in a SPLIT race
+                                       --   render-scaled to this (0 < s <= 1; 1 = designer size). Solo untouched  V-HUD-20
+cfg.HudSplitNoticeWidgets = {          -- the widgets (class short names) and their scale pivot {x, y} (0..1 of the widget)
+    WBP_HUD_EliminationInfo2    = { 0.0, 0.0 },   -- "AT RISK OF ELIMINATION" list (left): shrinks into its top-left
+    WBP_HUD_EliminationZone     = { 0.5, 0.0 },
+    WBP_HUD_Eliminator_Title    = { 0.5, 0.0 },   -- rules title / next elimination timer
+    WBP_HUD_Eliminator_Preparing = { 0.5, 0.0 },  -- "PREPARING FOR NEXT ROUND"
+    WBP_HUD_Eliminator_End      = { 0.5, 0.0 },
+    WBP_Hud_EventRamjetCounter  = { 0.5, 0.0 },   -- ramjet distance "0 / 12500" + bar
+    WBP_Hud_EventBonusTime      = { 0.5, 0.0 },   -- time trial gate bonus
+}
+cfg.HudSplitNoticeMsgs    = { RacerEliminated = true, RacerKnockedOut = true }   -- couch-fix73 #11: these race messages
+                                       --   ("<racer> eliminated" / "Knocked Out") at HudSplitNoticeScale in split views
 cfg.GuestHudCollapse      = { "WBP_Hud_PositionMap", "Img_1DMap_MidSection", "WBP_Hud_BestLapTime",
                               "WBP_Hud_EventTakedownCounter", "WBP_Hud_EventRamjetCounter", "WBP_Hud_EventBonusTime" }
                                        -- members of WBP_HUD_RaceInfo [HUD§1.2] that show P1's (RaceEventVM) values in a
@@ -399,6 +434,9 @@ cfg.UxSplitHudColours     = true       -- part of UxSplitDanger: MPC_HUD_Paramet
 cfg.UxSplitRamjetColour   = true       -- 0.13.0: pinned orange ALWAYS (no global blue; the bars fill via HudRamjetBarStyle
                                        --   "afterburner", immune to the pin). Part of UxSplitDanger: BotEngineInfo's Engage/DisengageRamjet animations (global
                                        --   FadeDirection sweep) stopped, icons set, MPC pinned; "own": HUD tinted blue  V-UX-08
+cfg.UxSplitOverheatStates = { 4, 5 }   -- couch-fix73 #2: RamjetStates that tint a player's HUD red (4 CriticalWarning =
+                                       --   redlining, 5 GraceTime). NOT 6 (Overheated = the cool-down after EVERY burn: the
+                                       --   HUD stayed red until the heat was down). { 4, 5, 6 } = the 1.0.2 behaviour V-UX-08
 cfg.UxSplitRamjetFiringBlue = false     -- 0.13.0: every HUD in the ramjet colours only while a local car fires its ramjet (the
                                        --   bar's fill needs it); R3 / charging keeps them orange. false = always orange V-UX-08
 cfg.UxSplitFullScreenFx   = true       -- part of UxSplitDanger: the game's full-screen danger post-process (last life,
@@ -550,6 +588,9 @@ cfg.PlayerNameP1          = true       -- false: Name1 only labels P1's name tag
 -- Feedback 2026-10-07: "KbM controlled the two screens (possibly 1 gamepad controlled both)". Every human car read
 -- P1's raw input subsystem, and every raw subsystem recorded every device. notes/research/input-isolation.md.
 cfg.InputFixMode          = "auto"     -- "auto" (bind each car to its owner + native DLL filter; kbsplit when the DLL
+cfg.InputFixLiveIdWhileRacing = true   -- couch-fix72 (#7/#3): a car still racing hears the pad on its PC's LIVE id in the
+                                       --   native filter, the pad its Enhanced Input (afterburner press, engine switch)
+                                       --   follows, even while the pad ids are swapped (false: the original id)  V-INP-13
 cfg.InputFixP1VehicleOverUi = true    -- 0.9.0: while P1 races in a split race, P1's vehicle IMCs sit just above IMC_UI
                                        --   (the game keeps IMC_UI at 500 for P1: LB / R3 / d-pad did nothing); back
                                        --   at once on a pause, photo mode or race end                 VERIFY(V-INP-09)
@@ -987,6 +1028,8 @@ cfg.CouchPreRunNativeCopy = true       -- #100: each guest's VEHICLE SELECT = th
 cfg.CouchPreRunWaitGuests = true       -- #104: P1's START RUN on the LOADOUT waits until every guest pressed his START RUN
                                        --   (READY): "WAITING FOR P2" by P1's button. false = P1 is never held
 cfg.CouchPreRunWaitMs     = 180000     -- #104: safety: P1's START RUN is released after this long (0 = never)
+cfg.CouchStyleGridCols    = 4          -- couch-fix74 (#5): styles a row in the game's RACER STYLE grid (each guest's D-pad
+                                       --   steps the copy's 4-wide grid, its short last row centred)
 cfg.CouchPreRunNavBoundary = true      -- AUTO-122: P1's pre-run screen is a navigation boundary while the split is open
                                        --   (his D-pad never runs into a guest's area). false = Slate's default
 cfg.CouchBackerNavBoundary = true      -- AUTO-153: P1's backer contract screen is a navigation boundary while the split is open
@@ -1064,6 +1107,12 @@ cfg.CouchMapGuestGarage   = false      -- couch-rewards #10/#11: the guests' "GA
 cfg.CouchGarageOffer      = true       -- couch-rewards #4: after P1 leaves his own paddock garage, each joined guest in turn
                                        --   gets "P2: PRESS A FOR YOUR GARAGE" (A = his native garage turn, B = no thanks)
 cfg.CouchGarageOfferMs    = 15000      -- the offer is withdrawn after this long without an answer
+cfg.CouchGarageStanding   = true       -- couch-fix74 (#1): while the team walks the paddock (only HUDs up), the guests'
+                                       --   hint "P2: HOLD A FOR YOUR GARAGE": a guest holding A starts his own garage turn
+                                       --   at any time (not only after P1's own garage). false = the offer above only
+cfg.CouchGarageStandingHoldMs = 800    -- how long he holds A (a short A stays the game's)
+cfg.CouchGarageHeldAMaxMs = 4000       -- couch-fix76 AUTO-174: his held A is no garage press until it is up (at most this long)
+cfg.CouchGarageStandingPadWatch = true -- couch-fix76 AUTO-175: the standing hold needs his PHYSICAL pad's A (DLL pad watch) too
 cfg.CouchP1GarageGuard    = false      -- couch-rewards #6 / #26: P1's OWN paddock garage with guests joined: the model shown
                                        --   must be one of P1's two slots of the class THE GAME opened (never a class
                                        --   switch: the paddock has a garage per class), else ONE reload per visit; every
@@ -1179,6 +1228,9 @@ cfg.CouchActionTags       = true       -- couch campaign menus: the footers' "[P
                                        --   Each player's area is his own. false = the engine's tags
 cfg.CouchOwnerUiImc       = true       -- while P1's pad drives a screen a guest owns, that guest's UI input context is
                                        --   raised (the map / NEXT PLANET take P1's A and D-pad). false = bridge only
+cfg.CouchNoSwapWhileRacing = true      -- couch-fix72 (#7/#3): no shared-screen pad-id swap in POSTRACE while a local
+                                       --   human still races (P1 wrecked: his results came up while P2 drove; the swap
+                                       --   put P1's pad on P2's PlayerController)                     VERIFY(V-CC-72)
 cfg.CouchSwapPark         = true       -- while P1's pad drives a guest-owned screen AND a guest split is open (vehicle /
                                        --   loadout pick, rewards, shop), P1's own PlayerController waits on a spare pad id
                                        --   (6) instead of the screen owner's: that guest's pad then reaches no player
@@ -1232,6 +1284,15 @@ cfg.CouchRivalRaces       = true       -- couch-fix58 (Jules: every player races
 cfg.CouchRivalInstances   = true       -- couch-fix58: ... raced as one copy per player (each vs his own copy of the
                                        --   rival, like CouchBossInstances); false / no spare AI PlayerState = one shared
                                        --   race (every player vs the one rival). Needs CouchMissionInstances.
+cfg.CouchFriendlyFireLock = "hold"     -- couch-fix75 (#12, friendly.lua): friendly fire OFF, a human's Ion Bolt / Multi-Bolt
+                                       --   locking on a teammate: "hold" (default: its lock progress reset every FAST tick,
+                                       --   the lock never finishes) | "drop" (also EAbilityTargetState RemoveTarget: the
+                                       --   game's own removal path; the lock beam may flicker)              VERIFY(V-FF-01)
+cfg.CouchFriendlyFireOverlapSwap = "owner" -- couch-fix75: friendly fire OFF, an ability overlap (Ion Blast, Shockwave,
+                                       --   attacking Vents) that reaches a teammate goes to "owner" (the ability's own car,
+                                       --   default) | "self" (the overlap helper actor)                    VERIFY(V-FF-02)
+cfg.CouchFriendlyFireAnyRace = false   -- couch-fix75: true = the CouchFriendlyFire setting also applies outside the couch
+                                       --   campaign (FREE MODE split races); false = couch campaign races only
 cfg.CouchSitOutShare      = 0.5        -- 0.15: a guest sitting out (rival challenge) gets this x the planet's skip bonus
 cfg.CouchSaveCounter    = true       -- couch-livefix r2: the guests' checkpoints follow the run save objects' request counters
                                      --   (ULocalPlayerSaveGame.CurrentSaveRequest; the save hooks never fire live).
@@ -1303,6 +1364,8 @@ cfg.PauseOwnerPadShift    = "auto"     -- C, KeyboardIsP1: a pad pauser with Con
 cfg.PauseMenuZ            = "auto"     -- C: viewport ZOrder of that screen: "auto" (the UIManager's own Menu Z once seen,
                                        --   else the WBP_Dialog_Container Z - 1, else PauseMenuZOrder) | a number >= 0
 -- D: UI input for the guests
+cfg.ImcUiFallback         = true       -- couch-fix76 (AUTO-171): IMC_UI not at its 1.0.x path (hotfix CL386500): found by
+                                       --   path (IMC_UI_PadAndDefaultKB) or by name among the loaded IMCs (U.imcUi)
 cfg.PauseUiImcBoost       = "all"      -- D: guests' IMC_UI at UIManagerSettings.UI_IMC_ActivePriority (500) while paused,
                                        --   restored on resume / leaving / FRONTEND (P1 stays with the game's
                                        --   InputModeManager): "all" | "owner" (only a guest that owns the menu) | "off"
@@ -1388,6 +1451,17 @@ cfg.PauseRestartArcadeGuard = true     -- "dialog": ArcadeSubsystem.LastPlayedAr
 cfg.PauseRestartAfterResumeMs = 250    -- "resume": RequestResetRace this long after the pause ended (>= 0)  V-RST-06
 cfg.PauseRestartWatchdogMs = 5000      -- still the same world this long after RequestResetRace: LEAVING undone (> 0)
                                        --                                                          VERIFY(V-RST-08)
+-- couch-fix72 (player report #13, reassign.lua): REASSIGN CONTROLLERS in the race pause menu (split races: FREE MODE,
+-- GRAND PRIX, COUCH CAMPAIGN). The players press A one after the other on the controller they hold: the first pad is
+-- P1, the next P2 (P3, P4); P1's B finishes early; every player's seat, car, credits and progress stay his. Needs the
+-- input DLL's pad watch (swgr_inputfilter.dll padwatch=1).                                   VERIFY(V-RA-01..05)
+cfg.ReassignControllers   = true       -- the pause-menu entry; false = never offered
+cfg.ReassignTimeoutMs     = 15000      -- no new press for this long: cancelled, the pads stay as they were (> 0)
+cfg.ReassignAutoFinish    = true       -- applied as soon as every player pressed A (false: only P1's B applies)
+cfg.ReassignResume        = false      -- true: the race resumes right after the new pads are applied
+cfg.ReassignLabel         = "Reassign Controllers" -- the row's label
+cfg.ReassignDescribeRow   = true       -- couch-fix76 AUTO-172: the row's own line in the screen's description box on focus
+cfg.ReassignDescription   = "Controllers swapped? Each player presses A on the controller he holds, P1 first. B cancels."
 
 ---------------------------------------------------------------------------------------------------- Race
 cfg.AIOnPadDisconnect = true           -- Disconnect override on pad loss (server)
@@ -1536,6 +1610,15 @@ cfg.GfxApplyMode           = "console" -- "console" (every cvar via ExecuteConso
                                        -- "usersettings" (sg.* through GameUserSettings setters + ApplyNonResolution-
                                        --   Settings; a game-side SaveSettings during a split race would persist the
                                        --   preset into GameUserSettings.ini)                      VERIFY(V-GFX-05)
+-- couch-fix76 (AUTO-173): the game saves its settings natively DURING a split race (a camera change, the pause menu's
+-- settings): Scalability::SaveState writes the live split sg.* values into the player's GameUserSettings.ini (no hook
+-- sees that C++ call). gfx.lua: the player's values kept in <ModDir>/gfx-user.txt while split, the ini watched (SLOW
+-- loop) and its split lines written back, the game's own SaveSettings once in the front end, a boot repair after a
+-- session that ended mid-split. VERIFY(V-GFX-08)
+cfg.GfxIniGuard            = true      -- false = none of it (the 1.0.3 behaviour)
+cfg.GfxIniResave           = true      -- front end: GameUserSettings:SaveSettings() after the restore when the game saved
+                                       --   split values this session (false: the file patch only)
+cfg.GfxIniPath             = ""        -- "" = <LOCALAPPDATA>/StarWarsGalacticRacer/Saved/Config/Windows/GameUserSettings.ini
 
 ---------------------------------------------------------------------------------------------------- Takeover
 cfg.SlotMode               = "auto"      -- "auto" | "off"
@@ -1637,11 +1720,17 @@ cfg.Defaults = {
 -- rule any more (solo parity: an unhappy backer never costs a League Token; CouchBackerTokens is retired)
 cfg.Defaults.CouchBrokerPenalty = "both"  -- a guest's Broker penalty: "both" (the shared run's events become Eliminators
                                           --   for everybody) | "owner" (his own eliminator payout rule only)
+-- couch-fix75 (player request #12, OPTIONS > COUCH CAMPAIGN; friendly.lua)
+cfg.Defaults.CouchFriendlyFire = "on"     -- "on" (the game's own rule, as in solo: a human's abilities hit every car) |
+                                          --   "off" (the local humans are one team: no Ion Bolt lock, no ability overlap,
+                                          --   no Shockwave push on a teammate; AI cars and the AI's abilities unchanged)
 
 ---------------------------------------------------------------------------------------------------- override checks
 -- Allowed values of the string selectors (config_user.lua overrides outside these lists are ignored with a warning).
 local ENUMS = {
     LuaGcMode = { "generational", "incremental", "off" },        -- couch-racegc (gctune.lua)
+    CouchFriendlyFireLock = { "hold", "drop" },                  -- couch-fix75
+    CouchFriendlyFireOverlapSwap = { "owner", "self" },          -- couch-fix75
     SubsystemLookup = { "sbl", "findfirst" },
     ClickMode = { "hook", "poll" },
     FastBootEpic = { "off", "keep" },
@@ -1704,6 +1793,9 @@ local ENUMS = {
     GuestNameMode = { "names", "off" },
     GuestNameMethod = { "auto", "rpc", "gamemode", "direct" },
     NameTagLabel = { "pnum", "name", "both" },
+    BlueprintHooks = { "auto", "on", "off" },
+    HudLockFix = { "auto", "diag", "off" },
+    HudMateTags = { "on", "off" },
     InputFixMode = { "auto", "native", "kbsplit", "bind", "off" },
     InputFixNativeScope = { "race", "always" },
     InputFixGuestContexts = { "fill", "leave" },
@@ -1791,7 +1883,8 @@ local MIXED = { FinishGraceSec = { strings = { "all" }, min = 0 }, PauseMenuZ = 
 -- Table-valued keys that also accept false (= feature off).
 -- booleans that also accept a few selector strings (H01 2026-10-15: TestBots "all"/"guests" were rejected)
 local BOOL_OR_ENUM = { TestBots = { "all", "guests", "p1", "off" } }
-local FALSEABLE = { GfxSingleViewCvars = true, GuestPilots = true, PilotExtras = true }
+local FALSEABLE = { BlueprintHooks = true, GfxSingleViewCvars = true, GuestPilots = true, PilotExtras = true, HudLockFix = true, HudMateTags = true,
+                    HudSplitNoticeWidgets = true, HudSplitNoticeMsgs = true }
 -- Table-valued keys with a fixed shape: n numbers >= min (one per player count), a colour { R, G, B, A }, or a rect
 -- {x, y, w, h} (positional or named, w and h > 0).
 local SHAPES = { CardW = { n = 4, min = 1 }, CardGap = { n = 4, min = 0 }, CardPanelColour = { colour = true },
@@ -1803,7 +1896,7 @@ local NILABLE = { UiPageOrigin = "table" }
 -- 0.12.0: keys that take a number > 0 or a per-channel table {r, g, b} (positional or named) of numbers > 0.
 local NUM_OR_RGB = { PreviewStudioGain = true }
 -- Numbers that must be > 0 (a 0 period would run a loop on every engine tick).
-local POSITIVE = { CouchGarageTries = true, Garage4SpinCaptureMs = true, FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
+local POSITIVE = { HudSplitNoticeScale = true, HudMateTagScale = true, CouchGarageTries = true, CouchGarageStandingHoldMs = true, CouchGarageHeldAMaxMs = true, CouchStyleGridCols = true, Garage4SpinCaptureMs = true, FastPollMs = true, MainPollMs = true, SlowPollMs = true, FastBootPollMs = true,
                    LobbyNavRepeatMs = true, LobbyFocusKeepMs = true, SetupMaxRacers = true, SetupMaxRacersPlane = true,
                    SetupListMax = true, WreckCamMaxDistUU = true, WreckCamBadMs = true, PhotoModeCacheMs = true,
                    IgnitionPadAssistWindowMs = true, WreckViewReapplyMs = true, CrashCamMaxDistUU = true,
@@ -1840,7 +1933,7 @@ local POSITIVE = { CouchGarageTries = true, Garage4SpinCaptureMs = true, FastPol
                    -- couch-fix67 class pins
                    ClassPinCap = true }
 -- 0.10.0: numbers that must be >= 0 (0 = off / at once).
-local NONNEG = { CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
+local NONNEG = { HudMateTagMaxDist = true, CardP1DirGuardMs = true, CardGuestClickGuardMs = true, SetupPreviewPrebuildMs = true,
                  SetupPreviewCaptureMs = true,
                  -- 0.11.0 RESTART RACE
                  PauseRestartAfterResumeMs = true,

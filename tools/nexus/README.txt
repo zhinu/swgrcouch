@@ -4,7 +4,7 @@ SWGRCouch @VERSION@ - split-screen couch play for STAR WARS Galactic Racer (1-4 
 This is the lean download: the mod's Lua scripts only. It contains no DLL and no program.
 
 REQUIRED
-  UE4SS Galactic Racer Edition by GenerousMods, installed first from its Nexus page:
+  UE4SS Galactic Racer Edition V0.9.4 or newer by GenerousMods, installed first from its Nexus page:
   https://www.nexusmods.com/starwarsgalacticracer/mods/2
 
 INSTALL
@@ -36,8 +36,9 @@ MORE
   Full README, Linux install script, the other downloads, source and code signing policy:
     https://github.com/zhinu/swgrcouch
     https://git.jules.my/jules/swgrcouch
-  If the game was updated and UE4SS stops booting, the repo's ue4ss_signatures/ folder may help
-  (copy its .lua files into ue4ss\UE4SS_Signatures\), or update UE4SS Galactic Racer Edition.
+  If the game was updated and UE4SS stops booting, update UE4SS Galactic Racer Edition first (V0.9.4 or
+  newer brings its own signatures). Only for an older UE4SS: the repo's ue4ss_signatures/ folder may
+  help (copy only the .lua files that ue4ss\UE4SS_Signatures\ does not have yet).
 
 Found a bug? DM me on Nexus.
 

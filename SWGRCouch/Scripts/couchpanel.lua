@@ -33,6 +33,19 @@ local C = require("consts")
 
 local TAG = "couchpanel"
 local M = {}
+-- couch-fix72: the guests' panels are keyed by ident (join.lua); the PAD a guest holds can differ after a
+-- REASSIGN CONTROLLERS (padmap.lua). ident -> pad (the same id without a reassignment)
+local function padOf(ctrlId)
+    if ctrlId == nil then return nil end
+    local okM, PM = pcall(require, "padmap")
+    if okM and type(PM) == "table" and type(PM.padOfIdent) == "function" then
+        local okP, pad = pcall(PM.padOfIdent, ctrlId)
+        if okP and type(pad) == "number" then return pad end
+    end
+    return ctrlId
+end
+M.padOf = padOf
+
 
 local function CR() return U.mod("couchrun") end
 local function opt(k, d) local v = cfg[k]; if v == nil then return d end; return v end
@@ -2970,7 +2983,7 @@ local function renderGarage(P, W)
         pcall(function()
             local c = package.loaded["couch"]
             local id = (type(c) == "table" and type(c.parkedFor) == "function") and c.parkedFor() or nil
-            parked = id ~= nil and id == P.ctrlId
+            parked = id ~= nil and id == padOf(P.ctrlId)
         end)
         setText(W.foot, parked and "UP / DOWN choose   LEFT / RIGHT change   DONE closes"
             or "UP / DOWN choose   LEFT / RIGHT change   B done")
@@ -3049,7 +3062,7 @@ local function renderList(P)
     else
         -- a PARKED pad has no PlayerInput: his B cannot be read (fix16), the LEAVE row is the way out
         local bOk = true
-        pcall(function() bOk = package.loaded["couch"].parkedFor() ~= P.ctrlId end)
+        pcall(function() bOk = package.loaded["couch"].parkedFor() ~= padOf(P.ctrlId) end)
         if S.kind == "vendor" then
             setText(W.foot, bOk and "D-PAD choose   A select   B back" or "D-PAD choose   A select   BACK / LEAVE row")
         else
@@ -4008,10 +4021,11 @@ local function padParked(ctrlId)
     local c = couchMod()
     if ctrlId == nil or not (c and type(c.parkedFor) == "function") then return false end
     local ok, id = pcall(c.parkedFor)
-    return ok and id ~= nil and id == ctrlId
+    return ok and id ~= nil and id == padOf(ctrlId)
 end
 
 local function padPC(ctrlId)
+    ctrlId = padOf(ctrlId)        -- couch-fix72: ident -> the pad he holds (padmap)
     local GS = U.cdo("GameplayStatics")
     for _, e in ipairs(U.localPlayers()) do
         local okI, id = pcall(function() return GS:GetPlayerControllerID(e.pc) end)
@@ -4042,7 +4056,7 @@ end
 local function padSetFocus(w, ctrlId, pc, force)
     if not U.ok(w) then return false end
     if padParked(ctrlId) then
-        local ok, done = pcall(couchMod().withPadId, ctrlId, function(holder) w:SetUserFocus(holder) end, force == true)
+        local ok, done = pcall(couchMod().withPadId, padOf(ctrlId), function(holder) w:SetUserFocus(holder) end, force == true)
         return ok and done == true
     end
     return pcall(function() w:SetUserFocus(pc) end)
@@ -4487,7 +4501,9 @@ function V.p1Keys()
         if okW and on == true then
             local uid = 0
             pcall(function()
-                local o = U.mod("couch").originalIdOf(U.p1())
+                local c = U.mod("couch")
+                local o = c.originalIdOf(U.p1())
+                if type(o) ~= "number" and type(c.p1Pad) == "function" then o = c.p1Pad() end   -- couch-fix72
                 if type(o) == "number" then uid = o end
             end)
             local okP, pads = pcall(IF.padPresses)
@@ -4575,7 +4591,9 @@ function V.p1BSeq()
         if okW and on == true then
             local uid = 0
             pcall(function()
-                local o = U.mod("couch").originalIdOf(U.p1())
+                local c = U.mod("couch")
+                local o = c.originalIdOf(U.p1())
+                if type(o) ~= "number" and type(c.p1Pad) == "function" then o = c.p1Pad() end   -- couch-fix72
                 if type(o) == "number" then uid = o end
             end)
             local okP, pads = pcall(IF.padPresses)
@@ -4599,6 +4617,7 @@ function V.guestBSeq(ctrlId)
     local okW, on = pcall(function() return IF.padWatch() end)
     if not (okW and on == true) then return nil, false end
     local okP, pads = pcall(IF.padPresses)
+    ctrlId = padOf(ctrlId)        -- couch-fix72: his ident -> the pad he holds (padmap.lua)
     local e = okP and type(pads) == "table" and pads[ctrlId] or nil
     return type(e) == "table" and tonumber(e.b) or nil, true
 end
@@ -5595,12 +5614,14 @@ function M.garageOfferShow(g, line1, line2)
     setText(t1, line1)
     local s1 = place(H.cv, t1, x + 24, y + h / 2, nil, nil, 3)
     pcall(function() s1:SetAlignment({ X = 0, Y = 0.5 }) end)
-    local pill2 = pillImage(H.tree, CHIP_PILL_MAT, PILL_OFF)
-    place(H.cv, pill2, x + w - 320, y + h + 10, 320, h, 2)
-    local t2 = text(H.tree, 30, PAPER, FONT_BODY)
-    setText(t2, line2 or "")
-    local s2 = place(H.cv, t2, x + w - 300, y + h + 10 + h / 2, nil, nil, 3)
-    pcall(function() s2:SetAlignment({ X = 0, Y = 0.5 }) end)
+    if line2 then                                         -- couch-fix74: the standing offer has one line only
+        local pill2 = pillImage(H.tree, CHIP_PILL_MAT, PILL_OFF)
+        place(H.cv, pill2, x + w - 320, y + h + 10, 320, h, 2)
+        local t2 = text(H.tree, 30, PAPER, FONT_BODY)
+        setText(t2, line2)
+        local s2 = place(H.cv, t2, x + w - 300, y + h + 10 + h / 2, nil, nil, 3)
+        pcall(function() s2:SetAlignment({ X = 0, Y = 0.5 }) end)
+    end
     H.host:AddToViewport((tonumber(opt("CouchPanelZ", 1000)) or 1000) - 6)
     pcall(function() U.mod("couchroot").exclude(H.host) end)
     OFFERH.host = H.host

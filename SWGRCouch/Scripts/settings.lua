@@ -32,6 +32,9 @@ settings.ALLOWED = {
 -- couch-fix36: OPTIONS > COUCH CAMPAIGN (couchpenalty.lua)
 settings.ALLOWED.CouchBrokerPenalty = { "both", "owner" }
 ORDER[#ORDER + 1] = "CouchBrokerPenalty"
+-- couch-fix75 (player request #12): OPTIONS > COUCH CAMPAIGN > Friendly fire (friendly.lua)
+settings.ALLOWED.CouchFriendlyFire = { "on", "off" }
+ORDER[#ORDER + 1] = "CouchFriendlyFire"
 -- couch-fix41: retired keys - an old settings.txt line is dropped quietly (never kept, never written back).
 -- CouchBackerTokens (couch-fix36's backer token rule): solo parity, an unhappy backer never costs a League Token.
 settings.RETIRED = { CouchBackerTokens = true }
@@ -65,6 +68,7 @@ local COMMENTS = {
     PlayMode          = "quick (QUICK RACE: everybody on the Opponents tier, no perks) | custom (perks per kart)",
     RunPick           = "FREE MODE GALAXY RUN preset: qualifier | league | kestar | sprint (RunLength arms the next launch)",
     CouchBrokerPenalty = "couch campaign, a guest's Broker penalty: both | owner (OPTIONS > COUCH CAMPAIGN)",
+    CouchFriendlyFire = "couch campaign: on (abilities hit teammates, as in solo) | off (no Ion Bolt / Blast / Shockwave on a teammate) (OPTIONS > COUCH CAMPAIGN)",
     CouchMysteryTeam  = "greyed | allowed: a guest may take a mystery choice with a TEAM effect (OPTIONS > COUCH CAMPAIGN)",
     CouchEconomy      = "COUCH CAMPAIGN: own (P1's wallet / rounds follow his own place) | best (the best result carries everyone)",
     Name1             = "custom player names (OPTIONS > PLAYER NAMES; empty = default: P1's own name, 'Player <n>')",

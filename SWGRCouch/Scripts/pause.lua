@@ -510,7 +510,12 @@ end
 -- guest while paused) | "owner" (only a guest that owns the menu) | "off". P1 is left to the game's InputModeManager.
 -- bIgnoreAllPressedKeysUntilRelease: the Start that paused / the A that resumed never fires the other context's action.
 -- VERIFY(V-PAU-10)
-local IMC_UI_PATH = "/Game/Griffin/Config/Input/UI/IMC_UI.IMC_UI"
+local IMC_UI_PATH = U.IMC_UI_PATH or "/Game/Griffin/Config/Input/UI/IMC_UI.IMC_UI"
+-- couch-fix76 (AUTO-171): CL386500 renamed it IMC_UI_PadAndDefaultKB: by path, else by name among the loaded IMCs (U.imcUi)
+local function imcUiObj()
+    if type(U.imcUi) == "function" then return (U.imcUi()) end
+    return loaded(IMC_UI_PATH)
+end
 local UIM_SETTINGS = "/Script/Griffin.Default__UIManagerSettings"
 local EI_CLASS = "/Script/EnhancedInput.EnhancedInputLocalPlayerSubsystem"
 local prio = nil
@@ -556,14 +561,16 @@ local function imcOpts() return { bIgnoreAllPressedKeysUntilRelease = true } end
 local function imcBoost(st, owner, why)
     local mode = opt("PauseUiImcBoost", "all")
     if mode == "off" then return "off" end
-    local imc = loaded(IMC_UI_PATH)
+    local imc = imcUiObj()
     if not imc then
+        st.imcNotFound = true                        -- couch-fix76: retried while paused (P1's applied IMC_UI shows later)
         if not imcWarned then
             imcWarned = true
             U.warn(TAG, "IMC_UI not in memory (%s): no UI input for guests while paused (V-PAU-10)", IMC_UI_PATH)
         end
         return "IMC_UI not found"
     end
+    st.imcNotFound = false
     local act = imcPrios()
     st.imc = st.imc or {}
     local done = {}
@@ -595,7 +602,7 @@ end
 -- priority when unknown; removed when it had none). Without a record (hot reload, a boost by the game) a guest at the
 -- active priority is normalised too: resume edge, "leaving", FRONTEND, arming.
 local function imcRestore(st, why)
-    local imc = loaded(IMC_UI_PATH)
+    local imc = imcUiObj()
     if not imc then st.imc, st.imcBoosted = {}, false; return "IMC_UI not found" end
     local act, def = imcPrios()
     local done = {}
@@ -627,7 +634,7 @@ end
 
 -- "P1:500,P2:500" for the probe lines (none = not mapped, ? = unreadable)
 local function imcDesc()
-    local imc = loaded(IMC_UI_PATH)
+    local imc = imcUiObj()
     if not imc then return "?" end
     local parts = {}
     for _, lp in ipairs(U.localPlayersRO()) do
@@ -919,6 +926,9 @@ local function precreate(st, kind, leaf, owner, ownerWhy, why)
     if leaf == "Paused_Racing" then
         local okR, r = pcall(U.mod, "restart")
         if okR and type(r) == "table" and type(r.decorate) == "function" then U.try(TAG, r.decorate, w, "pre-create") end
+        -- couch-fix72 (#13): REASSIGN CONTROLLERS (reassign.lua), appended after the game's rows
+        local okA, ra = pcall(U.mod, "reassign")
+        if okA and type(ra) == "table" and type(ra.decorate) == "function" then U.try(TAG, ra.decorate, w, "pre-create") end
     end
     return w, z
 end
@@ -2061,6 +2071,14 @@ local function menuTick(st, pausedNow, now)
         -- missed request); a pre-created one is already done (idempotent per screen)
         local okR, r = pcall(U.mod, "restart")
         if okR and type(r) == "table" and type(r.decorate) == "function" then U.try(TAG, r.decorate, w, how) end
+        local okA, ra = pcall(U.mod, "reassign")                -- couch-fix72 (#13): REASSIGN CONTROLLERS
+        if okA and type(ra) == "table" and type(ra.decorate) == "function" then U.try(TAG, ra.decorate, w, how) end
+    elseif st.imcNotFound and localPCCount() >= 2 and now - (st.imcRetryMs or -1e12) >= 1000 then
+        -- couch-fix76 (AUTO-171): IMC_UI was not found at the request; a later look (a 30 s name scan) may find it: the guests
+        -- get it then
+        st.imcRetryMs = now
+        local r = imcBoost(st, st.lastOwner, "retry while paused")
+        if not st.imcNotFound then U.log(TAG, "IMC_UI boost on retry while paused: %s (AUTO-171)", tostring(r)) end
     end
     local age = now - st.menuSeenMs
     local due = ({ 0, 500, 2000 })[st.menuProbes + 1]
@@ -2319,7 +2337,7 @@ local function afterPause(st, now)
     if st.p1ImcChecked or not st.resumedAtMs or now - st.resumedAtMs < 1000 then return end
     st.p1ImcChecked = true
     if localPCCount() < 2 then return end
-    local imc, sub = loaded(IMC_UI_PATH), eiSub(U.p1())
+    local imc, sub = imcUiObj(), eiSub(U.p1())
     if not (imc and sub) then return end
     local has, p = eiHas(sub, imc)
     local act = imcPrios()

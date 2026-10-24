@@ -1511,6 +1511,74 @@ function M._rjSeen(cn, obj)
 end
 function M._rjSeenClear() rjSeen = {}; abSeen = {} end
 
+-- couch-fix73 #11 (player couple, 2P couch campaign, QoL: "the large top-screen Eliminator notifications (next racer
+-- to be eliminated / Eliminated) and the Ramjet distance / time-trial notifications obscure a huge portion of each
+-- split view; make these overlays significantly smaller or move them to a corner (NOT the Afterburner/Ramjet gauges)").
+-- These mode widgets sit in each HUD's C_Center / EventInfo slot at full designer size (they are inside the interior
+-- that hud.lua fits to a half view, so they keep their full-screen proportions in a view half as tall). In a SPLIT race
+-- every instance is render-scaled to cfg.HudSplitNoticeScale around the pivot of cfg.HudSplitNoticeWidgets (the "at
+-- risk" list shrinks into its top-left corner, the centred titles / counters toward the top centre). Instances report
+-- themselves through NotifyOnNewObject (no object walk); a single-view race (solo, one-view phases) gets scale 1 back
+-- and a solo race is never touched (no instance is scaled unless 2+ views are up). The game animates opacity / colour
+-- on them, never the render transform (decoded: Anim_Reveal / Anim_TargetReached / Anim_PassedGate are colour tracks).
+-- VERIFY(V-HUD-20): 2P eliminator: "AT RISK OF ELIMINATION" + "PREPARING FOR NEXT ROUND" about 60 % size.
+local NC_PATH = "/Game/Griffin/UI/Widgets/HUD/%s.%s_C"
+local ncSeen = {}                 -- short class -> wrappers reported by NotifyOnNewObject (cleared on "leaving")
+local ncApplied = {}              -- widget address -> scale written (1 = given back)
+function M._ncSeen(cn, obj)
+    if obj == nil then return end
+    local l = ncSeen[cn]
+    if not l then l = {}; ncSeen[cn] = l end
+    l[#l + 1] = obj
+    if #l > RJ_SEEN_MAX then table.remove(l, 1) end
+end
+function M._ncClear() ncSeen = {}; ncApplied = {} end
+
+-- pure (sim): the scale a notice widget wants. views = local views up, single = St.race.singleView
+function M.noticeScale(views, single)
+    local sc = tonumber(cfg.HudSplitNoticeScale) or 1
+    if sc <= 0 or sc > 1 then sc = 1 end
+    if (tonumber(views) or 1) < 2 or single == true then return 1 end
+    return sc
+end
+
+local function ncPivot(cn)
+    local t = type(cfg.HudSplitNoticeWidgets) == "table" and cfg.HudSplitNoticeWidgets[cn] or nil
+    if type(t) ~= "table" then return { X = 0.5, Y = 0.0 } end
+    return { X = tonumber(t[1] or t.X) or 0.5, Y = tonumber(t[2] or t.Y) or 0.0 }
+end
+
+function M.compactNotices()
+    if type(cfg.HudSplitNoticeWidgets) ~= "table" or next(ncSeen) == nil then return end
+    local views = tonumber(St.race.localViews) or #U.localPlayersRO()   -- split.enterRace: the race's view count
+    local want = M.noticeScale(views, St.race.singleView)
+    local n = 0
+    for cn, list in pairs(ncSeen) do
+        local keep = {}
+        for _, w in ipairs(list) do
+            if U.ok(w) then
+                keep[#keep + 1] = w
+                local k = U.key(w)
+                local cur = ncApplied[k]
+                -- a widget never scaled stays untouched while scale 1 is wanted (solo: nothing written at all)
+                if cur ~= want and not (cur == nil and want == 1) then
+                    local ok = pcall(function()
+                        w:SetRenderTransformPivot(ncPivot(cn))
+                        w:SetRenderScale({ X = want, Y = want })
+                    end)
+                    ncApplied[k] = ok and want or cur
+                    if ok then n = n + 1 end
+                end
+            end
+        end
+        ncSeen[cn] = keep
+    end
+    if n > 0 then
+        U.logEvery("hud.notices", 5000, TAG, "split-view notices (eliminator / ramjet distance / bonus time): %d widget(s) "
+            .. "at scale %.2f (V-HUD-20)", n, want)
+    end
+end
+
 -- the live wrappers of one class owned by pc: from the notify list (pruned), or one FindAllOf walk
 local function ramjetOwned(cn, pc, fromWalk)
     local out, keep = {}, {}
@@ -2847,6 +2915,8 @@ function M.tick()
     end
     local ph = St.phase
     if ph ~= "PRERACE" and ph ~= "RACING" and ph ~= "POSTRACE" then return end
+    U.try(TAG, M.compactNotices)                       -- couch-fix73 #11: split-view eliminator / goal notices
+    U.try(TAG, M.lockTick)                             -- couch-fix73 #9: lock-on reticles in every player's HUD
     -- photo mode (run E: both PCs possess BP_PhotoModePawn_C): every HUD we host is hidden and nothing is created,
     -- re-placed or re-bound until it closes (the photo pawns are no cars; the game's photo HUD needs the screen).
     -- VERIFY(V-HUD-16): "photo mode open ... HUD work paused" once, "photo mode closed" once, nothing in between.
@@ -2969,6 +3039,369 @@ end
 -- #29: the per-player HUD pass stops on one local player and on a single-view race the mod did not launch; a couch
 -- sit-out (couchrules: singleView + sitOut) keeps it, the guest being view-less like a dormant player (P1's clone,
 -- no guest HUD). Pure (tools/test_sitouthud.lua).
+---------------------------------------------------------------------------------------------------- lock-on markers
+-- couch-fix73 #9 (player couple, 2P couch campaign: "P2 Ion Bolt / Multi-Bolt: lock-on sounds play, bolts fire and
+-- hit, Surge granted - but the targeting markers above locked-on enemies never appear on P2's HUD"; check P1 too).
+-- Native path (static, CL386500, disassembly 2026-10-24):
+--   UVehicleMarkerContainer::NativeTick (0x143084436) reads ITS OWN GetOwningPlayer()->PlayerState as the local player
+--   every tick, walks RacingGameState.Racers (skipping locally player-controlled cars: no marker over a human car in
+--   split, by design), and builds a racer's UVehicleMarkerVM ONCE (New + Init(localPS, racerPS), 0x140a33ae0), kept in
+--   a private map for the race. Init is the ONLY place that binds the local player's targeting abilities: it walks
+--   localPS.AbilityComponent.Abilities, binds each UAbilityDisruptor's OnAbilityStateChanged to the VM and fills
+--   AbilityToMarkerVMs. Each tick IsTargeted = racer in Ability.TrackedTargets; UVehicleMarkerWidget::NativeTick then
+--   makes the reticle (TargettingWidgets, pool) in AbilityTargets and Activates it. The LOCK-ON SOUND is played by the
+--   reticle Blueprint itself (WBP_HUD_Disruptor_Reticle SpawnSoundAttached on TargetingState changes).
+-- So a reticle WAS made somewhere when P2 heard his lock-on: the hidden game HUD (opacity 0, "clone" mode) is owned by
+-- the LAST local PC = P2 (log: "game HUD ... (hidden, owner P2 (guest, ctrlId 1))") and its container binds P2's
+-- abilities; P2's own HUD container must then have VMs that are NOT bound to his abilities: built while his
+-- AbilityComponent.Abilities did not hold the instanced Disruptor yet, or bound to another PlayerState. The VMs are
+-- never rebuilt natively, so the HUD stays without reticles for the whole race.
+-- Fix (cfg.HudLockFix): every second in a split race, for each HUD we host (P1's included), the markers' VMs are
+-- checked against the HUD owner's targeting abilities (read-only property reads). When the owner HAS a Disruptor-family
+-- ability and NO marker VM of that HUD is bound to it (LocalPlayerState another player's, or AbilityToMarkerVMs empty
+-- on every marker), the HUD's vehicle-marker container is rebuilt ONCE per HUD per race: a fresh
+-- WBP_VehicleMarkerContainer_C owned by the HUD's player in the same canvas (stretched over the view like the original),
+-- the old one collapsed (a collapsed widget is not ticked). Its first ticks build fresh VMs bound to the owner's live
+-- abilities; nametags.lua follows the new container (e.markers). cfg.HudLockDiag logs what each HUD's markers hold while
+-- a local player's targeting ability is active (V-HUD-21) - the evidence for the next live session.
+-- VERIFY(V-HUD-21): 2P couch race, P2 Ion Bolt on an AI car: the reticle over the target in P2's half; P1's too.
+local LOCK_ACTIVE = 16                         -- EGfnAbilityState::Active
+local LOCK_FAMILY = "Disruptor"                -- BP_Ability_Disruptor*_C (Ion / Concussive / Multi / Surge Bolt)
+local function lockState()
+    local h = H()
+    if h.lock == nil or h.lock.gen ~= St.worldGen then h.lock = { gen = St.worldGen, rebuilt = {}, diagMs = {}, seen = {} } end
+    return h.lock
+end
+
+-- the owner's targeting abilities: count, any Active
+local function ownerTargeting(ps)
+    local n, active = 0, false
+    if not U.ok(ps) then return 0, false end
+    pcall(function()
+        local comp = ps.AbilityComponent
+        if not U.ok(comp) then return end
+        local arr = comp.Abilities
+        for i = 1, U.arrayCount(arr) do
+            local a = arr[i]
+            if U.ok(a) and U.className(a):find(LOCK_FAMILY, 1, true) then
+                n = n + 1
+                local okS, st = pcall(function() return tonumber(a.State) end)
+                if okS and st == LOCK_ACTIVE then active = true end
+            end
+        end
+    end)
+    return n, active
+end
+
+local function countOf(container)
+    if container == nil then return nil end
+    local n = U.arrayCount(container)
+    if n > 0 then return n end
+    local c = 0
+    local ok = pcall(function() container:ForEach(function() c = c + 1 end) end)   -- TMap / TSet
+    if ok then return c end
+    return nil
+end
+
+-- pure (sim): what one HUD's markers hold -> rebuild?  st = {markers, own, foreign, unbound}
+function M.lockNeedsRebuild(ownerAbilities, st)
+    if (tonumber(ownerAbilities) or 0) < 1 or type(st) ~= "table" then return false end
+    local n = tonumber(st.markers) or 0
+    if n < 1 then return false end                                  -- no AI marker yet: nothing to judge
+    if (tonumber(st.foreign) or 0) >= n then return true end         -- every VM bound to another player
+    if (tonumber(st.unbound) or 0) >= n then return true end         -- no VM holds an ability of its owner
+    return false
+end
+
+local function markerStats(markers, ownKey)
+    local st = { markers = 0, own = 0, foreign = 0, unbound = 0, active = 0, reticles = 0 }
+    local canvas = U.ok(markers) and markers.Canvas or nil
+    if not U.ok(canvas) then return st end
+    local okC, cnt = pcall(U.callMethod, canvas, "GetChildrenCount")
+    if not okC or type(cnt) ~= "number" then return st end
+    for i = 0, cnt - 1 do
+        local okA, m = pcall(U.callMethod, canvas, "GetChildAt", i)
+        if okA and U.ok(m) then
+            pcall(function()
+                local vm = m.MarkerVM
+                if not U.ok(vm) then return end
+                st.markers = st.markers + 1
+                local lp = vm.LocalPlayerState                  -- unreadable: neither (never a rebuild on no data)
+                if U.ok(lp) then
+                    if U.key(lp) == ownKey then st.own = st.own + 1 else st.foreign = st.foreign + 1 end
+                end
+                local nb = countOf(vm.AbilityToMarkerVMs)
+                if nb == 0 then st.unbound = st.unbound + 1 end
+                st.active = st.active + (countOf(vm.ActiveAbilities) or 0)
+                local tg = m.AbilityTargets
+                if U.ok(tg) then
+                    local okR, r = pcall(U.callMethod, tg, "GetChildrenCount")
+                    if okR and type(r) == "number" then st.reticles = st.reticles + r end
+                end
+            end)
+        end
+    end
+    return st
+end
+
+local function rebuildMarkers(entry, why)
+    local old = entry.markers
+    local pc = entry.pc
+    if not (U.ok(old) and U.ok(pc)) then return false end
+    local ok, res = pcall(function()
+        local parent = old:GetParent()
+        if not U.ok(parent) then error("marker container has no parent") end
+        local cls = old:GetClass()
+        local w = U.WBL():Create(pc, cls, pc)              -- Create(WorldContextObject, WidgetType, OwningPlayer)
+        if not U.ok(w) then error("Create refused") end
+        local z = 0
+        pcall(function() z = tonumber(old.Slot:GetZOrder()) or 0 end)
+        local slot = parent:AddChildToCanvas(w)            -- the HUD_Container canvas -> CanvasPanelSlot
+        if not U.ok(slot) then error("AddChildToCanvas refused") end
+        slot:SetAnchors({ Minimum = { X = 0, Y = 0 }, Maximum = { X = 1, Y = 1 } })   -- designer: anchors 0,0-1,1
+        slot:SetOffsets({ Left = 0, Top = 0, Right = 0, Bottom = 0 })
+        pcall(function() slot:SetZOrder(z) end)
+        old:SetVisibility(VIS_HIDE)                         -- collapsed = no NativeTick: its stale VMs stop
+        return w
+    end)
+    if not ok then
+        U.warn(TAG, "P%s lock-on markers: container rebuild failed (%s) (V-HUD-21)", tostring(entry.pnum), tostring(res))
+        return false
+    end
+    local h = H()
+    local g = h.guests[U.key(pc)]
+    if g and sameObj(g.widget, entry.widget) then g.markers = res end
+    entry.markers = res
+    local mem = membersOf(entry.widget)
+    if mem then mem.markers = res end
+    U.log(TAG, "P%s lock-on markers: vehicle-marker container rebuilt for P%s's own abilities (%s) (V-HUD-21)",
+        tostring(entry.pnum), tostring(entry.pnum), why)
+    return true
+end
+
+function M.lockTick()
+    local mode = cfg.HudLockFix
+    if mode == false or mode == "off" then return end
+    if St.phase ~= "RACING" then return end
+    if (tonumber(St.race.localViews) or 1) < 2 or St.race.singleView == true then return end
+    local L = lockState()
+    local now = St.nowMs()
+    if now - (L.lastMs or -1e12) < 1000 then return end
+    L.lastMs = now
+    local t0 = tonumber(St.race.startedAtMs) or now
+    for _, entry in ipairs(M.allHuds()) do
+        if U.ok(entry.pc) and U.ok(entry.markers) then
+            local ps
+            pcall(function() ps = entry.pc.PlayerState end)
+            local ownKey = U.ok(ps) and U.key(ps) or 0
+            local nAb, active = ownerTargeting(ps)
+            local st = markerStats(entry.markers, ownKey)
+            local wk = U.key(entry.widget)
+            if cfg.HudLockDiag ~= false and (active or not L.seen[wk]) and st.markers > 0 then
+                L.seen[wk] = true
+                if now - (L.diagMs[wk] or -1e12) >= 1000 then
+                    L.diagMs[wk] = now
+                    U.log(TAG, "LOCKDIAG P%s: own Disruptor abilities %d%s; markers %d: VMs bound to him %d, to another "
+                        .. "player %d, no ability %d; active VM abilities %d; reticles %d (V-HUD-21)", tostring(entry.pnum),
+                        nAb, active and " (ACTIVE)" or "", st.markers, st.own, st.foreign, st.unbound, st.active, st.reticles)
+                end
+            end
+            if mode == "auto" and not L.rebuilt[wk] and now - t0 >= 3000 and M.lockNeedsRebuild(nAb, st) then
+                L.rebuilt[wk] = true
+                rebuildMarkers(entry, string.format("%d of %d marker VM(s) bound to another player, %d without an "
+                    .. "ability; he has %d", st.foreign, st.markers, st.unbound, nAb))
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------------------- teammate tags
+-- couch-fix73 #10 (player couple, couch campaign: "no name tag (Player 1 / Player 2) or friendly marker above each
+-- other's vehicles; hard to recognise your teammate among the AI"). Root cause (disassembly CL386500, the marker
+-- container's NativeTick 0x143084436): UVehicleMarkerContainer walks RacingGameState.Racers and SKIPS every racer whose
+-- pawn IsLocallyControlled() && IsPlayerControlled() - built for one local player (his own car), in split screen it
+-- drops every LOCAL HUMAN: no marker = no tag over a teammate in any view, whatever FREE MODE > OPTIONS > NAME TAGS
+-- says (nametags.lua colours / labels markers that exist: remote humans, or a bot-driven test car - which is why the
+-- auto tests, P1 on the AI, showed a marker over P1's car). Fix: each HUD we host gets the GAME'S OWN car tag
+-- (WBP_Hud_PlayerTag_C, the widget the markers carry: name, race position, platform icon) for every OTHER local human,
+-- created owned by the HUD's player, SetPlayerState(teammate) like the reticle's OnInit, labelled nametags.labelFor
+-- ("P2" or the custom name) in the player's colour, and placed every FAST tick over the teammate's car through
+-- WidgetLayoutLibrary:ProjectWorldLocationToWidgetPosition(owner PC, car + HudMateTagZ, out, bPlayerViewportRelative =
+-- true) in the HUD's HUD_Container canvas (the vehicle-marker container's parent: the player's whole view). Hidden when
+-- the car is behind the camera, farther than HudMateTagMaxDist, the teammate is out / wrecked, or the setting is off.
+-- Couch AND Free Mode split races, never solo (no teammate: solo parity untouched); purely visual.
+-- VERIFY(V-HUD-22): 2P race: "P2" (red) over P2's car in P1's half and "P1" (blue) over P1's car in P2's half.
+local MATE_CLS = "/Game/Griffin/UI/Widgets/HUD/WBP_Hud_PlayerTag.WBP_Hud_PlayerTag_C"
+local WLL = "/Script/UMG.Default__WidgetLayoutLibrary"
+local MATE_OUT = (St.outParams or function(t) return t end)({})   -- one out table (state.lua: the out-param leak)
+local MATE_POS = { X = 0, Y = 0 }
+local MATE_LOC = { X = 0, Y = 0, Z = 0 }
+local MT = { gen = nil, tags = {}, huds = nil, hudsMs = -1e12, pairs = nil, mates = nil }
+
+-- pure (sim): teammate tags wanted? views = the race's view count
+function M.mateTagsWanted(views, single, nameTagsOn, phase)
+    local m = cfg.HudMateTags
+    if m == false or m == "off" then return false end
+    if nameTagsOn ~= true then return false end
+    if phase ~= "RACING" and phase ~= "PRERACE" then return false end
+    return (tonumber(views) or 1) >= 2 and single ~= true
+end
+
+local function mateDrop(k, t, why)
+    if t and U.ok(t.w) then pcall(U.callMethod, t.w, "RemoveFromParent") end
+    MT.tags[k] = nil
+    if why then U.dbg(TAG, "teammate tag %s removed (%s)", tostring(k), why) end
+end
+
+function M.mateTagsClear()
+    for k, t in pairs(MT.tags) do mateDrop(k, t) end
+    MT.tags, MT.huds, MT.hudsMs, MT.pairs, MT.mates = {}, nil, -1e12, nil, nil
+end
+
+local function mateShow(t, show)
+    if t.shown == show then return end
+    if pcall(U.callMethod, t.w, "SetVisibility", show and VIS_SHOW or VIS_HIDE) then t.shown = show end
+end
+
+local function mateLabel(pnum, ps)
+    local okN, nt = pcall(U.mod, "nametags")
+    if okN and type(nt) == "table" and type(nt.labelFor) == "function" then
+        local ok, s = pcall(nt.labelFor, pnum, ps)
+        if ok and type(s) == "string" and s ~= "" then return s end
+    end
+    return "P" .. tostring(pnum)
+end
+
+local function mateMake(h, mate)
+    local canvas = U.ok(h.markers) and h.markers:GetParent() or nil
+    if not U.ok(canvas) then return nil, "no HUD_Container canvas (no vehicle-marker container)" end
+    local cls = U.findLoaded(MATE_CLS)
+    if not U.ok(cls) then return nil, "WBP_Hud_PlayerTag_C not loaded" end
+    local w = U.WBL():Create(h.pc, cls, h.pc)             -- Create(WorldContextObject, WidgetType, OwningPlayer)
+    if not U.ok(w) then return nil, "Create refused" end
+    local slot = canvas:AddChildToCanvas(w)               -- -> CanvasPanelSlot
+    if not U.ok(slot) then pcall(U.callMethod, w, "RemoveFromParent"); return nil, "AddChildToCanvas refused" end
+    pcall(U.callMethod, slot, "SetAnchors", { Minimum = { X = 0, Y = 0 }, Maximum = { X = 0, Y = 0 } })
+    pcall(U.callMethod, slot, "SetAlignment", { X = 0.5, Y = 1.0 })
+    pcall(U.callMethod, slot, "SetAutoSize", true)
+    pcall(U.callMethod, w, "SetPlayerState", mate.ps)     -- WBP_Hud_PlayerTag_C: name, position, icons (the reticle's way)
+    local label = mateLabel(mate.pnum, mate.ps)
+    pcall(function() w.Txt_PlayerName:SetText(U.ftext(label)) end)
+    local col = C.COLOURS and C.COLOURS[mate.pnum]
+    if col then pcall(U.callMethod, w, "SetColorAndOpacity", col) end
+    local sc = tonumber(cfg.HudMateTagScale) or 1
+    if sc > 0 and sc ~= 1 then pcall(U.callMethod, w, "SetRenderScale", { X = sc, Y = sc }) end
+    U.log(TAG, "P%s's HUD: teammate tag '%s' over P%s's car (the game draws no marker over a local human) (V-HUD-22)",
+        tostring(h.pnum), label, tostring(mate.pnum))
+    return { w = w, slot = slot, shown = true, label = label }
+end
+
+-- the (HUD, teammate) pairs, rebuilt once a second: no per-frame tables / keys / closures (racegc budget)
+local function mateRefresh(now)
+    MT.hudsMs = now
+    local ok, l = pcall(M.allHuds)
+    MT.huds = ok and l or {}
+    local mates = {}
+    for _, lp in ipairs(U.localPlayersRO()) do
+        if U.ok(lp.pc) then
+            local car, ps = nil, nil
+            pcall(function() car, ps = lp.pc.Pawn, lp.pc.PlayerState end)
+            local okO, out = pcall(playerOut, { pc = lp.pc })
+            if U.ok(car) and U.isVehicle(car) and U.ok(ps) and not (okO and out == true) then
+                local pn = lp.index
+                pcall(function()
+                    local jn = U.mod("join")
+                    if jn and jn.displayNumForPC then pn = jn.displayNumForPC(lp.pc) or pn end
+                end)
+                mates[#mates + 1] = { pc = lp.pc, car = car, ps = ps, pnum = pn, loc = nil }
+            end
+        end
+    end
+    local pairs_, seen = {}, {}
+    for _, h in ipairs(MT.huds) do
+        if U.ok(h.widget) and U.ok(h.pc) then
+            for _, mate in ipairs(mates) do
+                if not sameObj(mate.pc, h.pc) then
+                    local k = U.key(h.widget) .. ":" .. U.key(mate.pc)
+                    seen[k] = true
+                    pairs_[#pairs_ + 1] = { h = h, mate = mate, k = k }
+                end
+            end
+        end
+    end
+    for k, t in pairs(MT.tags) do
+        if not seen[k] then mateDrop(k, t, "player or HUD gone") end
+    end
+    MT.mates, MT.pairs = mates, pairs_
+end
+
+local function mateLoc(mate)
+    local ok, v = U.pcallM(mate.car, "K2_GetActorLocation")      -- AActor::K2_GetActorLocation() -> Vector
+    if ok and type(v) == "table" and tonumber(v.X) then return v end
+    return nil
+end
+
+function M.fastMateTags()
+    if MT.gen ~= St.worldGen then
+        MT.gen = St.worldGen
+        MT.tags, MT.huds, MT.hudsMs, MT.failed, MT.pairs, MT.mates = {}, nil, -1e12, nil, nil, nil
+    end
+    local okS, settings = pcall(U.mod, "settings")
+    local tagsOn = okS and type(settings) == "table" and settings.get("NameTags") == true
+    local views = tonumber(St.race.localViews) or 1
+    if not M.mateTagsWanted(views, St.race.singleView, tagsOn, St.phase) then
+        if next(MT.tags) ~= nil then M.mateTagsClear() end
+        return
+    end
+    local now = St.nowMs()
+    if MT.pairs == nil or now - MT.hudsMs >= 1000 then mateRefresh(now) end
+    local wl = U.findLoaded(WLL)
+    if not U.ok(wl) then return end
+    local maxD = tonumber(cfg.HudMateTagMaxDist) or 0
+    local zOff = tonumber(cfg.HudMateTagZ) or 250
+    for _, mate in ipairs(MT.mates) do
+        mate.loc = U.ok(mate.car) and mateLoc(mate) or nil
+    end
+    for _, pr in ipairs(MT.pairs) do
+        local h, mate, k = pr.h, pr.mate, pr.k
+        local t = MT.tags[k]
+        if t and not U.ok(t.w) then mateDrop(k, t, "widget gone"); t = nil end
+        if not t and not MT.failed and U.ok(h.widget) then
+            local okM, r, why = pcall(mateMake, h, mate)
+            if okM and r then t = r; MT.tags[k] = t
+            else
+                MT.failed = true
+                U.warn(TAG, "teammate tags unavailable: %s (V-HUD-22)", tostring(okM and why or r))
+            end
+        end
+        if t then
+            local loc, show = mate.loc, false
+            if loc then
+                local far = false
+                if maxD > 0 then
+                    for _, o in ipairs(MT.mates) do
+                        if sameObj(o.pc, h.pc) and o.loc then
+                            local dx, dy, dz = o.loc.X - loc.X, o.loc.Y - loc.Y, o.loc.Z - loc.Z
+                            far = dx * dx + dy * dy + dz * dz > maxD * maxD
+                        end
+                    end
+                end
+                if not far then
+                    MATE_LOC.X, MATE_LOC.Y, MATE_LOC.Z = loc.X, loc.Y, loc.Z + zOff
+                    local okP, onScreen = U.pcallM(wl, "ProjectWorldLocationToWidgetPosition", h.pc, MATE_LOC, MATE_OUT, true)
+                    if St.dropOutRefs then St.dropOutRefs(MATE_OUT) end
+                    local x, y = tonumber(MATE_OUT.X), tonumber(MATE_OUT.Y)
+                    if okP and onScreen == true and x and y and x == x and y == y then
+                        MATE_POS.X, MATE_POS.Y = x, y
+                        show = U.pcallM(t.slot, "SetPosition", MATE_POS)
+                    end
+                end
+            end
+            mateShow(t, show)
+        end
+    end
+end
+
 function M.guestPassOff(nLps, singleView, sitOut)
     if (tonumber(nLps) or 0) < 2 then return true end
     return singleView == true and sitOut ~= true
@@ -3158,7 +3591,18 @@ function M.init()
             U.try(TAG, present.init)
         end
     end
-    St.on("leaving", TAG, function() M.clearAll(); M._rjSeenClear() end)
+    -- couch-fix73 #11: the split-view notice widgets report themselves (store only in the callback)
+    if not _G.SWGRCouch_ncNotify and type(NotifyOnNewObject) == "function" and type(cfg.HudSplitNoticeWidgets) == "table" then
+        local okAll = true
+        for cn in pairs(cfg.HudSplitNoticeWidgets) do
+            okAll = pcall(NotifyOnNewObject, string.format(NC_PATH, cn, cn), function(obj)
+                pcall(function() U.mod("hud")._ncSeen(cn, obj) end)
+            end) and okAll
+        end
+        _G.SWGRCouch_ncNotify = true
+        U.log(TAG, "split-view notices: NotifyOnNewObject %s", okAll and "installed" or "partly FAILED")
+    end
+    St.on("leaving", TAG, function() M.clearAll(); M._rjSeenClear(); M._ncClear(); M.mateTagsClear() end)
     St.on("phase", TAG, function(new)
         if new == "FRONTEND" or new == "OTHER" or new == "LOADING" then M.clearAll() end
     end)

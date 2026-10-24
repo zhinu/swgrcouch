@@ -2,7 +2,7 @@ SWGRCouch @VERSION@ - split-screen couch play for STAR WARS Galactic Racer (1-4 
 ================================================================================================
 
 This is the all-in-one "unzip into the game folder and play" download: the mod, its input filter DLL
-and UE4SS Galactic Racer Edition (by GenerousMods), already laid out like the game folder.
+and UE4SS Galactic Racer Edition V0.9.4 (by GenerousMods), already laid out like the game folder.
 (This text is SWGRCouch-INSTALL.txt in the game folder and README.txt in the mod's folder.)
 
 INSTALL
@@ -40,10 +40,12 @@ UPDATING
   Quit the game first: the input filter DLL is in use while the game runs.
 
 ALREADY USING UE4SS FOR OTHER MODS?
-  This zip carries its own ue4ss\Mods\mods.txt and mods.json (SWGRCouch and ConsoleEnablerMod on,
-  SplitScreenMod and BPModLoaderMod off, the other mods of UE4SS Galactic Racer Edition as it ships
-  them) and ue4ss\UE4SS-settings.ini. Replacing your mods.txt / mods.json switches off every mod they
-  do not list. If you already have UE4SS with other mods, do NOT replace those three files (answer
+  This zip carries UE4SS Galactic Racer Edition V0.9.4 exactly as GenerousMods ships it: its
+  ue4ss\Mods\mods.txt and mods.json (SplitScreenMod and the other example mods off, Keybinds on) with
+  one line added, "SWGRCouch : 1", and its ue4ss\UE4SS-settings.ini and ue4ss\UE4SS_Signatures\, plus
+  the two signature files V0.9.4 lacks (GNatives.lua, GUObjectHashTables.lua: without them the game
+  crashed at every couch race start on the 2026-10-22 build).
+  Replacing your mods.txt / mods.json switches off every mod they do not list. If you already have UE4SS with other mods, do NOT replace those three files (answer
   "skip" for them): SWGRCouch loads anyway through its own Mods\SWGRCouch\enabled.txt (UE4SS starts
   every mod folder that has one). Keep SplitScreenMod off yourself (another split screen). If your
   UE4SS is older than the
@@ -80,16 +82,17 @@ INPUT FILTER DLL (@DLLSTATE@)
 CREDITS AND LICENCES
   - SWGRCouch by Jules, made with the help of Claude (Anthropic). MIT licence:
     ue4ss\Mods\SWGRCouch\LICENSE.
-  - UE4SS Galactic Racer Edition by GenerousMods: the UE4SS build for this game, included here
-    unchanged, with his OK: open beta of 2026-10-08, hotfix 2 (its log header says
-    "UE4SS - v3.0.1 Beta #0 - Git SHA #e3ba1016"). Thanks to GenerousMods for maintaining it.
+  - UE4SS Galactic Racer Edition V0.9.4 by GenerousMods: the UE4SS build for this game, included here
+    unchanged (only SWGRCouch's line added to mods.txt / mods.json), with his OK: Open Beta V0.9.4
+    of 2026-10-22 (UE4SS.dll md5 a603957dd135cc0471074a9067c0ead5; its log header says "UE4SS - v3.0.1 Beta #0 - Git SHA #e3ba1016", like the hotfix-2 build), with his
+    UE4SS_Signatures\ and his FindProperty cache fix. Thanks to GenerousMods for maintaining it.
+  - ue4ss\UE4SS_Signatures\GNatives.lua and GUObjectHashTables.lua: SWGRCouch's (V0.9.4 has no file
+    of these names; checked on CL386500).
     https://www.nexusmods.com/starwarsgalacticracer/mods/2
     A UE4SS problem? First update UE4SS from that page (it gets fixes after every game update) and
     check there before reporting it to GenerousMods: the copy in this zip may be older.
   - Please do not re-upload this zip, the mod or UE4SS anywhere else: link to the pages instead.
   - UE4SS (RE-UE4SS, https://github.com/UE4SS-RE/RE-UE4SS): MIT licence, ue4ss\LICENSE.
-  - ue4ss\UE4SS_Signatures\: SWGRCouch's signature files (checked on the game builds CL382493,
-    CL382801 and CL386500, the 2026-10-22 update).
 
   Full README, source, the other downloads and the code signing policy:
     https://github.com/zhinu/swgrcouch

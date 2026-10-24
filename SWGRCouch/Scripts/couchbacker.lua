@@ -384,7 +384,8 @@ function M.event(t, kind, nowMs)
     local add = 0
     if kind == t.goal then
         add = 1
-    elseif kind == "hit" and t.goal == "abilityhit" then
+        if kind == "abilityhit" then t.nativeHits = true end   -- rel103: the game's own hit event counts from now on
+    elseif kind == "hit" and t.goal == "abilityhit" and not t.nativeHits then
         if t.usedAt and now - t.usedAt <= M.ABILITY_HIT_WINDOW then add = 1 end
     end
     t.value = t.value + add
@@ -481,7 +482,8 @@ end
 
 ---------------------------------------------------------------------------------------------------- live: tracker
 -- tracks[seat-ish key] = { pnum, ctrlId, t, cid, psKey, pawnKey } of THIS race world
-local T = { gen = nil, tracks = {}, lastAt = -1e12, kindOk = nil, hits = {}, tdSeen = {}, stats = { events = 0 } }
+local T = { gen = nil, tracks = {}, lastAt = -1e12, kindOk = nil, hits = {}, tdSeen = {}, stats = { events = 0 },
+            fires = {}, abSeen = {}, condSeen = {} }
 M._T = function() return T end
 
 local function guests()
@@ -491,8 +493,13 @@ end
 
 local function resetWorld()
     T.gen, T.tracks, T.kindOk, T.hits, T.tdSeen, T.lastAt = St.worldGen, {}, nil, {}, {}, -1e12
-    T.miss, T.hitSeen = {}, {}
+    T.miss, T.hitSeen, T.pfSeen = {}, {}, {}
+    T.fires, T.abSeen, T.condSeen, T.firesLogged = {}, {}, {}, nil
+    T.pfCount, T.pfPollAt, T.pfGame, T.pfFindAt = {}, nil, nil, nil
 end
+-- rel103: how often each attribution hook fired in this race world (logged once at the race end: the live check)
+local function fired(k) T.fires[k] = (T.fires[k] or 0) + 1 end
+M._fired = fired
 
 -- this race counts for backer contracts (a StandardEvent / HighRiskEvent node, not a plane test)
 local function kindOk()
@@ -602,6 +609,7 @@ end
 function M.raceTick()
     if opt("CouchBackers", true) == false then return end
     if T.gen ~= St.worldGen then resetWorld() end
+    if St.phase == "PRERACE" or St.phase == "RACING" then U.try(TAG, M.pollPreflight, St.nowMs()) end
     if St.phase ~= "RACING" then return end
     local okC, couch = pcall(function() return U.mod("couch").active() end)
     if not (okC and couch == true) then return end
@@ -672,7 +680,40 @@ function M.onTakedown(action)
     bookEvent(ik, "takedown", "takedown")
 end
 
--- a completed pre-race check (PlayerPreFlightCheckComponent:Server_OnSuccessfulPreFlightCheck on HIS component)
+-- a completed pre-race check of HIS component.
+-- couch-fix74 (player report v1.0.2: "5 checks per race across 5 races, the contract still showed 0"): the old hook on
+-- PlayerPreFlightCheckComponent:Server_OnSuccessfulPreFlightCheck NEVER fires for a real check. Static (CL381121 exe,
+-- same code in CL386500): the native TestPreflightCheckInput (exec thunk 0x14700b8ee -> 0x1470c73e8) calls the RPC's
+-- _Implementation 0x1470c7752 DIRECTLY (C++ call, no ProcessEvent; the reflected Server_ exec thunk 0x14700b6aa only
+-- jmps to it via 0x1470c7b4c), so the UFunction hook only saw the mod's own "auto" completions. The _Implementation
+-- broadcasts OnPreFlightCheckSuccess (PFCSuccess(FText Name)); every WBP_IgnitionScreen_C binds it to its BP event
+-- OnPreFlightCheckSuccess for GetOwningPlayer()->PlayerState->PreFlightCheckComponent ("Setup Preflight Checks"), and a
+-- delegate call of a BP function goes through ProcessEvent (hookable). So a success = that BP event on a screen owned by
+-- his PC. Two screens can be bound to his component (the game's own screen belongs to the last local PC, plus
+-- ignition.lua's per-player copy): one success = one booking (same check name within PREFLIGHT_DEDUP_MS, or any
+-- success within PREFLIGHT_SAME_MS when the name is unreadable).
+M.PREFLIGHT_DEDUP_MS = 1500
+M.PREFLIGHT_SAME_MS = 120
+M.IGN_SUCCESS = "/Game/Griffin/UI/Screens/PreRace/WBP_IgnitionScreen.WBP_IgnitionScreen_C:OnPreFlightCheckSuccess"
+local function preflightDup(psk, name)
+    T.pfSeen = T.pfSeen or {}
+    local now = St.nowMs()
+    local last = T.pfSeen[psk]
+    local dup = last ~= nil and ((name ~= nil and last.name == name and now - last.at < M.PREFLIGHT_DEDUP_MS)
+        or now - last.at < M.PREFLIGHT_SAME_MS)
+    if not dup then T.pfSeen[psk] = { name = name, at = now } end
+    return dup
+end
+
+local function bookPreflight(psk, name, why)
+    if not psk or psk == 0 then return end
+    if T.gen ~= St.worldGen then resetWorld() end
+    if preflightDup(psk, name) then return end
+    bookEvent(psk, "preflight", why)
+end
+M._bookPreflight = bookPreflight
+
+-- the RPC path (the mod's own IgnitionMode "auto" completions call it through ProcessEvent)
 function M.onPreflight(comp)
     comp = U.unwrap(comp)
     if not U.ok(comp) then return end
@@ -683,8 +724,101 @@ function M.onPreflight(comp)
         if mine then
             local psk = nil
             pcall(function() psk = U.key(e.pc.PlayerState) end)
-            bookEvent(psk, "preflight", "pre-race check")
+            bookPreflight(psk, nil, "pre-race check (RPC)")
             return
+        end
+    end
+end
+
+-- the success broadcast as a screen sees it (WBP_IgnitionScreen_C:OnPreFlightCheckSuccess(FText Name), self = screen)
+function M.onScreenPreflight(screen, nameParam)
+    screen = U.unwrap(screen)
+    if not U.ok(screen) then return end
+    local own = nil
+    pcall(function() own = screen:GetOwningPlayer() end)
+    if not U.ok(own) then return end
+    local ok_ = U.key(own)
+    local name = nil
+    pcall(function()
+        local v = U.unwrap(nameParam)
+        if v ~= nil then name = v:ToString() end
+    end)
+    if type(name) ~= "string" or name == "" then name = nil end
+    for _, e in ipairs(guests()) do
+        if U.key(e.pc) == ok_ then
+            local psk = nil
+            pcall(function() psk = U.key(e.pc.PlayerState) end)
+            bookPreflight(psk, name, "pre-race check " .. tostring(name or "?"))
+            return
+        end
+    end
+end
+
+-- rel103 (hook audit finding A): WBP_IgnitionScreen_C:OnPreFlightCheckSuccess is a Blueprint event and this UE4SS runs
+-- no Blueprint hook (ProcessLocalScriptFunction unavailable): fix74's hook never fires live. The screens themselves
+-- count: the BP event increments the screen's SuccessCount (WBP_IgnitionScreen disasm, ubergraph 524..778). Polled in
+-- PRERACE (and the first racing seconds) on ignition.lua's per-player copies and the game's own screen; per player the
+-- HIGHEST count of his screens (two screens bound to one component count the same checks once) - each increase = one
+-- check of his. The native VehicleAudioGovernorComponent:OnPreflightCheckSuccess hook only counts fires (evidence).
+M.PREFLIGHT_POLL_MS = 150
+M.PREFLIGHT_NATIVE_FN = "/Script/Griffin.VehicleAudioGovernorComponent:OnPreflightCheckSuccess"
+local function screenCount(w)
+    local n = nil
+    pcall(function() n = tonumber(w.SuccessCount) end)
+    return n
+end
+function M.pollPreflight(now)
+    if now - (T.pfPollAt or -1e12) < M.PREFLIGHT_POLL_MS then return end
+    T.pfPollAt = now
+    if St.phase == "RACING" and now - (tonumber(St.race.startedAtMs) or now) > 5000 then return end
+    local okC, couch = pcall(function() return U.mod("couch").active() end)
+    if not (okC and couch == true) then return end
+    local gl = guests()
+    if #gl == 0 then return end
+    local ign = St.present and St.present.ign or nil
+    if type(ign) ~= "table" then ign = { players = {} } end
+    -- live 2026-10-24: in a couch race ignition.lua keeps no screen (St.present.ign empty): the game's own screen
+    -- (owned by the LAST local PC) is found here, once per race world, re-found only when it is gone
+    if St.phase ~= "PRERACE" then T.pfGame = nil end    -- the screen goes at the start: never touched after it
+    if St.phase == "PRERACE" and not U.ok(ign.game) then
+        if not U.ok(T.pfGame) and now - (T.pfFindAt or -1e12) >= 1000 then
+            T.pfFindAt = now
+            local okF, w = pcall(FindFirstOf, "WBP_IgnitionScreen_C")
+            T.pfGame = (okF and U.ok(w)) and w or nil
+        end
+        if U.ok(T.pfGame) then ign = { players = ign.players, game = T.pfGame } end
+    end
+    local best = {}                                    -- PC key -> highest SuccessCount of his screens
+    local function see(pcKey, w)
+        if pcKey == 0 or not U.ok(w) then return end
+        local c = screenCount(w)
+        if c and (best[pcKey] == nil or c > best[pcKey]) then best[pcKey] = c end
+    end
+    for _, e in pairs(ign.players or {}) do
+        if U.ok(e.pc) then see(U.key(e.pc), e.widget) end
+    end
+    if U.ok(ign.game) then
+        local own = nil
+        pcall(function() own = ign.game:GetOwningPlayer() end)
+        if U.ok(own) then see(U.key(own), ign.game) end
+    end
+    T.pfCount = T.pfCount or {}
+    for _, e in ipairs(gl) do
+        local k = U.ok(e.pc) and U.key(e.pc) or 0
+        local c = best[k]
+        if c ~= nil then
+            local last = T.pfCount[k]
+            if last == nil then
+                T.pfCount[k] = c                       -- first look: the screen's count so far (0 at a race start)
+                if c > 0 then last = 0 end
+            end
+            if last ~= nil and c > last then
+                T.pfCount[k] = c
+                local psk = nil
+                pcall(function() psk = U.key(e.pc.PlayerState) end)
+                fired("pfpoll")
+                for _ = last + 1, c do bookEvent(psk, "preflight", "pre-race check (screen count " .. c .. ")") end
+            end
         end
     end
 end
@@ -692,6 +826,7 @@ end
 -- a blame / damage by his car on an opponent: an ability hit (after his ability use) and the last damager of that
 -- opponent (malfunctions)
 function M.onBlame(comp, aggressor, reason)
+    fired("blame")
     comp, aggressor = U.unwrap(comp), U.unwrap(aggressor)
     local ak = psKeyOfPawn(aggressor)
     if not ak then return end
@@ -707,25 +842,137 @@ function M.onBlame(comp, aggressor, reason)
     bookEvent(ak, "hit", "blame on an opponent")
 end
 
+-- rel103: the key T.hits / bookEvent use (a PlayerState's) of a pawn, a controller or a PlayerState
+local function psKeyOfAny(o)
+    if not U.ok(o) then return nil end
+    if U.isA(o, "GfnPlayerState") then local k = U.key(o); return k ~= 0 and k or nil end
+    local k = nil
+    pcall(function() local ps = o.PlayerState; if U.ok(ps) then k = U.key(ps) end end)
+    return (k ~= nil and k ~= 0) and k or nil
+end
+M._psKeyOfAny = psKeyOfAny
+
 function M.onDamaged(victim, instigator)
+    fired("damage")
     victim, instigator = U.unwrap(victim), U.unwrap(instigator)
     if not (U.ok(victim) and U.ok(instigator)) then return end
-    local vk, ik = U.key(victim), U.key(instigator)
-    if vk ~= ik then T.hits[vk] = { by = ik, at = St.nowMs() } end
+    -- rel103: keyed by PlayerState like onBlame / onCondition read it (the raw object keys never matched)
+    local vk, ik = psKeyOfAny(victim), psKeyOfAny(instigator)
+    if vk and ik and vk ~= ik then T.hits[vk] = { by = ik, at = St.nowMs() } end
+end
+
+-- rel103 (extra of the v1.0.2 couple report: P2's "Trigger opponents' System Malfunction" never counted above 0 in any
+-- log, 58 races): the malfunction's attribution came only from VehicleBlameComponent:Server_AddBlameContributor and
+-- VehicleGameplayComponent:Server_OnVehicleDamaged. Both are SERVER RPCs: the host's own C++ calls their _Implementation
+-- directly (the pre-race check RPC's story, couch-fix74), so the UFunction hooks never see a real hit (no V-INST-DMG /
+-- V-INST-BLAME line in any log either) and T.hits stayed empty. The game's own reflected path:
+-- GameplayActionSubsystem.OnPlayerHitTargetWithAbility (a dynamic multicast, broadcast per ability hit) is bound to
+-- VehicleGameplayComponent:OnPlayerHitTargetWithAbility(FRacePlayerHitTargetWithAbilityGameplayAction {Player,
+-- AffectedPlayer (GfnPlayerState), AbilityUsed}) - a delegate call = ProcessEvent = hookable. One broadcast reaches
+-- every bound component: deduped per (player, victim, ability) within AB_DEDUP_MS. It is the attacker of the next
+-- malfunction of that victim (MALF_BLAME_MS) and, for a "Hit opponents with Abilities" contract, the hit itself.
+M.AB_DEDUP_MS = 250
+M.AB_HIT_FN = "/Script/Griffin.VehicleGameplayComponent:OnPlayerHitTargetWithAbility"
+M.CAR_COND_FN = "/Script/Griffin.VehicleGameplayComponent:OnConditionStarted"
+function M.onAbilityHit(action)
+    if St.phase ~= "RACING" then return end
+    fired("abilityhit")
+    local a = U.unwrap(action)
+    local by, vic, ab = nil, nil, nil
+    pcall(function() by = a.Player end)
+    pcall(function() vic = a.AffectedPlayer end)
+    pcall(function() ab = a.AbilityUsed end)
+    local ik, vk = psKeyOfAny(by), psKeyOfAny(vic)
+    if not ik or not vk or ik == vk then return end
+    if T.gen ~= St.worldGen then resetWorld() end
+    local now = St.nowMs()
+    local pair = tostring(ik) .. ">" .. tostring(vk) .. ">" .. tostring(U.ok(ab) and U.key(ab) or 0)
+    if T.abSeen[pair] and now - T.abSeen[pair] < M.AB_DEDUP_MS then return end
+    T.abSeen[pair] = now
+    T.hits[vk] = { by = ik, at = now }
+    bookEvent(ik, "abilityhit", "ability hit on an opponent")
 end
 
 -- a vehicle's condition started (CriticalMalfunctionComponent:OnConditionStarted_OnServer): a malfunction of an opponent
 -- he hit in the last MALF_BLAME_MS is his
 M.MALF_BLAME_MS = 4000
-function M.onCondition(comp, tag)
+-- rel103: two sources (CriticalMalfunctionComponent:OnConditionStarted_OnServer and the car's
+-- VehicleGameplayComponent:OnConditionStarted, both on the victim's car): one condition start = one booking
+M.COND_DEDUP_MS = 500
+function M.onCondition(comp, tag, src)
+    if St.phase ~= "RACING" then return end
+    fired(src or "condition")
     comp, tag = U.unwrap(comp), U.unwrap(tag)
     local name = ""
     pcall(function() name = U.str(tag.TagName) end)
     if not tostring(name):lower():find("malfunction", 1, true) then return end
+    fired("malfunction")
     local vk = nil
     pcall(function() vk = psKeyOfPawn(comp:GetOwner()) end)
-    local h = vk and T.hits[vk] or nil
-    if h and St.nowMs() - h.at <= M.MALF_BLAME_MS then bookEvent(h.by, "malfunction", name) end
+    if not vk then return end
+    if T.gen ~= St.worldGen then resetWorld() end
+    local now = St.nowMs()
+    local ck = tostring(vk) .. ">" .. tostring(name)
+    if T.condSeen[ck] and now - T.condSeen[ck] < M.COND_DEDUP_MS then return end
+    T.condSeen[ck] = now
+    -- rel103 (hook audit finding B): the game's own rule (UMalfunctionRequirement::OnVehicleConditionStarted) asks the
+    -- VICTIM's VehicleState:IsVehicleContributingToCondition(Condition, holder's pawn, out) - no damage / blame window.
+    -- Asked for each guest with a malfunction contract; the hit window below stays as the fallback.
+    local booked = false
+    local car = nil
+    pcall(function() car = comp:GetOwner() end)
+    local vs = nil
+    if U.ok(car) then pcall(function() vs = car.VehicleState end) end
+    if U.ok(vs) then
+        for _, tr in pairs(T.tracks) do
+            if tr.t.goal == "malfunction" and not tr.out and tr.psKey ~= vk then
+                local gcar = nil
+                for _, e in ipairs(guests()) do
+                    if tostring(e.ctrlId) == tostring(tr.ctrlId) and U.ok(e.pc) then pcall(function() gcar = e.pc.Pawn end) end
+                end
+                if U.ok(gcar) then
+                    local okQ, r = U.pcallFn(vs, M.CONTRIB_FN, "IsVehicleContributingToCondition", tag, gcar, M.CONTRIB_OUT)
+                    if St.dropOutRefs then St.dropOutRefs(M.CONTRIB_OUT) end
+                    if not okQ then                    -- the tag as a plain struct table (UE4SS struct param)
+                        okQ, r = U.pcallFn(vs, M.CONTRIB_FN, "IsVehicleContributingToCondition",
+                            { TagName = U.fname(name) }, gcar, M.CONTRIB_OUT)
+                        if St.dropOutRefs then St.dropOutRefs(M.CONTRIB_OUT) end
+                    end
+                    if not T.contribLogged and okQ then
+                        T.contribLogged = true
+                        U.log(TAG, "malfunction contract: the game's contributor check works (%s: %s, P%s) (V-BK-MALF)",
+                            name, tostring(r), tostring(tr.pnum))
+                    end
+                    fired(okQ and (r == true and "contribyes" or "contribno") or "contriberr")
+                    if not okQ and not T.contribWarned then
+                        T.contribWarned = true
+                        U.warn(TAG, "IsVehicleContributingToCondition failed (%s): the hit window decides", tostring(r))
+                    end
+                    if okQ and r == true then
+                        booked = true
+                        bookEvent(tr.psKey, "malfunction", name .. ", his contribution (the game's rule)")
+                    end
+                end
+            end
+        end
+    end
+    if booked then return end
+    local h = T.hits[vk]
+    if h and now - h.at <= M.MALF_BLAME_MS then bookEvent(h.by, "malfunction", name .. ", hit window") end
+end
+M.CONTRIB_FN = "/Script/Griffin.VehicleState:IsVehicleContributingToCondition"
+M.CONTRIB_OUT = (St.outParams or function(t) return t end)({})
+
+-- rel103: the hooks' fire counts of this race (once per race world, at the first guest's race end)
+function M.logFires(why)
+    if T.firesLogged == St.worldGen then return end
+    T.firesLogged = St.worldGen
+    local f = T.fires or {}
+    U.log(TAG, "attribution hooks this race (%s): ability hits %d, blame %d, damage %d, conditions %d + %d (car), "
+        .. "malfunctions %d (contributor yes %d / no %d / error %d), pre-race checks polled %d / native fires %d, "
+        .. "booked events %d", tostring(why), f.abilityhit or 0, f.blame or 0, f.damage or 0, f.condition or 0,
+        f.carcondition or 0, f.malfunction or 0, f.contribyes or 0, f.contribno or 0, f.contriberr or 0, f.pfpoll or 0,
+        f.pfnative or 0, T.stats.events)
 end
 
 ---------------------------------------------------------------------------------------------------- live: race end
@@ -733,6 +980,7 @@ end
 -- (pos = his place for the check-in's form; info = { planet, kind })
 function M.raceResult(e, p, info)
     if opt("CouchBackers", true) == false then return nil end
+    if T.gen == St.worldGen then U.try(TAG, M.logFires, "race end") end
     info = info or {}
     local b = M.ensure(e.ctrlId, e.pnum, "race end")
     if not b then return nil end
@@ -906,12 +1154,18 @@ function M.init()
         pre = function(_, action) U.try(TAG, M.onTakedown, action) end }, TAG)
     U.hook("/Script/Griffin.PlayerPreFlightCheckComponent:Server_OnSuccessfulPreFlightCheck", {
         pre = function(ctx) U.try(TAG, M.onPreflight, ctx) end }, TAG)
+    -- couch-fix74's Blueprint hook (M.IGN_SUCCESS) never fires in this UE4SS (rel103 hook audit): the screens' SuccessCount
+    -- is polled instead (M.pollPreflight); the native audio-governor delegate target only counts fires (evidence)
+    U.hook(M.PREFLIGHT_NATIVE_FN, { pre = function() fired("pfnative") end }, TAG)
     U.hook("/Script/Griffin.VehicleBlameComponent:Server_AddBlameContributor", {
         pre = function(ctx, aggr, _, reason) U.try(TAG, M.onBlame, ctx, aggr, reason) end }, TAG)
     U.hook("/Script/Griffin.VehicleGameplayComponent:Server_OnVehicleDamaged", {
         pre = function(_, victim, inst) U.try(TAG, M.onDamaged, victim, inst) end }, TAG)
     U.hook("/Script/Griffin.CriticalMalfunctionComponent:OnConditionStarted_OnServer", {
-        pre = function(ctx, tag) U.try(TAG, M.onCondition, ctx, tag) end }, TAG)
+        pre = function(ctx, tag) U.try(TAG, M.onCondition, ctx, tag, "condition") end }, TAG)
+    -- rel103: the attribution and condition paths the game itself broadcasts (delegate-bound UFunctions: ProcessEvent)
+    U.hook(M.AB_HIT_FN, { pre = function(_, action) U.try(TAG, M.onAbilityHit, action) end }, TAG)
+    U.hook(M.CAR_COND_FN, { pre = function(ctx, tag) U.try(TAG, M.onCondition, ctx, tag, "carcondition") end }, TAG)
     St.on("world", TAG, function() resetWorld() end)
 end
 

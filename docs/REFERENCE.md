@@ -1,8 +1,8 @@
 # SWGRCouch: FREE MODE (solo or couch split screen) and self-hosted races for STAR WARS: Galactic Racer
 
-UE4SS Lua mod, version 1.0.2 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
-5.7.4 shipping, Denuvo, project codename Griffin; hotfix build CL 382493), UE4SS Galactic Racer Edition (open beta,
-2026-10-08). The main-menu tab was called SPLIT SCREEN until 0.10.0; it is now **FREE MODE** (the mod is for one
+UE4SS Lua mod, version 1.0.3 (`consts.lua C.VERSION`). Target: the Steam build of STAR WARS: Galactic Racer (UE
+5.7.4 shipping, Denuvo, project codename Griffin; game update CL 386500 of 2026-10-22), UE4SS Galactic Racer Edition
+V0.9.4 (open beta, 2026-10-22). The main-menu tab was called SPLIT SCREEN until 0.10.0; it is now **FREE MODE** (the mod is for one
 player too). This file ships twice: as `docs/REFERENCE.md` and as `SWGRCouch/README.md`, which `install.sh` copies into
 the game's mod folder (`ue4ss/Mods/SWGRCouch/README.md`).
 
@@ -360,6 +360,18 @@ Still limited:
   reproduced with the test pads.
 - Split graphics **quality** = Lumen off + no virtual shadow maps at full resolution (measured: 112 -> 161 fps in a
   2P race; the old quality preset gave no gain). The guest-press guard now covers RACE, ADD PLAYERS and OPTIONS.
+
+### 1.13 1.0.3 (2026-10-24): the v1.0.2 couple report (13 points)
+
+| Part | What it does | Keys / log |
+|---|---|---|
+| crash triage (#8) | class pins capped at 1500 (was 400) and re-checked in `GameInstance.ReferencedObjects` at each phase change, before a travel and each world: a lost pin is appended again. `Mods/SWGRCouch/session-trail.txt` (+ `session-trail-prev.txt`): banner, native filter build, phases with maps, pins per world, the first WARN / ERROR lines - it survives a restart (UE4SS.log does not) | `ClassPinCap`, `ClassPinLossCheck`, `SessionTrail`, `TrailMaxLines`, `TrailMaxWarnLines` |
+| Friendly fire (#12) | OPTIONS › COUCH CAMPAIGN › Friendly fire (`settings.txt CouchFriendlyFire = on/off`, default on = solo's rule). OFF: a human's Ion Bolt / Multi-Bolt lock on a teammate is held at 0, his Ion Blast / Shockwave / attacking Vents pass through a teammate, a Shockwave push on him is 0. AI unchanged; collisions and mines not filtered | `CouchFriendlyFireLock`, `CouchFriendlyFireOverlapSwap`, `CouchFriendlyFireAnyRace`; V-FF-01..05 |
+| HUD (#2 #9 #10 #11) | ramjet bar red only while redlining / grace (states 4, 5; the cool-down after every burn is no longer red); Ion Bolt lock reticles rebuilt for a HUD whose marker VMs are bound to another player (LOCKDIAG lines); the game's player tag over every other local human's car in each split view; eliminator / ramjet-distance / bonus-time notices at 60 % in split races | `UxSplitOverheatStates`, `HudLockFix`, `HudLockDiag`, `HudMateTags`, `HudMateTagScale`, `HudMateTagMaxDist`, `HudSplitNoticeScale` |
+| campaign (#1 #4 #5 #6) | P2's standing paddock hint *P2: HOLD A FOR YOUR GARAGE*; P2's "Complete Pre-Race Checks" contract counts the real checks (the screens' success event); P2's RACER STYLE grid D-pad follows the game's 4-wide grid; FEET FIRST pays P1 as in solo when P2 finished first | `CouchGarageStanding`, `CouchGarageStandingHoldMs`, `CouchStyleGridCols` |
+| controllers (#3 #7 #13) | no shared-screen pad-id swap while a local human still races (P1 wrecked / finished while P2 drives); a racing car's raw input follows its live pad id; REASSIGN CONTROLLERS in the race pause menu (§3.4) | `CouchNoSwapWhileRacing`, `InputFixLiveIdWhileRacing`, `Reassign*`; V-CC-72, V-INP-13, V-RA-01..05 |
+| backer contracts | a guest's "Trigger opponents' System Malfunction" and "Hit opponents with Abilities" count from the game's own ability-hit event (`VehicleGameplayComponent:OnPlayerHitTargetWithAbility`); the old attribution hooks were server RPCs the host calls directly (never fired). Race end: `attribution hooks this race: ...` | - |
+| packaging | made for UE4SS Galactic Racer Edition V0.9.4: the game-folder zips add only `UE4SS_Signatures/GNatives.lua` and `GUObjectHashTables.lua` (V0.9.4 ships neither; without them "GNatives not found" / "Failed to find FUObjectHashTables::Get" and a crash at every couch race load on CL386500, live 2026-10-24) and never replace one of its own; `install.sh` adds a signature file only where UE4SS has none | - |
 
 ## 2. Install (Lutris, Proton, Steam in the prefix)
 
@@ -771,6 +783,14 @@ touches no front-end page (the "launch hold": the 0.12.0-dev pages crashed the g
   player's pilot, vehicle and loadout applied again. Whoever paused can use it (a guest's presses go through the menu
   bridge, `MenuBridgeGuestPauseMenu`). Never offered online, in the campaign or arcade, or on a network client. B does
   not close that dialog for P1 (the game's dialog has no B shortcut): CANCEL is one D-pad press away.
+- **REASSIGN CONTROLLERS** (couch-fix72, `reassign.lua` + `padmap.lua`): the last row of the race pause menu in every
+  split race (FREE MODE, GRAND PRIX, COUCH CAMPAIGN). After a disconnect / reconnect two pads can come back on each
+  other's slots (a pad's ControllerId is its enumeration slot): A on the row, then every player presses A on the pad he
+  holds - the first pad is P1, the next P2 (P3, P4); applied as soon as everybody pressed, or when P1's new pad presses
+  B. B before any A, 15 s without a press or leaving the pause cancels. Each player keeps his seat, car, credits and
+  progress (the mod knows him by his ident; only his pad id moves). Needs the input DLL's pad watch. `Reassign*`,
+  V-RA-01..05. Also couch-fix72: no shared-screen pad-id swap while a local human still races (`CouchNoSwapWhileRacing`,
+  V-CC-72), and a racing car's raw input always follows its live pad id (`InputFixLiveIdWhileRacing`, V-INP-13).
 - **Photo mode** (pause menu): the game puts every local player into photo mode, each pad drives its own photo camera
   in its own view; the mod's HUD, view guard and input helpers stay out of the way until it closes.
 - When P1 finishes first, the results panel is held back until every local player has finished

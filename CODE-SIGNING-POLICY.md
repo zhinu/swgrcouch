@@ -14,7 +14,7 @@ Be clear about what that means:
 
 | 1.0.2 `swgr_inputfilter.dll` | sha256 |
 |---|---|
-| signed by the author (shipped in the 1.0.2 zips and as the bare download) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
+| signed by the author (shipped in the 1.0.2 and 1.0.3 zips and as the bare download; the DLL is unchanged in 1.0.3) | `ed491789b9f967b97d79553a610520f5b861a111b544c3e0d581e1cc8a0aef00` |
 | unsigned reproducible build (`build.sh`, LLVM 23.1.1) | `4363c77db01d49160c23e969653861209bb611439c1f98a6931cf68e39a1e300` |
 
 Public certificate: [`docs/signing/swgrcouch-cert.pem`](https://git.jules.my/jules/swgrcouch/src/branch/main/docs/signing/swgrcouch-cert.pem)

@@ -229,6 +229,23 @@ local function pcOf(p)
     return nil
 end
 
+-- couch-fix76 (AUTO-172): the log note of a bridged press under the shared-screen swap. The swap gives the screen
+-- owner's PC P1's PHYSICAL pad: pad id 0, or the pad a REASSIGN CONTROLLERS moved P1 onto (padmap) - the note names
+-- the pad's real holder and id instead of assuming "pad id 0 = P1".
+local function swapNote(p)
+    if not (S.couchMode and p ~= 1) then return "" end
+    local live = nil
+    for _, e in ipairs(U.localPlayersRO()) do if e.index == p then live = e.ctrlId end end
+    local holder = "P1"
+    local okM, PM = pcall(require, "padmap")
+    if okM and type(PM) == "table" and type(PM.active) == "function" and PM.active() and type(live) == "number" then
+        local okI, ident = pcall(PM.identOfPad, live)
+        if okI and ident ~= 0 then holder = "ident " .. tostring(ident) .. "'s" end
+    end
+    return string.format(" [%s pad (id %s), on P%d's PC: ids swapped]", holder == "P1" and "P1's" or holder,
+        tostring(live), p)
+end
+
 local function ownerP(w)
     local ok, o = pcall(U.callMethod, w, "GetOwningPlayer")
     if ok then return pnumOf(o) end
@@ -342,7 +359,9 @@ local function padEdges()
     if not okP or type(pads) ~= "table" then return out end
     local uid = 0
     pcall(function()
-        local o = U.mod("couch").originalIdOf(pcOf(1))
+        local c = U.mod("couch")
+        local o = c.originalIdOf(pcOf(1))
+        if type(o) ~= "number" and type(c.p1Pad) == "function" then o = c.p1Pad() end   -- couch-fix72: P1's pad
         if type(o) == "number" then uid = o end
     end)
     local e = pads[uid]
@@ -371,10 +390,19 @@ local function p1Reward(n)
     local okF, F = pcall(require, "couchfence")
     return okF and type(F) == "table" and F.isP1Reward(n) == true
 end
+-- couch-fix72: "pad id 0" = P1's physical pad = couch.p1Pad() (0 unless REASSIGN CONTROLLERS moved him)
+local function p1PadId()
+    local c = package.loaded["couch"]
+    if type(c) == "table" and type(c.p1Pad) == "function" then
+        local ok, v = pcall(c.p1Pad)
+        if ok and type(v) == "number" then return v end
+    end
+    return 0
+end
 local function holdsPad0(pc)
     local id = nil
     pcall(function() id = U.cdo("GameplayStatics"):GetPlayerControllerID(pc) end)
-    return id == 0
+    return id ~= nil and id == p1PadId()
 end
 
 local function scan(now, force)
@@ -1183,9 +1211,10 @@ M._sponsorLeaving = sponsorLeaving
 -- the PC on pad id 0 right now (P1's physical pad: the swapped screen owner, or P1's own PC); nil = none
 local function pad0Pc()
     local GS = U.cdo("GameplayStatics")
+    local p1pad = p1PadId()
     for _, lp in ipairs(U.localPlayersRO()) do
         local okI, id = pcall(function() return GS:GetPlayerControllerID(lp.pc) end)
-        if okI and id == 0 and U.ok(lp.pc) then return lp.pc end
+        if okI and id == p1pad and U.ok(lp.pc) then return lp.pc end
     end
     return nil
 end
@@ -1804,6 +1833,17 @@ local function resumeOnly(e, p)
 end
 
 local function click(e, p, what)
+    -- rel103 (live 2026-10-24 10:05:57): REASSIGN CONTROLLERS reads every A by the DLL's pad watch; the same press bridged
+    -- here 140 ms later clicked RESUME on the pause menu and ended the flow (the swap never happened). While a flow runs,
+    -- and shortly after it ends, a pause screen gets no bridged press.
+    if type(e.cls) == "string" and e.cls:find("^WBP_Pause") then
+        local ra = St.reassign
+        if type(ra) == "table" and (ra.flow ~= nil or St.nowMs() - (tonumber(ra.endedAt) or -1e12) < 800) then
+            U.logEvery("mb.reassign", 2000, TAG, "P%d %s on %s: not bridged (REASSIGN CONTROLLERS reads the pads)", p,
+                tostring(what), e.cls)
+            return
+        end
+    end
     if e.dialog then return dialogPress(e, p, what) end
     if resumeOnly(e, p) then
         local own = ownerP(e.w)                       -- read before the click: RESUME closes the screen (garbage after)
@@ -1836,8 +1876,7 @@ local function click(e, p, what)
     -- couch-rewards2: in the couch's shared phases the bridged PC is the one holding pad id 0 = P1's PHYSICAL pad;
     -- "P2 A" there (ids swapped: that PC is P2's) was P1's own press
     U.log(TAG, "P%d %s -> %s %s (%s): %s%s (V-MB-01/02)", p, what, e.cls, lname(b), how,
-        ok and "clicked" or ("error " .. tostring(err)),
-        (S.couchMode and p ~= 1) and " [P1's pad, on P" .. tostring(p) .. "'s PC: ids swapped]" or "")
+        ok and "clicked" or ("error " .. tostring(err)), swapNote(p))
 end
 
 ---------------------------------------------------------------------------------------------------- input modes
@@ -2215,9 +2254,10 @@ function M.fastTick()
     if sharedP then
         local GS = U.cdo("GameplayStatics")
         S.couchPc = nil
+        local p1pad = p1PadId()
         for _, lp in ipairs(U.localPlayersRO()) do
             local okI, id = pcall(function() return GS:GetPlayerControllerID(lp.pc) end)
-            if okI and id == 0 then couchOnly, S.couchPc = U.key(lp.pc), lp.pc end
+            if okI and id == p1pad then couchOnly, S.couchPc = U.key(lp.pc), lp.pc end
         end
         if not couchOnly then S.pending = nil; return end
         -- world changes: no widget scan inside couch.lua's quiet window (FindAllOf + UFunction crashes, 2026-10-14)

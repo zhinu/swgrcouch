@@ -1203,6 +1203,33 @@ function M.normalIds(ids, p1Key)
     return out
 end
 
+-- couch-fix72 (#13 REASSIGN CONTROLLERS, padmap.lua): the NORMAL ids. A reassignment puts each local player on the pad
+-- he holds (P1 may be on pad id 1, a guest on 0); those are the normal ids from then on, and every normalisation here
+-- (an unswap without a record, the travel release AUTO-159, the park / temp-id repair, the end of a garage turn) puts
+-- the players back on them, never on "P1 = 0". An empty map (the default) = M.normalIds, the rule before fix72.
+local function padmapMod()
+    local ok, m = pcall(require, "padmap")
+    return (ok and type(m) == "table") and m or nil
+end
+local function normalWant(ids, p1Key)
+    local PM = padmapMod()
+    if PM then
+        local okN, w = pcall(PM.normalIds, ids, PARK_ID)
+        if okN and type(w) == "table" then return w, true end
+    end
+    return M.normalIds(ids, p1Key), false
+end
+M._normalWant = normalWant
+-- P1's physical pad id: 0, or the pad a reassignment gave him (padmap.p1Pad)
+function M.p1Pad()
+    local PM = padmapMod()
+    if PM then
+        local ok, v = pcall(PM.p1Pad)
+        if ok and type(v) == "number" then return v end
+    end
+    return 0
+end
+
 -- a guest split is open (each module asked without loading it: the simulator and tests load only some)
 local function splitOpen()
     local r = package.loaded["couchroot"]
@@ -1274,7 +1301,7 @@ local function setIds(ownerPc)
     local ok = pcall(function()
         if ownerPc then
             -- no record yet: the live ids, cleaned of a park / swap left by a previous mod instance (hot reload)
-            local orig = swap.orig or M.normalIds(liveIds(GS, lp), p1Key)
+            local orig = swap.orig or normalWant(liveIds(GS, lp), p1Key)
             local park = parkWanted()
             local want = wantedIds(orig, p1Key, U.key(ownerPc), park, swap.hold == true)
             if not want then error("no swap plan for the owner") end
@@ -1283,7 +1310,7 @@ local function setIds(ownerPc)
             swap.parked, swap.parkFor = park, park and orig[U.key(ownerPc)] or nil
         else
             -- no record (hot reload while swapped): P1 back on 0, the holder of 0 takes P1's id (M.normalIds)
-            local want = swap.orig or M.normalIds(liveIds(GS, lp), p1Key)
+            local want = swap.orig or normalWant(liveIds(GS, lp), p1Key)
             applyIds(GS, lp, want)
             swap.orig = nil
             swap.parked, swap.parkFor = false, nil
@@ -1943,7 +1970,7 @@ local function imcOpts() return { bIgnoreAllPressedKeysUntilRelease = true } end
 -- boost the owner's IMC_UI (re-asserted every swap tick: pause.lua normalises guests on its own edges)
 function M.ownerUiInput(ownerPc, why)
     if opt("CouchOwnerUiImc", true) == false or not U.ok(ownerPc) then return false end
-    local imc = findL(IMC_UI_PATH)
+    local imc = (type(U.imcUi) == "function") and (U.imcUi()) or findL(IMC_UI_PATH)   -- couch-fix76 AUTO-171
     local sub = eiOf(ownerPc)
     if not (imc and sub) then
         U.logEvery("couch.imc.missing", 10000, TAG, "owner IMC_UI not boosted: %s", imc and "no input subsystem" or "IMC_UI not loaded")
@@ -1972,7 +1999,7 @@ function M.restoreOwnerUiInput(why)
     local r = imcRec
     imcRec = nil
     if not r then return end
-    local imc = findL(IMC_UI_PATH)
+    local imc = (type(U.imcUi) == "function") and (U.imcUi()) or findL(IMC_UI_PATH)   -- couch-fix76 AUTO-171
     -- U.alive: a release at a travel (couch-fix65 M.releaseIds) may name the previous world's owner PC
     local sub = U.alive(r.pc) and eiOf(r.pc) or nil
     if not (imc and sub) then return end
@@ -2179,8 +2206,9 @@ local function playersChanged(why)
     if n >= 2 then
         M.setSwap(false, why)
     else
-        -- one local player left: nobody to swap with; P1 takes id 0 back
-        pcall(function() U.cdo("GameplayStatics"):SetPlayerControllerID(lp[1].pc, 0) end)
+        -- one local player left: nobody to swap with; P1 takes id 0 back (couch-fix72: his reassigned pad, if any)
+        local p1pad = M.p1Pad()
+        pcall(function() U.cdo("GameplayStatics"):SetPlayerControllerID(lp[1].pc, p1pad) end)
         U.log(TAG, "pad ids normal (%s: P1 alone)", tostring(why))
         U.try(TAG, M.saveOwnerSync, "P1 alone")
     end
@@ -2348,7 +2376,7 @@ local function repairIds()
     local bad = false
     for _, id in pairs(ids) do if id >= PARK_ID then bad = true end end
     if not bad then return end
-    local want = M.normalIds(ids, U.key(lp[1].pc))
+    local want = normalWant(ids, U.key(lp[1].pc))
     local ok = pcall(function() applyIds(GS, lp, want) end)
     U.warn(TAG, "pad ids repaired: a local player was left on a park / temporary id (hot reload?): %s",
         ok and "normal ids again" or "FAILED")
@@ -2381,11 +2409,16 @@ function M.releaseIds(why)
     local GS = U.cdo("GameplayStatics")
     local ids = liveIds(GS, lp)
     local p1Key = U.key(lp[1].pc)
+    local want, mapped = normalWant(ids, p1Key)
     local bad = ids[p1Key] ~= nil and ids[p1Key] ~= 0
+    -- couch-fix72: with a pad map the normal ids are the map's (P1 may be on his reassigned pad): any other id is bad
+    if mapped then
+        bad = false
+        for k, id in pairs(ids) do if want[k] ~= nil and want[k] ~= id then bad = true end end
+    end
     for _, id in pairs(ids) do if id >= PARK_ID then bad = true end end
     activeMemo.at = -1e12
     if not bad then return had end
-    local want = M.normalIds(ids, p1Key)
     local ok = pcall(function() applyIds(GS, lp, want) end)
     swap.repairWanted = nil
     U.log(TAG, "AUTO-159 pad ids released at the travel (%s): P1 back on id 0, every guest on his own id - %s", why,
@@ -3121,7 +3154,8 @@ local function sinkUser0(rec, why)
     if not sink then return false end
     local GS = U.cdo("GameplayStatics")
     local ok = false
-    local moved = pcall(function() GS:SetPlayerControllerID(guest, 0) end)
+    local p1pad = tonumber(rec.p1Pad) or 0                -- couch-fix72: P1's physical pad (0 unless reassigned)
+    local moved = pcall(function() GS:SetPlayerControllerID(guest, p1pad) end)
     if moved then ok = pcall(function() sink:SetUserFocus(guest) end) end
     if rec.parked then
         local back = pcall(function() GS:SetPlayerControllerID(guest, PARK_ID) end)
@@ -3164,20 +3198,29 @@ function M.garageHold(ctrlId, on)
         local orig = liveIds(GS, lp)
         local p1Key = U.key(lp[1].pc)
         if garageRec and garageRec.orig then orig = garageRec.orig end      -- held twice: keep the first record
+        -- couch-fix72: ctrlId is the guest's ident (join.lua); the ids moved are PADS - his pad and P1's pad (0, or the
+        -- pads a reassignment gave them: padmap.lua)
+        local PM = padmapMod()
+        local guestPad = ctrlId
+        if PM then
+            local okG, gp = pcall(PM.padOfIdent, ctrlId)
+            if okG and type(gp) == "number" then guestPad = gp end
+        end
+        local p1Pad = orig[p1Key] or 0
         local want, guestKey = {}, nil
         for _, e in ipairs(lp) do
             if U.ok(e.pc) then
                 local k = U.key(e.pc)
                 local id = orig[k]
-                if e.index == 1 then want[k] = ctrlId
-                elseif id == ctrlId then want[k] = 0; guestKey = k
+                if e.index == 1 then want[k] = guestPad
+                elseif id == guestPad then want[k] = p1Pad; guestKey = k
                 else want[k] = id end
             end
         end
         applyIds(GS, lp, want)
         garageHeld = ctrlId
         garageRec = { ctrlId = ctrlId, orig = orig, p1Key = p1Key, guestKey = guestKey, parked = false, resinks = 0,
-                      at = St.nowMs() }
+                      at = St.nowMs(), p1Pad = p1Pad, guestPad = guestPad }
         local excl = opt("CouchGarageExclusive", true) ~= false and guestKey ~= nil
         if excl then
             sinkUser0(garageRec, "turn start")                  -- the guest's PC is on id 0 right now
@@ -3224,13 +3267,13 @@ function M.garageHold(ctrlId, on)
     else
         local rec = garageRec
         garageHeld, garageRec = nil, nil
-        local want = (rec and rec.orig) or M.normalIds(liveIds(GS, lp), U.key(lp[1].pc))
+        local want = (rec and rec.orig) or normalWant(liveIds(GS, lp), U.key(lp[1].pc))
         -- a PC that joined during the turn keeps its id; one that left is skipped by applyIds
         applyIds(GS, lp, want)
         local ids = liveIds(GS, lp)
-        if ids[U.key(lp[1].pc)] ~= 0 then
-            applyIds(GS, lp, M.normalIds(ids, U.key(lp[1].pc)))     -- the record was stale: P1 back on 0 at least
-        end
+        -- the record was stale: P1 back on his pad at least (0, or his reassigned pad: couch-fix72)
+        local norm = normalWant(ids, U.key(lp[1].pc))
+        if ids[U.key(lp[1].pc)] ~= norm[U.key(lp[1].pc)] then applyIds(GS, lp, norm) end
         for _, x in pairs((rec and rec.xs) or {}) do
             if U.ok(x.sink) then pcall(function() x.sink:RemoveFromParent() end) end
         end
@@ -3343,7 +3386,8 @@ function M.leaveTick()
     local rt = package.loaded["couchroot"]
     if not area and type(rt) == "table" and type(rt.active) == "function" then pcall(function() area = rt.active() == true end) end
     if not area and type(cp) == "table" and type(cp.garageOfferText) == "function" then
-        pcall(function() area = cp.garageOfferText() ~= nil end)
+        -- couch-fix74: only the offer that answers B (NO THANKS); the paddock's standing HOLD A hint has no B
+        pcall(function() local t = cp.garageOfferText(); area = t ~= nil and t[2] ~= nil end)
     end
     if opt("CouchHoldBLeave", true) == false or not LEAVE_PHASES[St.phase] or garageHeld ~= nil or area then
         leaveReset()
@@ -3411,10 +3455,88 @@ local function raceTick()
     U.try(TAG, M.skipTick)
 end
 
+-- couch-fix72 (player reports #7 / #3, v1.0.2): NO PAD-ID SWAP WHILE A LOCAL HUMAN STILL RACES. The swap gives the
+-- shared screen's owner (the LAST local PC: P2 in 2P) P1's pad id. Enhanced Input routes by that live id, so P1's pad
+-- then drives P2's PlayerController: P2's car's own Enhanced Input actions (Boost = afterburner press, ChangeBoost =
+-- engine switch / ramjet, TriggerAbility) follow P1's pad, while the native raw filter (inputfix: each subsystem keeps
+-- its ORIGINAL pad while swapped) keeps steering / throttle on P2's pad - exactly report #7 ("steering/throttle on P2's
+-- controller, Afterburner and engine switching only on P1's controller FOR THE SECOND PLAYER, after P1's vehicle
+-- crashed out") and the milder #3 ("when P1 boosts, P2 seems to receive a boost as well": P1's A = P1's raw boost on
+-- his own car + an IA_Veh_Boost press on P2's). The swap runs in the SHARED phases (OTHER / POSTRACE); POSTRACE comes
+-- from the game (GameState.bIsRaceFinished or CSM_RF_PostRacePhase, phase.lua), and a solo-built race flow follows P1:
+-- P1 out (wrecked) puts the results flow up - the guest-owned WBP_PostRace_Info_C - while P2 still drives. So in a
+-- race world, while any local player's racer IsStillRacing(), POSTRACE is a race phase for the swap: no swap, a swap on
+-- ends. cfg.CouchNoSwapWhileRacing = false: the pre-fix72 behaviour.
+-- VERIFY(V-CC-72): never "pad ids SWAPPED" while a "[wreck] ... still racing" human drives; once: "POSTRACE while P2
+-- still races: pad ids stay normal (fix72)".
+local racingMemo = { at = -1e12, gen = nil, v = false, who = nil }
+local STILL_RACING_FN = "/Script/Griffin.PlayerRaceEventComponent:IsStillRacing"
+function M.humanStillRacing(force)
+    local now = St.nowMs()
+    if not force and racingMemo.gen == St.worldGen and now - racingMemo.at < 250 then return racingMemo.v, racingMemo.who end
+    racingMemo.gen, racingMemo.at, racingMemo.v, racingMemo.who = St.worldGen, now, false, nil
+    local gs = U.gs()
+    if not (U.ok(gs) and U.isA(gs, "/Script/Griffin.RacingGameState")) then return false, nil end
+    local tko = package.loaded["takeover"]
+    for _, e in ipairs(U.localPlayersRO()) do
+        -- rel103 (live 2026-10-24 10:07): a guest who sits the race out has NO car and his racer component still says
+        -- IsStillRacing: he kept the shared-screen swap off and P1's A could not drive the guest-owned results. Only a
+        -- local player in a car races.
+        local car = nil
+        if U.ok(e.pc) then pcall(function() car = e.pc.Pawn end) end
+        if U.ok(e.pc) and U.ok(car) and U.isVehicle(car) then
+            local ps = nil
+            if type(tko) == "table" and type(tko.racerPSFor) == "function" then
+                local okP, r = pcall(tko.racerPSFor, e.pc)
+                if okP and U.ok(r) then ps = r end
+            end
+            if not ps then pcall(function() ps = e.pc.PlayerState end) end
+            local rec = nil
+            if U.ok(ps) then pcall(function() rec = ps.RaceEventComponent end) end
+            if U.ok(rec) then
+                local ok, r = U.pcallFn(rec, STILL_RACING_FN, "IsStillRacing")
+                if ok and r == true then
+                    racingMemo.v, racingMemo.who = true, e.index
+                    return true, e.index
+                end
+            end
+        end
+    end
+    return false, nil
+end
+
+-- couch-fix72 (#13, reassign.lua): the local players onto new pad ids (want = {[pcKey] = id}) through the same
+-- temp-id path as the swap. Refused while a shared-screen swap or a garage turn holds the ids. -> ok, moved | why
+function M.applyPadIds(want, why)
+    if swap.on then return false, "the pad ids are swapped for a shared screen" end
+    if garageHeld ~= nil then return false, "a garage turn holds the pad ids" end
+    local lp = U.localPlayers()
+    if #lp < 1 then return false, "no local player" end
+    local GS = U.cdo("GameplayStatics")
+    local ok, n = pcall(applyIds, GS, lp, want)
+    U.localPlayersForget()
+    activeMemo.at = -1e12
+    if not ok then return false, tostring(n) end
+    U.log(TAG, "pad ids moved for %s: %d local player(s) (fix72)", tostring(why), n)
+    return true, n
+end
+
 function M.tick()
     if swap.on then playersChanged("local players changed") end
     if garageHeld ~= nil then return end           -- garagenative turn: ids held, no swap / park / repair
     if RACE_TICK_PHASES[St.phase] then return raceTick() end
+    if St.phase == "POSTRACE" and opt("CouchNoSwapWhileRacing", true) ~= false then
+        local racing, who = M.humanStillRacing()
+        if racing then
+            if racingMemo.logged ~= St.worldGen then
+                racingMemo.logged = St.worldGen
+                U.log(TAG, "POSTRACE while P%s still races: pad ids stay normal, no shared-screen swap until every local "
+                    .. "player is out of the race (fix72 #7/#3, V-CC-72)", tostring(who))
+            end
+            if swap.on then M.setSwap(false, "a local player still races (fix72)") end
+            return
+        end
+    end
     -- ids only (also inside the quiet window: a world change ends a split without its close)
     U.try(TAG, M.parkSync, "tick")
     -- couch-fix53: a map input hold whose couchpanel hold is gone (reset / reload) ends here
